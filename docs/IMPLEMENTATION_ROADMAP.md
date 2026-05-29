@@ -4,7 +4,25 @@ Este documento serve como um roteiro leve para implementar o **AstroFetch** com 
 
 O AstroFetch não é um produto empresarial nem um jogo. É um app pessoal de terminal, escrito em Rust, inspirado no estilo do `screenFetch`: ele mostra informações do sistema ao lado de uma imagem ASCII astrofísica gerada de forma procedural.
 
-A prioridade é manter o projeto simples, bonito, rápido, hackeável e adequado para portfólio.
+A prioridade é manter o projeto simples, bonito, rápido, hackeável, multiplataforma e adequado para portfólio.
+
+## Plataformas-Alvo
+
+O AstroFetch deve funcionar em:
+
+- Linux;
+- macOS;
+- Windows.
+
+A experiência principal deve ser multiplataforma. Recursos específicos de sistema operacional devem ser opcionais e best-effort.
+
+### Política de compatibilidade
+
+- O comando padrão `astrofetch` deve funcionar em Linux, macOS e Windows.
+- Nenhum recurso opcional pode quebrar o app quando não estiver disponível.
+- Informações ausentes devem ser omitidas ou exibidas como `N/A`.
+- Recursos Linux específicos, como `journalctl`, devem ser tratados como extensões opcionais.
+- O projeto deve evitar assumir GNOME, KDE, X11, Wayland, systemd, Homebrew, Chocolatey, PowerShell ou qualquer gerenciador de pacotes específico no caminho principal.
 
 ## Visão do Projeto
 
@@ -16,12 +34,9 @@ O objetivo é produzir uma saída no terminal no estilo:
 [procedural]                Kernel: Linux 6.x
                              Uptime: 2h 34m
                              Shell: bash
-                             Resolution: 3440x1440
-                             DE: GNOME
-                             WM: Mutter
                              CPU: AMD Ryzen ...
-                             GPU: NVIDIA ...
                              RAM: ...
+                             Disk: ...
 ```
 
 A imagem à esquerda deve substituir o logo fixo tradicional de ferramentas como `screenFetch`, usando uma estética inspirada em galáxias, campos estelares e estruturas astrofísicas.
@@ -30,11 +45,99 @@ A imagem à esquerda deve substituir o logo fixo tradicional de ferramentas como
 
 - Começar por uma fatia vertical funcional.
 - Preferir stdout simples antes de qualquer TUI complexa.
-- Separar geração visual, coleta de sistema e layout.
+- Separar geração visual, coleta de sistema, terminal e layout.
 - Evitar panics em uso normal.
 - Fazer fallback gracioso quando alguma informação não estiver disponível.
 - Manter dependências em número razoável.
 - Priorizar uma saída bonita no terminal antes de sofisticação física.
+- Tratar Linux, macOS e Windows como plataformas de primeira classe.
+- Manter campos lentos fora do caminho padrão.
+
+## Restrições Técnicas Críticas
+
+### 1. Orçamento de performance
+
+O comando padrão `astrofetch` deve ser rápido o suficiente para uso interativo no shell.
+
+Regras:
+
+- Não chamar subprocessos lentos no caminho padrão.
+- Não executar `journalctl`, contagem de pacotes, detecção detalhada de GPU ou detecção de temas por padrão.
+- Medir cold start com um comando simples de benchmark.
+- Campos lentos devem ser opcionais, ter timeout curto e limite de saída.
+- Quando possível, paralelizar coleta lenta com geração visual.
+
+Meta inicial:
+
+```text
+astrofetch padrão: idealmente abaixo de 100 ms em máquina comum.
+```
+
+Essa meta não é uma garantia rígida, mas deve orientar decisões de implementação.
+
+### 2. Layout robusto com ANSI e Unicode
+
+Nunca calcule alinhamento com `String::len()`.
+
+Motivos:
+
+- Códigos ANSI ocupam bytes, mas não colunas visuais.
+- Caracteres Unicode podem ocupar largura visual diferente.
+- Emojis e alguns símbolos podem quebrar alinhamento dependendo do terminal.
+
+Regras:
+
+- Criar uma função `visible_width()`.
+- Remover/ignorar ANSI ao calcular largura visual.
+- Usar `unicode-width` ou solução equivalente.
+- Usar ASCII puro como paleta padrão.
+- Tratar paletas Unicode como opcionais.
+
+### 3. Detecção de TTY e cor
+
+Cores ANSI devem ser desativadas quando:
+
+- `--no-color` for usado;
+- a variável `NO_COLOR` estiver definida;
+- stdout não for um TTY;
+- o terminal não aparentar suportar cor.
+
+### 4. Renderização em baixa resolução
+
+A imagem final normalmente terá algo como 40x20 ou 50x25 caracteres. Isso é baixa resolução.
+
+Regras:
+
+- Não confiar apenas em fórmulas físicas ingênuas.
+- Corrigir aspect ratio dos caracteres do terminal.
+- Considerar supersampling/binning.
+- Aplicar normalização robusta.
+- Aplicar contraste visual antes do mapeamento ASCII.
+- Testar gamma, log stretch ou asinh stretch.
+- Garantir que a arte seja bonita mesmo quando a física for simplificada.
+
+### 5. Subprocessos seguros
+
+Quando for necessário chamar comandos externos:
+
+- Usar `std::process::Command` com argumentos separados.
+- Nunca montar comando via shell string.
+- Aplicar timeout.
+- Limitar bytes de stdout/stderr.
+- Tratar erro de permissão e comando ausente.
+- Não bloquear o modo padrão.
+
+### 6. Watch mode sem flicker
+
+O modo `watch` não deve usar apenas `clear` + `print!` em loop.
+
+Regras:
+
+- Usar controle de cursor.
+- Renderizar frame em buffer.
+- Atualizar a tela de forma previsível.
+- Considerar `crossterm` quando o modo watch for implementado.
+- Encerrar com Ctrl-C de forma segura.
 
 ## Fase 1: Setup do Projeto
 
@@ -44,7 +147,14 @@ Dependências iniciais sugeridas:
 
 - `clap` com feature `derive`, para parsing de argumentos.
 - `rand`, para seeds e geração procedural.
-- `sysinfo`, para informações básicas do sistema, se a coleta manual via `/proc` não for desejada.
+- `sysinfo`, para informações básicas multiplataforma do sistema.
+- `unicode-width`, para cálculo de largura visual.
+- `is-terminal`, para detectar se stdout é TTY.
+
+Adiar para fases futuras:
+
+- `crossterm`, até o modo watch ou controle de cursor ser necessário.
+- crates específicas de systemd, Windows Event Log ou macOS logs.
 
 Comandos esperados:
 
@@ -61,6 +171,7 @@ Critério de aceite:
 - O projeto compila.
 - `astrofetch --help` funciona.
 - A estrutura de módulos inicial existe.
+- O projeto compila no sistema atual antes de qualquer otimização.
 
 ## Fase 2: CLI Básica
 
@@ -83,7 +194,29 @@ Critério de aceite:
 - Valores inválidos retornam erro claro.
 - A execução padrão `astrofetch` funciona sem argumentos.
 
-## Fase 3: Vertical Slice screenFetch-like
+## Fase 3: Terminal e Layout Primitives
+
+Antes de colorir ou sofisticar a arte, implemente primitivas corretas de terminal.
+
+Módulo sugerido: `terminal.rs`.
+
+Responsabilidades:
+
+- detectar TTY;
+- detectar `NO_COLOR`;
+- definir se cores estão habilitadas;
+- calcular largura visual com `visible_width()`;
+- remover ou ignorar ANSI no cálculo de largura;
+- manter paleta ASCII padrão.
+
+Critério de aceite:
+
+- Testes cobrem strings com ANSI.
+- Testes cobrem strings ASCII simples.
+- Paleta padrão não depende de Unicode.
+- `--no-color` e `NO_COLOR` desativam cor.
+
+## Fase 4: Vertical Slice Multiplataforma
 
 Implemente uma primeira versão funcional que já pareça com um fetch tool.
 
@@ -92,31 +225,40 @@ Nesta fase, a arte ASCII pode ser simples ou temporária. O importante é integr
 - imagem à esquerda;
 - informações do sistema à direita;
 - layout alinhado por linhas;
-- saída em stdout.
+- saída em stdout;
+- suporte básico a Linux, macOS e Windows.
 
 Campos mínimos:
 
-- `user@host`
-- `OS`
-- `Kernel`
-- `Uptime`
-- `Shell`
-- `CPU`
-- `RAM`
+- `user@host`;
+- `OS`;
+- `Kernel` ou versão equivalente;
+- `Uptime`;
+- `Shell`, quando disponível;
+- `CPU`, preferencialmente modelo ou identificação;
+- `RAM`;
+- `Disk`, se simples de obter.
 
 Critério de aceite:
 
 - `cargo run` imprime uma tela completa.
 - A saída lembra o formato visual do `screenFetch`.
 - O programa não falha se algum campo não puder ser coletado.
+- Campos não suportados na plataforma atual aparecem como `N/A` ou são omitidos.
 
-## Fase 4: Motor Astrofísico Procedural
+## Fase 5: Motor Astrofísico Procedural
 
 Implemente o módulo `engine.rs`.
 
 O motor deve gerar uma matriz 2D de `f64`, com valores normalizados entre `0.0` e `1.0`, representando intensidade luminosa.
 
 Modelos planejados:
+
+### Starfield
+
+Campo estelar simples para fallback visual.
+
+Deve ser implementado primeiro por ser simples e útil para validar layout.
 
 ### Elíptica
 
@@ -131,18 +273,8 @@ Parâmetros úteis:
 - índice de Sérsic;
 - raio efetivo;
 - elipticidade;
-- contraste.
-
-### Espiral
-
-Modelo visual inspirado em disco exponencial com braços espirais.
-
-Parâmetros úteis:
-
-- número de braços;
-- inclinação;
-- ruído;
-- abertura dos braços.
+- contraste;
+- correção de aspect ratio.
 
 ### Cluster
 
@@ -153,19 +285,29 @@ Parâmetros úteis:
 - número de estrelas;
 - concentração;
 - dispersão radial;
-- brilho máximo.
+- brilho máximo;
+- smoothing/binning.
 
-### Starfield
+### Espiral
 
-Campo estelar simples para fallback visual.
+Modelo visual inspirado em disco exponencial com braços espirais.
+
+Parâmetros úteis:
+
+- número de braços;
+- inclinação;
+- ruído;
+- abertura dos braços;
+- contraste.
 
 Critério de aceite:
 
 - Cada modelo gera uma matriz válida.
 - A mesma seed produz a mesma saída.
 - Os modelos são independentes da renderização e da coleta de sistema.
+- A saída não parece apenas um borrão em 40x20.
 
-## Fase 5: Renderização ASCII
+## Fase 6: Normalização e Renderização ASCII
 
 Implemente o módulo `render.rs`.
 
@@ -174,15 +316,29 @@ Responsabilidades:
 - converter matriz numérica em caracteres ASCII;
 - aplicar paleta de densidade;
 - aplicar cor ANSI opcional;
-- respeitar `--no-color`.
+- respeitar `--no-color`;
+- aplicar normalização e contraste antes do mapeamento.
 
-Paletas iniciais:
+Paleta padrão:
 
 ```text
 " .:-=+*#%@"
-" ·•✦✧*#%@"
-" .,:;irsXA253hMHGS#9B&@"
 ```
+
+Paletas opcionais:
+
+```text
+" .,:;irsXA253hMHGS#9B&@"
+" ·•✦✧*#%@"
+```
+
+Stretch/contraste a avaliar:
+
+- linear;
+- gamma;
+- log;
+- asinh;
+- clipping por percentis.
 
 Critério de aceite:
 
@@ -190,39 +346,49 @@ Critério de aceite:
 - Valores altos viram caracteres densos.
 - A saída sem cor é limpa e copiável.
 - A renderização não depende das informações do sistema.
+- O núcleo das galáxias tem contraste visível contra o fundo.
 
-## Fase 6: Coleta de Informações do Sistema
+## Fase 7: Coleta Multiplataforma de Sistema
 
 Implemente o módulo `system.rs`.
 
-Campos inspirados no uso atual com `screenFetch`:
+Estratégia:
+
+- Definir uma estrutura `SystemSnapshot`.
+- Usar `sysinfo` para campos multiplataforma quando viável.
+- Usar variáveis de ambiente para shell/user quando confiáveis.
+- Criar providers específicos por plataforma apenas quando necessário.
+
+Campos básicos:
 
 - user e hostname;
 - OS;
-- kernel;
+- kernel ou versão do sistema;
 - uptime;
-- packages, se simples de obter;
 - shell;
+- disco;
+- CPU;
+- RAM.
+
+Campos avançados e best-effort:
+
+- packages;
 - resolution;
 - desktop environment;
 - window manager;
-- tema GTK, se simples de obter;
-- tema de ícones, se simples de obter;
-- fonte, se simples de obter;
-- disco;
-- CPU;
-- GPU;
-- RAM.
-
-Não é necessário implementar todos de uma vez. Comece pelos campos confiáveis e adicione os demais incrementalmente.
+- tema GTK;
+- tema de ícones;
+- fonte;
+- GPU.
 
 Critério de aceite:
 
 - Falhas de coleta viram `N/A` ou simplesmente ocultam o campo.
-- A coleta não deve tornar o app perceptivelmente lento.
-- O app continua útil mesmo fora de GNOME ou fora de Ubuntu.
+- A coleta padrão não chama subprocessos lentos.
+- O app continua útil fora de GNOME, fora de Ubuntu, no macOS e no Windows.
+- Os campos avançados não bloqueiam o comando padrão.
 
-## Fase 7: Layout
+## Fase 8: Layout Final
 
 Implemente o módulo `layout.rs`.
 
@@ -232,7 +398,8 @@ Responsabilidades:
 - alinhar texto à direita da imagem;
 - preservar espaçamento legível;
 - lidar com altura diferente entre imagem e campos;
-- suportar modo compacto.
+- suportar modo compacto;
+- usar `visible_width()`.
 
 Layout padrão:
 
@@ -247,8 +414,10 @@ Critério de aceite:
 - O layout funciona em terminais comuns.
 - A arte e os campos não ficam colados.
 - O resultado visual é agradável.
+- Cores ANSI não quebram alinhamento.
+- Paletas Unicode opcionais não quebram o layout de forma catastrófica.
 
-## Fase 8: Customização
+## Fase 9: Customização
 
 Adicione opções úteis sem transformar o projeto em algo complexo.
 
@@ -267,20 +436,64 @@ Critério de aceite:
 - Customizações são opcionais.
 - A CLI permanece fácil de entender.
 
-## Fase 9: Journal Opcional
+## Fase 10: Campos Lentos e Cache Opcional
 
-Implemente o módulo `journal.rs`.
+Campos como packages, GPU detalhada, temas e resolução podem exigir subprocessos ou APIs específicas.
 
-Objetivo: exibir algumas linhas recentes do `journalctl` como contexto do sistema.
+Regras:
+
+- Esses campos não devem ser padrão no MVP.
+- Devem ter timeout curto.
+- Devem ter fallback amigável.
+- Podem ser coletados em paralelo com a engine.
+- Cache simples pode ser considerado para valores estáveis.
+
+Exemplos de comandos por plataforma, todos opcionais:
+
+Linux:
+
+- `dpkg-query`;
+- `pacman`;
+- `rpm`;
+- `flatpak`;
+- `snap`;
+- `lspci`;
+- `gsettings`;
+- `xrandr`.
+
+macOS:
+
+- `sw_vers`;
+- `sysctl`;
+- `system_profiler`;
+- `pmset`.
+
+Windows:
+
+- PowerShell;
+- `wmic`, se disponível;
+- APIs/crates específicas no futuro.
+
+Critério de aceite:
+
+- O comando padrão continua rápido.
+- Falha em subprocesso não quebra o app.
+- Timeouts são testáveis.
+
+## Fase 11: Logs Opcionais por Plataforma
+
+Objetivo: exibir algumas linhas recentes de logs do sistema como contexto.
+
+A primeira implementação deve ser Linux-only via `journalctl`, sempre opcional.
 
 Argumentos sugeridos:
 
-- `--journal`
-- `--journal-lines`
-- `--journal-unit`
-- `--journal-priority`
+- `--journal`;
+- `--journal-lines`;
+- `--journal-unit`;
+- `--journal-priority`.
 
-Estratégia inicial:
+Estratégia Linux inicial:
 
 - chamar `journalctl` como processo externo;
 - limitar número de linhas;
@@ -288,13 +501,19 @@ Estratégia inicial:
 - tratar ausência de `journalctl`;
 - tratar erro de permissão sem panic.
 
+macOS e Windows:
+
+- não implementar no MVP;
+- avaliar depois suporte opcional a `log show` no macOS e Windows Event Log no Windows.
+
 Critério de aceite:
 
-- `astrofetch --journal` mostra logs recentes quando possível.
+- `astrofetch --journal` mostra logs recentes quando possível no Linux.
 - Se `journalctl` não existir, o app informa ou ignora graciosamente.
 - O app não trava esperando logs.
+- Linux journal não afeta macOS ou Windows.
 
-## Fase 10: Arte Reativa
+## Fase 12: Arte Reativa
 
 Permita que a imagem ASCII seja influenciada pelo estado do sistema.
 
@@ -311,7 +530,7 @@ Critério de aceite:
 - `--seed` ainda permite reprodutibilidade quando desejado.
 - A arte continua bonita, não apenas caótica.
 
-## Fase 11: Modo Watch
+## Fase 13: Modo Watch
 
 Adicione um subcomando:
 
@@ -321,15 +540,17 @@ astrofetch watch
 
 Opções:
 
-- `--interval`
-- `--journal`
-- `--no-color`
-- `--compact`
+- `--interval`;
+- `--journal`;
+- `--no-color`;
+- `--compact`.
 
 Estratégia inicial:
 
-- limpar/redesenhar a tela periodicamente;
-- evitar TUI completa no começo;
+- usar controle de cursor;
+- renderizar frames em buffer;
+- evitar `clear` ingênuo em loop;
+- considerar `crossterm`;
 - encerrar com Ctrl-C de forma segura.
 
 Critério de aceite:
@@ -337,6 +558,31 @@ Critério de aceite:
 - O painel atualiza sem flicker excessivo.
 - O consumo de CPU permanece baixo.
 - O modo normal `astrofetch` continua instantâneo.
+
+## Fase 14: CI e Portabilidade
+
+Adicionar validação mínima em:
+
+- Linux;
+- macOS;
+- Windows.
+
+Critérios:
+
+- `cargo fmt --check`;
+- `cargo clippy -- -D warnings`;
+- `cargo test`;
+- build em matrix multiplataforma.
+
+Testes importantes:
+
+- determinismo por seed;
+- normalização/renderização;
+- largura visual;
+- layout com ANSI;
+- `--no-color`;
+- fallback de campos ausentes;
+- providers de sistema mockados.
 
 ## Estrutura Inicial Sugerida
 
@@ -347,23 +593,40 @@ src/
   app.rs
   engine.rs
   render.rs
-  system.rs
   layout.rs
-  journal.rs
+  terminal.rs
+  system.rs
   error.rs
 ```
 
-Responsabilidades:
+Possível evolução posterior:
 
-- `main.rs`: entrada do binário.
-- `cli.rs`: argumentos e subcomandos.
-- `app.rs`: orquestração do fluxo.
-- `engine.rs`: geração procedural astrofísica.
-- `render.rs`: conversão para ASCII.
-- `system.rs`: snapshot do sistema.
-- `layout.rs`: composição visual.
-- `journal.rs`: leitura opcional do journal.
-- `error.rs`: erros recuperáveis.
+```text
+src/
+  system/
+    mod.rs
+    snapshot.rs
+    linux.rs
+    macos.rs
+    windows.rs
+    commands.rs
+  render/
+    mod.rs
+    ascii.rs
+    color.rs
+    palette.rs
+    stretch.rs
+  astro/
+    mod.rs
+    canvas.rs
+    model.rs
+    elliptical.rs
+    spiral.rs
+    cluster.rs
+    field.rs
+```
+
+Comece simples. Só extraia submódulos quando os arquivos ficarem grandes.
 
 ## Prompt de Continuidade para IA
 
@@ -374,9 +637,14 @@ Não trate o AstroFetch como jogo. Não transforme em produto empresarial. O obj
 Prioridades:
 1. Entregar uma fatia vertical funcional primeiro.
 2. Manter arquitetura simples.
-3. Separar engine visual, coleta de sistema e layout.
-4. Evitar panics.
-5. Preferir stdout simples antes de TUI complexa.
-6. Implementar incrementalmente, com testes onde fizer sentido.
+3. Suportar Linux, macOS e Windows.
+4. Separar engine visual, coleta de sistema, terminal e layout.
+5. Evitar panics.
+6. Preferir stdout simples antes de TUI complexa.
+7. Não chamar subprocessos lentos no caminho padrão.
+8. Calcular largura visual corretamente, sem usar `String::len()` para layout.
+9. Usar paleta ASCII pura por padrão.
+10. Aplicar contraste e correção de aspecto na renderização.
+11. Implementar incrementalmente, com testes onde fizer sentido.
 
-Ao implementar, comece por `astrofetch` imprimindo uma tela screenFetch-like mínima. Depois melhore o motor visual e adicione campos extras.
+Ao implementar, comece por `astrofetch` imprimindo uma tela screenFetch-like mínima e multiplataforma. Depois melhore o motor visual e adicione campos extras.
