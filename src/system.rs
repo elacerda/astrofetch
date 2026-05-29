@@ -70,6 +70,11 @@ impl SystemSnapshot {
             .unwrap_or_else(|| "N/A".to_string())
     }
 
+    /// Retorna true quando o campo existe no snapshot.
+    pub fn has_field(&self, label: &str) -> bool {
+        self.fields.contains_key(label)
+    }
+
     /// Retorna todos os campos em ordem alfabética.
     #[allow(dead_code)]
     pub fn fields(&self) -> Vec<SystemField> {
@@ -79,6 +84,29 @@ impl SystemSnapshot {
             .collect()
     }
 }
+
+/// Ordem screenFetch-like para full mode.
+const FULL_FIELD_ORDER: [&str; 16] = [
+    "OS",
+    "Kernel",
+    "Uptime",
+    "Packages",
+    "Shell",
+    "Resolution",
+    "DE",
+    "WM",
+    "WM Theme",
+    "GTK Theme",
+    "Icon Theme",
+    "Font",
+    "Disk",
+    "CPU",
+    "GPU",
+    "RAM",
+];
+
+/// Ordem de campos para compact mode.
+const COMPACT_FIELD_ORDER: [&str; 6] = ["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"];
 
 /// Retorna uma variável de ambiente ou um fallback.
 fn env_or_fallback(key: &str, fallback: &str) -> String {
@@ -331,7 +359,7 @@ fn get_disk_info() -> String {
             0
         };
 
-        format!("{}/{} ({}%)", used_formatted, total_formatted, percent)
+        format!("{} / {} ({}%)", used_formatted, total_formatted, percent)
     }
 
     #[cfg(target_os = "macos")]
@@ -353,7 +381,7 @@ fn get_disk_info() -> String {
                                     let percent = ((used_val as f64 / total_val as f64) * 100.0)
                                         .round()
                                         as u8;
-                                    return format!("{}/{} ({}%)", used, total, percent);
+                                    return format!("{} / {} ({}%)", used, total, percent);
                                 }
                             }
                         }
@@ -443,7 +471,24 @@ fn parse_df_size(s: &str) -> Option<u64> {
 /// Retorna os nomes dos campos na ordem de exibição desejada.
 /// Esta função define a ordem de campos para full mode.
 pub fn get_field_order() -> Vec<&'static str> {
-    vec!["OS", "Kernel", "Uptime", "Shell", "Disk", "CPU", "RAM"]
+    FULL_FIELD_ORDER.to_vec()
+}
+
+/// Retorna os nomes dos campos para compact mode.
+pub fn get_compact_field_order() -> Vec<&'static str> {
+    COMPACT_FIELD_ORDER.to_vec()
+}
+
+/// Retorna os campos na ordem de exibição, omitindo campos ausentes em full mode.
+pub fn get_display_field_order(system: &SystemSnapshot, compact: bool) -> Vec<&'static str> {
+    if compact {
+        return get_compact_field_order();
+    }
+
+    get_field_order()
+        .into_iter()
+        .filter(|field_name| system.has_field(field_name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -498,10 +543,77 @@ mod tests {
         assert_eq!(order[0], "OS");
         assert_eq!(order[1], "Kernel");
         assert_eq!(order[2], "Uptime");
-        assert_eq!(order[3], "Shell");
-        assert_eq!(order[4], "Disk");
-        assert_eq!(order[5], "CPU");
-        assert_eq!(order[6], "RAM");
+        assert_eq!(order[3], "Packages");
+        assert_eq!(order[4], "Shell");
+        assert_eq!(order[5], "Resolution");
+        assert_eq!(order[6], "DE");
+        assert_eq!(order[7], "WM");
+        assert_eq!(order[8], "WM Theme");
+        assert_eq!(order[9], "GTK Theme");
+        assert_eq!(order[10], "Icon Theme");
+        assert_eq!(order[11], "Font");
+        assert_eq!(order[12], "Disk");
+        assert_eq!(order[13], "CPU");
+        assert_eq!(order[14], "GPU");
+        assert_eq!(order[15], "RAM");
+    }
+
+    #[test]
+    fn test_get_compact_field_order() {
+        let order = get_compact_field_order();
+        assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
+    }
+
+    #[test]
+    fn test_get_display_field_order_omits_missing_advanced_fields() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Shell".to_string(), "bash".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, false);
+        assert_eq!(
+            order,
+            vec!["OS", "Kernel", "Uptime", "Shell", "Disk", "CPU", "RAM"]
+        );
+    }
+
+    #[test]
+    fn test_get_display_field_order_keeps_future_order_when_present() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Packages".to_string(), "1234".to_string());
+        fields.insert("Shell".to_string(), "bash".to_string());
+        fields.insert("Resolution".to_string(), "1920x1080".to_string());
+        fields.insert("DE".to_string(), "GNOME".to_string());
+        fields.insert("WM".to_string(), "Mutter".to_string());
+        fields.insert("WM Theme".to_string(), "Adwaita".to_string());
+        fields.insert("GTK Theme".to_string(), "Adwaita".to_string());
+        fields.insert("Icon Theme".to_string(), "Adwaita".to_string());
+        fields.insert("Font".to_string(), "Noto Sans 11".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("GPU".to_string(), "Test GPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, false);
+        assert_eq!(order, get_field_order());
     }
 
     #[test]

@@ -5,7 +5,7 @@ use crate::layout::compose_layout;
 use crate::render::{
     normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
 };
-use crate::system::{get_field_order, SystemSnapshot};
+use crate::system::{get_display_field_order, SystemSnapshot};
 use crate::terminal::Terminal;
 use clap::Parser;
 
@@ -109,19 +109,172 @@ impl App {
 
         // Compact mode: OS, Kernel, Uptime, Disk, CPU, RAM
         if self.args.compact {
-            lines.push(format!("OS: {}", system.get("OS")));
-            lines.push(format!("Kernel: {}", system.get("Kernel")));
-            lines.push(format!("Uptime: {}", system.get("Uptime")));
-            lines.push(format!("Disk: {}", system.get("Disk")));
-            lines.push(format!("CPU: {}", system.get("CPU")));
-            lines.push(format!("RAM: {}", system.get("RAM")));
+            for field_name in get_display_field_order(system, true) {
+                lines.push(format!("{}: {}", field_name, system.get(field_name)));
+            }
         } else {
-            // Full mode: ordem específica definida em get_field_order()
-            for field_name in get_field_order() {
+            // Full mode: ordem screenFetch-like, omitindo campos indisponíveis.
+            for field_name in get_display_field_order(system, false) {
                 lines.push(format!("{}: {}", field_name, system.get(field_name)));
             }
         }
 
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::ArtModel;
+    use crate::terminal::Terminal;
+    use std::collections::BTreeMap;
+
+    fn build_test_app(compact: bool) -> App {
+        App {
+            args: Args {
+                model: ArtModel::Random,
+                width: 40,
+                height: 20,
+                seed: None,
+                no_color: true,
+                logo_only: false,
+                info_only: false,
+                compact,
+            },
+            terminal: Terminal {
+                is_tty: false,
+                colors_enabled: false,
+            },
+        }
+    }
+
+    fn base_snapshot() -> SystemSnapshot {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Shell".to_string(), "bash".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        SystemSnapshot {
+            user_host: "astro@station".to_string(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn test_build_info_lines_full_field_ordering() {
+        let app = build_test_app(false);
+        let lines = app.build_info_lines(&base_snapshot());
+
+        assert_eq!(lines[0], "astro@station");
+        assert_eq!(
+            lines[1..],
+            [
+                "OS: Linux",
+                "Kernel: 6.x",
+                "Uptime: 1h 2m",
+                "Shell: bash",
+                "Disk: 1G/2G (50%)",
+                "CPU: Test CPU",
+                "RAM: 1.0GB / 2.0GB"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_info_lines_compact_field_ordering() {
+        let app = build_test_app(true);
+        let lines = app.build_info_lines(&base_snapshot());
+
+        assert_eq!(
+            lines,
+            [
+                "OS: Linux",
+                "Kernel: 6.x",
+                "Uptime: 1h 2m",
+                "Disk: 1G/2G (50%)",
+                "CPU: Test CPU",
+                "RAM: 1.0GB / 2.0GB"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_info_lines_full_future_ordering_when_present() {
+        let app = build_test_app(false);
+        let mut snapshot = base_snapshot();
+        snapshot
+            .fields
+            .insert("Packages".to_string(), "1234".to_string());
+        snapshot
+            .fields
+            .insert("Resolution".to_string(), "1920x1080".to_string());
+        snapshot
+            .fields
+            .insert("DE".to_string(), "GNOME".to_string());
+        snapshot
+            .fields
+            .insert("WM".to_string(), "Mutter".to_string());
+        snapshot
+            .fields
+            .insert("WM Theme".to_string(), "Adwaita".to_string());
+        snapshot
+            .fields
+            .insert("GTK Theme".to_string(), "Adwaita".to_string());
+        snapshot
+            .fields
+            .insert("Icon Theme".to_string(), "Adwaita".to_string());
+        snapshot
+            .fields
+            .insert("Font".to_string(), "Noto Sans 11".to_string());
+        snapshot
+            .fields
+            .insert("GPU".to_string(), "Test GPU".to_string());
+
+        let lines = app.build_info_lines(&snapshot);
+
+        assert_eq!(lines[0], "astro@station");
+        assert_eq!(
+            lines[1..],
+            [
+                "OS: Linux",
+                "Kernel: 6.x",
+                "Uptime: 1h 2m",
+                "Packages: 1234",
+                "Shell: bash",
+                "Resolution: 1920x1080",
+                "DE: GNOME",
+                "WM: Mutter",
+                "WM Theme: Adwaita",
+                "GTK Theme: Adwaita",
+                "Icon Theme: Adwaita",
+                "Font: Noto Sans 11",
+                "Disk: 1G/2G (50%)",
+                "CPU: Test CPU",
+                "GPU: Test GPU",
+                "RAM: 1.0GB / 2.0GB"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_info_lines_full_omits_missing_advanced_fields() {
+        let app = build_test_app(false);
+        let lines = app.build_info_lines(&base_snapshot());
+        let joined = lines.join("\n");
+
+        assert!(!joined.contains("Packages:"));
+        assert!(!joined.contains("Resolution:"));
+        assert!(!joined.contains("DE:"));
+        assert!(!joined.contains("WM:"));
+        assert!(!joined.contains("WM Theme:"));
+        assert!(!joined.contains("GTK Theme:"));
+        assert!(!joined.contains("Icon Theme:"));
+        assert!(!joined.contains("Font:"));
+        assert!(!joined.contains("GPU:"));
     }
 }
