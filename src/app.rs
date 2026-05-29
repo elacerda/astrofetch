@@ -2,7 +2,9 @@ use crate::cli::{Args, ArtModel};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::layout::compose_layout;
-use crate::render::{render_ascii, Palette};
+use crate::render::{
+    normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
+};
 use crate::system::SystemSnapshot;
 use crate::terminal::Terminal;
 use clap::Parser;
@@ -38,7 +40,7 @@ impl App {
         };
 
         // Cria o terminal com a configuração final de cores
-        let _terminal = Terminal {
+        let terminal = Terminal {
             is_tty: self.terminal.is_tty,
             colors_enabled,
         };
@@ -53,27 +55,40 @@ impl App {
         };
 
         // Gera a arte ASCII
-        let canvas = engine_model.generate(self.args.width, self.args.height, self.args.seed);
-        let palette = Palette::DEFAULT;
-        let art_lines = render_ascii(&canvas, &palette);
+        let mut canvas = engine_model.generate(self.args.width, self.args.height, self.args.seed);
 
-        // Coleta informações do sistema
-        let system = SystemSnapshot::collect();
-        let info_lines = self.build_info_lines(&system);
+        // Aplica stretch para melhor contraste
+        canvas = normalize_with_stretch(&canvas, StretchType::default());
+
+        let palette = Palette::DEFAULT;
 
         // Imprime na saída
         if self.args.info_only {
             // Modo info-only: apenas informações, sem arte ASCII
+            let info_lines = self.build_info_lines(&SystemSnapshot::collect());
             for line in info_lines {
                 println!("{}", line);
             }
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
+            let art_lines = if colors_enabled {
+                render_colored_ascii(&canvas, &palette, &terminal)
+            } else {
+                render_ascii(&canvas, &palette)
+            };
             for line in art_lines {
                 println!("{}", line);
             }
         } else {
             // Modo normal: arte + informações (side-by-side)
+            let art_lines = if colors_enabled {
+                render_colored_ascii(&canvas, &palette, &terminal)
+            } else {
+                render_ascii(&canvas, &palette)
+            };
+
+            let system = SystemSnapshot::collect();
+            let info_lines = self.build_info_lines(&system);
             let output_lines = compose_layout(&art_lines, &info_lines, self.args.width, 2);
             for line in output_lines {
                 println!("{}", line);
