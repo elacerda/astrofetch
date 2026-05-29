@@ -2,6 +2,61 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use sysinfo::{CpuRefreshKind, System};
 
+/// Executa um comando externo de forma segura e best-effort.
+///
+/// # Arguments
+/// * `cmd` - Nome do comando (ex: "uname", "hostname")
+/// * `args` - Argumentos do comando como fatias de strings
+///
+/// # Returns
+/// * `Some(String)` - Comando executado com sucesso e stdout não vazio
+/// * `None` - Comando falhou, saiu com código diferente de zero,
+///   stdout é inválido UTF-8, ou stdout está vazio
+///
+/// # Limitações
+/// * Não há timeout implementado ainda (TODO: adicionar timeout antes de usar
+///   para comandos potencialmente lentos)
+/// * Output limitado a 64KB para evitar strings muito grandes
+///
+/// # Exemplos
+/// ```ignore
+/// let os = run_command_best_effort("uname", &["-s"]);
+/// let hostname = run_command_best_effort("hostname", &[]);
+/// ```
+#[allow(dead_code)]
+pub fn run_command_best_effort(cmd: &str, args: &[&str]) -> Option<String> {
+    let mut command = std::process::Command::new(cmd);
+    command.args(args);
+
+    // Executa o comando e captura o output
+    let output = command.output().ok()?;
+
+    // Verifica se o comando saiu com código de sucesso (0)
+    if !output.status.success() {
+        return None;
+    }
+
+    // Converte stdout para String, retornando None se não for UTF-8 válido
+    let stdout = String::from_utf8(output.stdout).ok()?;
+
+    // Trimming da saída
+    let trimmed = stdout.trim();
+
+    // Retorna None se output estiver vazio após trim
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Limita o tamanho do output para evitar strings muito grandes
+    // 64KB é um limite razoável para informações de sistema
+    const MAX_OUTPUT_SIZE: usize = 64 * 1024;
+    if trimmed.len() > MAX_OUTPUT_SIZE {
+        return Some(trimmed[..MAX_OUTPUT_SIZE].to_string());
+    }
+
+    Some(trimmed.to_string())
+}
+
 /// Mutex global para proteger testes que mutam variáveis de ambiente.
 /// Isso evita race conditions quando os testes rodam em paralelo.
 #[allow(dead_code)]
@@ -761,82 +816,185 @@ mod tests {
 
     #[test]
     fn test_get_desktop_environment_with_xdg_current_desktop() {
-        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
         std::env::remove_var("DESKTOP_SESSION");
         std::env::remove_var("XDG_SESSION_DESKTOP");
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
 
         let de = get_desktop_environment();
         assert_eq!(de, Some("Gnome".to_string()));
+
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
     }
 
     #[test]
     fn test_get_desktop_environment_with_desktop_session() {
-        std::env::set_var("XDG_CURRENT_DESKTOP", "");
-        std::env::set_var("DESKTOP_SESSION", "plasma");
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        std::env::remove_var("DESKTOP_SESSION");
         std::env::remove_var("XDG_SESSION_DESKTOP");
+        std::env::set_var("DESKTOP_SESSION", "plasma");
 
         let de = get_desktop_environment();
         assert_eq!(de, Some("Plasma".to_string()));
+
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
     }
 
     #[test]
     fn test_get_desktop_environment_with_xdg_session_desktop() {
-        std::env::set_var("XDG_CURRENT_DESKTOP", "");
-        std::env::set_var("DESKTOP_SESSION", "");
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        std::env::remove_var("DESKTOP_SESSION");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
         std::env::set_var("XDG_SESSION_DESKTOP", "xfce");
 
         let de = get_desktop_environment();
         assert_eq!(de, Some("Xfce".to_string()));
+
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
     }
 
     #[test]
     fn test_get_desktop_environment_missing_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
         std::env::remove_var("XDG_CURRENT_DESKTOP");
         std::env::remove_var("DESKTOP_SESSION");
         std::env::remove_var("XDG_SESSION_DESKTOP");
 
         let de = get_desktop_environment();
         assert_eq!(de, None);
+
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
     }
 
     #[test]
     fn test_get_window_manager_wayland() {
-        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Salva o estado original das variáveis
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
+        // Limpa todas as variáveis de ambiente WM primeiro
+        std::env::remove_var("WAYLAND_DISPLAY");
         std::env::remove_var("DISPLAY");
         std::env::remove_var("XDG_SESSION_TYPE");
 
+        // Define apenas WAYLAND_DISPLAY
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+
         let wm = get_window_manager_or_session();
         assert_eq!(wm, Some("Wayland".to_string()));
+
+        // Restaura o estado original
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
     }
 
     #[test]
     fn test_get_window_manager_x11() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
         std::env::remove_var("WAYLAND_DISPLAY");
-        std::env::set_var("DISPLAY", ":0");
+        std::env::remove_var("DISPLAY");
         std::env::remove_var("XDG_SESSION_TYPE");
+        std::env::set_var("DISPLAY", ":0");
 
         let wm = get_window_manager_or_session();
         assert_eq!(wm, Some("X11".to_string()));
+
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
     }
 
     #[test]
     fn test_get_window_manager_session_type() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
         std::env::remove_var("WAYLAND_DISPLAY");
         std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
         std::env::set_var("XDG_SESSION_TYPE", "wayland");
 
         let wm = get_window_manager_or_session();
         assert_eq!(wm, Some("Wayland".to_string()));
+
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
     }
 
     #[test]
     fn test_get_window_manager_missing_env() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
         std::env::remove_var("WAYLAND_DISPLAY");
         std::env::remove_var("DISPLAY");
         std::env::remove_var("XDG_SESSION_TYPE");
 
         let wm = get_window_manager_or_session();
         assert_eq!(wm, None);
+
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
     }
 
     #[test]
@@ -960,5 +1118,93 @@ mod tests {
 
         let order = get_display_field_order(&snapshot, true);
         assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
+    }
+
+    // Tests for run_command_best_effort helper
+    // Note: These tests avoid depending on local machine commands by using
+    // mock-like behavior through the function's error handling paths.
+
+    #[test]
+    fn test_run_command_best_effort_nonexistent_command() {
+        // Comando inexistente deve retornar None
+        let result = run_command_best_effort("nonexistent_command_xyz123", &[]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_run_command_best_effort_empty_output() {
+        // Comando que produz output vazio deve retornar None
+        // Usamos 'echo -n' para produzir output vazio
+        #[cfg(target_os = "linux")]
+        {
+            let result = run_command_best_effort("echo", &["-n", ""]);
+            assert_eq!(result, None);
+        }
+    }
+
+    #[test]
+    fn test_run_command_best_effort_simple_command() {
+        // Comando simples que deve funcionar na maioria dos sistemas
+        // Usamos 'true' que sai com código 0 e produz output vazio
+        // Então usamos 'echo' que deve funcionar
+        #[cfg(target_os = "linux")]
+        {
+            let result = run_command_best_effort("echo", &["hello"]);
+            assert_eq!(result, Some("hello".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_run_command_best_effort_trims_whitespace() {
+        // Comando que produz output com whitespace deve ser trimado
+        #[cfg(target_os = "linux")]
+        {
+            let result = run_command_best_effort("echo", &["  hello  "]);
+            assert_eq!(result, Some("hello".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_run_command_best_effort_non_zero_exit() {
+        // Comando que sai com código diferente de zero deve retornar None
+        #[cfg(target_os = "linux")]
+        {
+            let result = run_command_best_effort("sh", &["-c", "exit 1"]);
+            assert_eq!(result, None);
+        }
+    }
+
+    #[test]
+    fn test_run_command_best_effort_with_args() {
+        // Comando com múltiplos argumentos
+        #[cfg(target_os = "linux")]
+        {
+            let result = run_command_best_effort("echo", &["a", "b", "c"]);
+            assert_eq!(result, Some("a b c".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_run_command_best_effort_output_size_limit() {
+        // Testa que output muito grande é limitado
+        // Cria uma string grande (maior que 64KB)
+        let large_output: String = "x".repeat(70 * 1024); // 70KB
+
+        // Usamos printf para gerar output grande
+        #[cfg(target_os = "linux")]
+        {
+            // Cria um script que imprime output grande
+            let result = run_command_best_effort(
+                "sh",
+                &[
+                    "-c",
+                    &format!("printf '%{}s' {}", large_output.len(), large_output),
+                ],
+            );
+
+            // O resultado deve ser limitado a 64KB
+            assert!(result.is_some());
+            assert!(result.as_ref().map(|s| s.len()).unwrap_or(0) <= 64 * 1024);
+        }
     }
 }
