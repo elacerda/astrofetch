@@ -1,0 +1,15 @@
+[package]
+name = "astrofetch"
+version = "0.1.0"
+edition = "2021"
+description = "A personal terminal fetch app inspired by screenFetch"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rand = "0.8"
+sysinfo = "0.30"
+unicode-width = "0.1"
+is-terminal = "0.4"
+
+[dev-dependencies]
