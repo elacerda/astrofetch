@@ -33,6 +33,36 @@ O AstroFetch deve funcionar em:
 
 A experiência principal deve ser multiplataforma. Campos específicos de cada sistema operacional devem ser best-effort: quando uma informação não estiver disponível, o app deve omitir o campo ou mostrar um fallback simples, sem falhar.
 
+## Alvo visual e informacional
+
+O AstroFetch busca uma experiência semelhante ao `screenFetch`, mas com arte astrofísica procedural em vez de logo fixo da distribuição.
+
+Campos que servem como referência para o painel:
+
+```text
+user@host
+OS
+Kernel
+Uptime
+Packages
+Shell
+Resolution
+DE
+WM
+WM Theme
+GTK Theme
+Icon Theme
+Font
+Disk
+CPU
+GPU
+RAM
+```
+
+Nem todos os campos precisam estar no caminho padrão. Campos potencialmente lentos ou dependentes de plataforma devem ser tratados como best-effort para preservar a velocidade do app.
+
+A arte deve respeitar `--height` como número fixo de linhas. Não há necessidade de um `--max-art-lines` separado neste momento.
+
 ## Funcionalidades planejadas
 
 - Arte ASCII astrofísica procedural.

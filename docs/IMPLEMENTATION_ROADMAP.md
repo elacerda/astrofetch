@@ -648,3 +648,110 @@ Prioridades:
 11. Implementar incrementalmente, com testes onde fizer sentido.
 
 Ao implementar, comece por `astrofetch` imprimindo uma tela screenFetch-like mínima e multiplataforma. Depois melhore o motor visual e adicione campos extras.
+
+## MVP 0.2 - Visual Polish e ScreenFetch Parity
+
+Esta etapa deve melhorar a identidade visual do AstroFetch e aproximar o painel de informações do uso atual com `screenFetch`.
+
+### MVP 0.2A: Visual Polish
+
+Objetivo: tornar as galáxias mais bonitas, variadas e úteis como logo procedural.
+
+Requisitos:
+
+- Integrar cores ANSI no fluxo principal de renderização.
+- Respeitar `--no-color`, `NO_COLOR` e stdout não-TTY.
+- Manter paleta ASCII pura como padrão.
+- Usar espaço como menor nível de intensidade para reduzir ruído visual.
+- Aplicar normalização/contraste antes do mapeamento ASCII.
+- Considerar gamma, log ou asinh stretch.
+- Corrigir aspect ratio de caracteres de terminal.
+- Melhorar galáxias espirais:
+  - suportar 2 a 6 braços;
+  - escolher número de braços de forma determinística a partir da seed;
+  - adicionar inclinação;
+  - adicionar rotação;
+  - evitar que todas as espirais pareçam iguais.
+- Melhorar galáxias elípticas:
+  - adicionar elipticidade;
+  - adicionar rotação;
+  - diferenciar elípticas arredondadas e alongadas.
+- Manter `--height` como controle único do número de linhas da arte.
+- Não criar `--max-art-lines` agora.
+- Garantir:
+  - `--logo-only` sem padding extra;
+  - modo normal com exatamente N linhas de arte;
+  - modo compacto podendo reduzir altura automaticamente no futuro.
+
+Critérios de aceite:
+
+- `astrofetch --model spiral --seed 42` e `--seed 43` produzem galáxias visualmente diferentes.
+- Espirais podem aparecer com mais de 2 braços.
+- Algumas galáxias parecem inclinadas.
+- `--logo-only --height 16` imprime exatamente 16 linhas.
+- Saída sem cor continua limpa.
+- Testes continuam passando com `cargo clippy --all-targets -- -D warnings`.
+
+### MVP 0.2B: ScreenFetch Info Parity
+
+Objetivo: aproximar o painel de informações dos campos exibidos pelo screenFetch usado como referência.
+
+Campos-alvo:
+
+```text
+user@host
+OS
+Kernel
+Uptime
+Packages
+Shell
+Resolution
+DE
+WM
+WM Theme
+GTK Theme
+Icon Theme
+Font
+Disk
+CPU
+GPU
+RAM
+```
+
+Política de performance:
+
+- O comando padrão deve continuar rápido.
+- Campos baratos podem entrar no padrão.
+- Campos caros ou frágeis devem ser best-effort, opcionais, cacheáveis ou coletados com timeout curto.
+- `Packages`, `GPU`, temas, fonte e resolução não devem comprometer o cold start.
+- Subprocessos devem ser chamados com `std::process::Command`, argumentos separados, timeout e limite de saída.
+- O app deve funcionar em Linux, macOS e Windows mesmo quando campos específicos não existirem.
+
+Estratégia sugerida:
+
+- Primeiro completar campos baratos:
+  - Disk;
+  - hostname robusto;
+  - OS;
+  - Kernel;
+  - Uptime;
+  - Shell;
+  - CPU;
+  - RAM.
+- Depois implementar campos avançados:
+  - Packages;
+  - Resolution;
+  - DE;
+  - WM;
+  - WM Theme;
+  - GTK Theme;
+  - Icon Theme;
+  - Font;
+  - GPU.
+
+Critérios de aceite:
+
+- No Linux desktop, o AstroFetch consegue se aproximar da lista de campos do screenFetch.
+- Em macOS e Windows, campos ausentes são omitidos ou exibem `N/A`.
+- O app não fica lento por padrão.
+- O output permanece alinhado mesmo com campos longos.
