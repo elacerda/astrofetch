@@ -1,5 +1,42 @@
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use sysinfo::{CpuRefreshKind, System};
+
+/// Mutex global para proteger testes que mutam variáveis de ambiente.
+/// Isso evita race conditions quando os testes rodam em paralelo.
+#[allow(dead_code)]
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Normaliza uma string de desktop/session para exibição.
+/// Remove sufixos comuns como "-session", "-wm", etc.
+fn normalize_desktop_string(s: &str) -> String {
+    let s = s.trim();
+
+    // Tenta obter apenas o primeiro item se houver múltiplos DEs separados por :
+    let s = s.split(':').next().unwrap_or(s);
+
+    // Remove sufixos comuns
+    let s = s
+        .strip_suffix("-session")
+        .unwrap_or(s)
+        .strip_suffix("-wm")
+        .unwrap_or(s)
+        .strip_suffix("-session")
+        .unwrap_or(s);
+
+    // Converte para title case (primeira letra maiúscula, resto minúsculo)
+    let mut result = String::new();
+    let mut capitalize = true;
+    for c in s.chars() {
+        if capitalize {
+            result.push(c.to_ascii_uppercase());
+            capitalize = false;
+        } else {
+            result.push(c.to_ascii_lowercase());
+        }
+    }
+    result
+}
 
 /// Representação de um campo do sistema com label e valor.
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +82,8 @@ impl SystemSnapshot {
         let cpu = get_cpu_info(&system);
         let ram = get_ram_info(&system);
         let disk = get_disk_info();
+        let de = get_desktop_environment();
+        let wm = get_window_manager_or_session();
 
         // Constrói o snapshot com todos os campos
         let mut fields = BTreeMap::new();
@@ -55,6 +94,14 @@ impl SystemSnapshot {
         fields.insert("CPU".to_string(), cpu.clone());
         fields.insert("RAM".to_string(), ram.clone());
         fields.insert("Disk".to_string(), disk.clone());
+
+        // Adiciona DE e WM se disponíveis
+        if let Some(de_val) = de {
+            fields.insert("DE".to_string(), de_val);
+        }
+        if let Some(wm_val) = wm {
+            fields.insert("WM".to_string(), wm_val);
+        }
 
         Self {
             user_host: format!("{}@{}", user, host),
@@ -277,6 +324,55 @@ fn get_shell() -> String {
     }
 
     "N/A".to_string()
+}
+
+/// Obtém o Desktop Environment (DE) usando variáveis de ambiente.
+/// Tenta XDG_CURRENT_DESKTOP, DESKTOP_SESSION, XDG_SESSION_DESKTOP.
+fn get_desktop_environment() -> Option<String> {
+    // Tenta XDG_CURRENT_DESKTOP (pode conter múltiplos DEs separados por :)
+    if let Ok(xdg_desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+        if !xdg_desktop.is_empty() {
+            let first = xdg_desktop.split(':').next()?;
+            return Some(normalize_desktop_string(first));
+        }
+    }
+
+    // Tenta DESKTOP_SESSION
+    if let Ok(session) = std::env::var("DESKTOP_SESSION") {
+        if !session.is_empty() {
+            return Some(normalize_desktop_string(&session));
+        }
+    }
+
+    // Tenta XDG_SESSION_DESKTOP
+    if let Ok(xdg_session) = std::env::var("XDG_SESSION_DESKTOP") {
+        if !xdg_session.is_empty() {
+            return Some(normalize_desktop_string(&xdg_session));
+        }
+    }
+
+    None
+}
+
+/// Obtém o Window Manager ou session hint usando variáveis de ambiente.
+/// Tenta WAYLAND_DISPLAY, DISPLAY, e XDG_SESSION_TYPE.
+fn get_window_manager_or_session() -> Option<String> {
+    // Se WAYLAND_DISPLAY está definido, provavelmente Wayland
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        return Some("Wayland".to_string());
+    }
+
+    // Se DISPLAY está definido, provavelmente X11
+    if std::env::var("DISPLAY").is_ok() {
+        return Some("X11".to_string());
+    }
+
+    // Tenta XDG_SESSION_TYPE
+    if let Ok(session_type) = std::env::var("XDG_SESSION_TYPE") {
+        return Some(normalize_desktop_string(&session_type));
+    }
+
+    None
 }
 
 /// Obtém informações da CPU.
@@ -640,5 +736,229 @@ mod tests {
     fn test_format_bytes_zero_total_does_not_panic() {
         // Testa que format_bytes não panica com valores extremos
         assert_eq!(format_bytes(u64::MAX), "16777216.0T");
+    }
+
+    #[test]
+    fn test_normalize_desktop_string_basic() {
+        assert_eq!(normalize_desktop_string("gnome"), "Gnome");
+        assert_eq!(normalize_desktop_string("KDE"), "Kde");
+        assert_eq!(normalize_desktop_string("xfce"), "Xfce");
+    }
+
+    #[test]
+    fn test_normalize_desktop_string_with_suffix() {
+        assert_eq!(normalize_desktop_string("gnome-session"), "Gnome");
+        assert_eq!(normalize_desktop_string("plasma"), "Plasma");
+        assert_eq!(normalize_desktop_string("plasma-desktop"), "Plasma-desktop");
+    }
+
+    #[test]
+    fn test_normalize_desktop_string_multiple_de() {
+        // XDG_CURRENT_DESKTOP pode conter múltiplos DEs separados por :
+        assert_eq!(normalize_desktop_string("GNOME:XDG"), "Gnome");
+        assert_eq!(normalize_desktop_string("ubuntu:GNOME"), "Ubuntu");
+    }
+
+    #[test]
+    fn test_get_desktop_environment_with_xdg_current_desktop() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+        std::env::remove_var("DESKTOP_SESSION");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
+
+        let de = get_desktop_environment();
+        assert_eq!(de, Some("Gnome".to_string()));
+    }
+
+    #[test]
+    fn test_get_desktop_environment_with_desktop_session() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "");
+        std::env::set_var("DESKTOP_SESSION", "plasma");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
+
+        let de = get_desktop_environment();
+        assert_eq!(de, Some("Plasma".to_string()));
+    }
+
+    #[test]
+    fn test_get_desktop_environment_with_xdg_session_desktop() {
+        std::env::set_var("XDG_CURRENT_DESKTOP", "");
+        std::env::set_var("DESKTOP_SESSION", "");
+        std::env::set_var("XDG_SESSION_DESKTOP", "xfce");
+
+        let de = get_desktop_environment();
+        assert_eq!(de, Some("Xfce".to_string()));
+    }
+
+    #[test]
+    fn test_get_desktop_environment_missing_env() {
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        std::env::remove_var("DESKTOP_SESSION");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
+
+        let de = get_desktop_environment();
+        assert_eq!(de, None);
+    }
+
+    #[test]
+    fn test_get_window_manager_wayland() {
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        let wm = get_window_manager_or_session();
+        assert_eq!(wm, Some("Wayland".to_string()));
+    }
+
+    #[test]
+    fn test_get_window_manager_x11() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::set_var("DISPLAY", ":0");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        let wm = get_window_manager_or_session();
+        assert_eq!(wm, Some("X11".to_string()));
+    }
+
+    #[test]
+    fn test_get_window_manager_session_type() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("DISPLAY");
+        std::env::set_var("XDG_SESSION_TYPE", "wayland");
+
+        let wm = get_window_manager_or_session();
+        assert_eq!(wm, Some("Wayland".to_string()));
+    }
+
+    #[test]
+    fn test_get_window_manager_missing_env() {
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        let wm = get_window_manager_or_session();
+        assert_eq!(wm, None);
+    }
+
+    #[test]
+    fn test_system_snapshot_collect_includes_de_when_available() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Salva o estado original das variáveis
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
+        // Limpa todas as variáveis de ambiente DE primeiro
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        std::env::remove_var("DESKTOP_SESSION");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
+
+        // Define apenas XDG_CURRENT_DESKTOP
+        std::env::set_var("XDG_CURRENT_DESKTOP", "GNOME");
+
+        let snapshot = SystemSnapshot::collect();
+        assert!(snapshot.has_field("DE"));
+        assert_eq!(snapshot.get("DE"), "Gnome");
+
+        // Restaura o estado original
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
+    }
+
+    #[test]
+    fn test_system_snapshot_collect_includes_wm_when_available() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Salva o estado original das variáveis
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
+        // Limpa todas as variáveis de ambiente WM primeiro
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        // Define apenas WAYLAND_DISPLAY
+        std::env::set_var("WAYLAND_DISPLAY", "wayland-1");
+
+        let snapshot = SystemSnapshot::collect();
+        assert!(snapshot.has_field("WM"));
+        assert_eq!(snapshot.get("WM"), "Wayland");
+
+        // Restaura o estado original
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
+    }
+
+    #[test]
+    fn test_system_snapshot_collect_omits_de_when_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Salva o estado original das variáveis
+        let orig_xdg = std::env::var("XDG_CURRENT_DESKTOP").ok();
+        let orig_session = std::env::var("DESKTOP_SESSION").ok();
+        let orig_session_desktop = std::env::var("XDG_SESSION_DESKTOP").ok();
+
+        std::env::remove_var("XDG_CURRENT_DESKTOP");
+        std::env::remove_var("DESKTOP_SESSION");
+        std::env::remove_var("XDG_SESSION_DESKTOP");
+
+        let snapshot = SystemSnapshot::collect();
+        assert!(!snapshot.has_field("DE"));
+
+        // Restaura o estado original
+        std::env::set_var("XDG_CURRENT_DESKTOP", orig_xdg.unwrap_or_default());
+        std::env::set_var("DESKTOP_SESSION", orig_session.unwrap_or_default());
+        std::env::set_var(
+            "XDG_SESSION_DESKTOP",
+            orig_session_desktop.unwrap_or_default(),
+        );
+    }
+
+    #[test]
+    fn test_system_snapshot_collect_omits_wm_when_missing() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+
+        // Salva o estado original das variáveis
+        let orig_wayland = std::env::var("WAYLAND_DISPLAY").ok();
+        let orig_display = std::env::var("DISPLAY").ok();
+        let orig_session_type = std::env::var("XDG_SESSION_TYPE").ok();
+
+        std::env::remove_var("WAYLAND_DISPLAY");
+        std::env::remove_var("DISPLAY");
+        std::env::remove_var("XDG_SESSION_TYPE");
+
+        let snapshot = SystemSnapshot::collect();
+        assert!(!snapshot.has_field("WM"));
+
+        // Restaura o estado original
+        std::env::set_var("WAYLAND_DISPLAY", orig_wayland.unwrap_or_default());
+        std::env::set_var("DISPLAY", orig_display.unwrap_or_default());
+        std::env::set_var("XDG_SESSION_TYPE", orig_session_type.unwrap_or_default());
+    }
+
+    #[test]
+    fn test_get_display_field_order_compact_excludes_de_wm() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, true);
+        assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
     }
 }
