@@ -5,7 +5,7 @@ use crate::layout::compose_layout;
 use crate::render::{
     normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
 };
-use crate::system::SystemSnapshot;
+use crate::system::{get_field_order, SystemSnapshot};
 use crate::terminal::Terminal;
 use clap::Parser;
 
@@ -100,51 +100,28 @@ impl App {
 
     /// Constrói as linhas de informações do sistema.
     fn build_info_lines(&self, system: &SystemSnapshot) -> Vec<String> {
-        if self.args.info_only {
-            // Modo info-only: apenas informações
-            let mut lines = Vec::new();
+        let mut lines = Vec::new();
 
-            if !self.args.compact {
-                lines.push(format!("{}@{}", system.user, system.host));
-            }
-
-            lines.push(format!("OS: {}", system.os));
-            lines.push(format!("Kernel: {}", system.kernel));
-            lines.push(format!("Uptime: {}", system.uptime));
-
-            if !self.args.compact {
-                if system.shell != "N/A" {
-                    lines.push(format!("Shell: {}", system.shell));
-                }
-                lines.push(format!("CPU: {}", system.cpu));
-                lines.push(format!("RAM: {}", system.ram));
-            }
-
-            lines
-        } else if self.args.logo_only {
-            // Modo logo-only: apenas arte (sem informações)
-            Vec::new()
-        } else {
-            // Modo normal: arte + informações
-            let mut lines = Vec::new();
-
-            if !self.args.compact {
-                lines.push(format!("{}@{}", system.user, system.host));
-            }
-
-            lines.push(format!("OS: {}", system.os));
-            lines.push(format!("Kernel: {}", system.kernel));
-            lines.push(format!("Uptime: {}", system.uptime));
-
-            if !self.args.compact {
-                if system.shell != "N/A" {
-                    lines.push(format!("Shell: {}", system.shell));
-                }
-                lines.push(format!("CPU: {}", system.cpu));
-                lines.push(format!("RAM: {}", system.ram));
-            }
-
-            lines
+        // user@host (apenas em modo full)
+        if !self.args.compact {
+            lines.push(system.user_host.clone());
         }
+
+        // Compact mode: OS, Kernel, Uptime, Disk, CPU, RAM
+        if self.args.compact {
+            lines.push(format!("OS: {}", system.get("OS")));
+            lines.push(format!("Kernel: {}", system.get("Kernel")));
+            lines.push(format!("Uptime: {}", system.get("Uptime")));
+            lines.push(format!("Disk: {}", system.get("Disk")));
+            lines.push(format!("CPU: {}", system.get("CPU")));
+            lines.push(format!("RAM: {}", system.get("RAM")));
+        } else {
+            // Full mode: ordem específica definida em get_field_order()
+            for field_name in get_field_order() {
+                lines.push(format!("{}: {}", field_name, system.get(field_name)));
+            }
+        }
+
+        lines
     }
 }
