@@ -62,7 +62,7 @@ O comando padrão `astrofetch` deve ser rápido o suficiente para uso interativo
 Regras:
 
 - Não chamar subprocessos lentos no caminho padrão.
-- Não executar `journalctl`, contagem de pacotes, detecção detalhada de GPU ou detecção de temas por padrão.
+- Não executar `journalctl` por padrão; campos via subprocesso devem ser best-effort, silenciosos e medidos.
 - Medir cold start com um comando simples de benchmark.
 - Campos lentos devem ser opcionais, ter timeout curto e limite de saída.
 - Quando possível, paralelizar coleta lenta com geração visual.
@@ -726,6 +726,8 @@ Política de performance:
 - `Packages`, `GPU`, temas, fonte e resolução não devem comprometer o cold start.
 - Subprocessos devem ser chamados com `std::process::Command`, argumentos separados, timeout e limite de saída.
 - O app deve funcionar em Linux, macOS e Windows mesmo quando campos específicos não existirem.
+
+Status atual: os campos de paridade do MVP 0.2B são coletados em modo best-effort no Linux quando as fontes locais estão disponíveis.
 
 Estratégia sugerida:
 

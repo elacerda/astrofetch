@@ -21,7 +21,7 @@ O objetivo inicial é produzir uma saída parecida com isto:
                               Disk: ...
 ```
 
-No futuro, o AstroFetch também poderá mostrar informações opcionais mais ricas, como GPU, pacotes instalados, desktop environment, window manager, temas gráficos e um pequeno resumo de logs do sistema.
+O AstroFetch também pode mostrar informações opcionais mais ricas, como GPU, pacotes instalados, desktop environment, window manager e temas gráficos. Um pequeno resumo de logs do sistema segue como ideia futura.
 
 ## Plataformas-alvo
 
@@ -119,7 +119,7 @@ astrofetch watch --interval 2s
 
 ## Restrições técnicas importantes
 
-O comando padrão deve ser rápido. Campos que exigem subprocessos lentos, como contagem de pacotes, GPU detalhada, temas de desktop e logs, não devem bloquear o caminho principal.
+O comando padrão deve ser rápido. Campos que exigem subprocessos, como contagem de pacotes, GPU detalhada, temas de desktop e logs, devem ser best-effort, silenciosos e não bloquear o caminho principal.
 
 O layout deve usar largura visual de terminal, não `String::len()`, porque códigos ANSI não ocupam colunas visuais e caracteres Unicode podem ter largura diferente de um byte.
 

@@ -167,6 +167,7 @@ impl SystemSnapshot {
         let disk = get_disk_info();
         let de = get_desktop_environment();
         let wm = get_window_manager_or_session();
+        let desktop_cosmetics = get_desktop_cosmetics();
 
         // Constrói o snapshot com todos os campos
         let mut fields = BTreeMap::new();
@@ -194,6 +195,18 @@ impl SystemSnapshot {
         }
         if let Some(wm_val) = wm {
             fields.insert("WM".to_string(), wm_val);
+        }
+        if let Some(wm_theme_val) = desktop_cosmetics.wm_theme {
+            fields.insert("WM Theme".to_string(), wm_theme_val);
+        }
+        if let Some(gtk_theme_val) = desktop_cosmetics.gtk_theme {
+            fields.insert("GTK Theme".to_string(), gtk_theme_val);
+        }
+        if let Some(icon_theme_val) = desktop_cosmetics.icon_theme {
+            fields.insert("Icon Theme".to_string(), icon_theme_val);
+        }
+        if let Some(font_val) = desktop_cosmetics.font {
+            fields.insert("Font".to_string(), font_val);
         }
 
         Self {
@@ -362,17 +375,7 @@ fn get_packages() -> Option<String> {
             256 * 1024, // 256KB para pacotes
         ) {
             // Conta apenas linhas onde o status é exatamente "ii" (instalado)
-            let count = output
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    // O status deve ser exatamente "ii" no início da linha
-                    trimmed.starts_with("ii ")
-                })
-                .count();
-
-            // Se encontrou pacotes, retorna o count
-            if count > 0 {
+            if let Some(count) = parse_dpkg_query_installed_count(&output) {
                 return Some(count.to_string());
             }
         }
@@ -386,17 +389,7 @@ fn get_packages() -> Option<String> {
             256 * 1024, // 256KB para pacotes
         ) {
             // Conta linhas onde a segunda coluna é exatamente "install"
-            let count = output
-                .lines()
-                .filter(|line| {
-                    let trimmed = line.trim();
-                    // Divide por whitespace e verifica a segunda coluna
-                    let parts: Vec<&str> = trimmed.split_whitespace().collect();
-                    parts.len() >= 2 && parts[1] == "install"
-                })
-                .count();
-
-            if count > 0 {
+            if let Some(count) = parse_dpkg_get_selections_installed_count(&output) {
                 return Some(count.to_string());
             }
         }
@@ -408,6 +401,29 @@ fn get_packages() -> Option<String> {
     {
         None
     }
+}
+
+/// Conta pacotes instalados em saída de `dpkg-query`.
+fn parse_dpkg_query_installed_count(output: &str) -> Option<usize> {
+    let count = output
+        .lines()
+        .filter(|line| line.trim().starts_with("ii "))
+        .count();
+
+    (count > 0).then_some(count)
+}
+
+/// Conta pacotes instalados em saída de `dpkg --get-selections`.
+fn parse_dpkg_get_selections_installed_count(output: &str) -> Option<usize> {
+    let count = output
+        .lines()
+        .filter(|line| {
+            let mut parts = line.split_whitespace();
+            parts.next().is_some() && parts.next() == Some("install")
+        })
+        .count();
+
+    (count > 0).then_some(count)
 }
 
 /// Obtém o uptime do sistema.
@@ -532,6 +548,59 @@ fn get_window_manager_or_session() -> Option<String> {
     }
 
     None
+}
+
+/// Temas e fonte de desktop coletados de forma best-effort.
+#[derive(Debug, Clone, Default)]
+struct DesktopCosmetics {
+    wm_theme: Option<String>,
+    gtk_theme: Option<String>,
+    icon_theme: Option<String>,
+    font: Option<String>,
+}
+
+/// Obtém temas e fonte via `gsettings` em ambientes GNOME-like.
+fn get_desktop_cosmetics() -> DesktopCosmetics {
+    #[cfg(target_os = "linux")]
+    {
+        DesktopCosmetics {
+            wm_theme: get_gsettings_string("org.gnome.desktop.wm.preferences", "theme"),
+            gtk_theme: get_gsettings_string("org.gnome.desktop.interface", "gtk-theme"),
+            icon_theme: get_gsettings_string("org.gnome.desktop.interface", "icon-theme"),
+            font: get_gsettings_string("org.gnome.desktop.interface", "font-name"),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        DesktopCosmetics::default()
+    }
+}
+
+/// Lê uma chave string do `gsettings`, sem depender de shell.
+fn get_gsettings_string(schema: &str, key: &str) -> Option<String> {
+    run_command_best_effort("gsettings", &["get", schema, key])
+        .and_then(|output| parse_gsettings_value(&output))
+}
+
+/// Normaliza saída string do `gsettings get`.
+fn parse_gsettings_value(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if trimmed.is_empty() || trimmed.starts_with('@') {
+        return None;
+    }
+
+    let value = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        .unwrap_or(trimmed)
+        .trim();
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 /// Obtém resolução ativa do display no Linux via `xrandr --current` (best-effort).
@@ -1607,6 +1676,18 @@ dpkg                                            install
     }
 
     #[test]
+    fn test_parse_dpkg_query_installed_count_ignores_non_installed_statuses() {
+        let output = r#"ii  bash:amd64
+rc  old-package:amd64
+un  missing-package
+hi  held-unconfigured:amd64
+ii  coreutils:amd64
+"#;
+
+        assert_eq!(parse_dpkg_query_installed_count(output), Some(2));
+    }
+
+    #[test]
     fn test_get_packages_empty_output() {
         // Simula saída vazia
         let empty_output = "";
@@ -1818,6 +1899,74 @@ DP-1 connected (normal left inverted right x axis y axis)
     }
 
     #[test]
+    fn test_parse_gsettings_value_strips_single_quotes() {
+        assert_eq!(
+            parse_gsettings_value("'Adwaita'\n"),
+            Some("Adwaita".to_string())
+        );
+        assert_eq!(
+            parse_gsettings_value("'Cantarell 11'"),
+            Some("Cantarell 11".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_gsettings_value_rejects_empty_or_unusable_output() {
+        assert_eq!(parse_gsettings_value("''"), None);
+        assert_eq!(parse_gsettings_value("   "), None);
+        assert_eq!(parse_gsettings_value("@as []"), None);
+    }
+
+    #[test]
+    fn test_get_display_field_order_positions_desktop_cosmetics() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Packages".to_string(), "1234".to_string());
+        fields.insert("Shell".to_string(), "bash".to_string());
+        fields.insert("Resolution".to_string(), "1920x1080".to_string());
+        fields.insert("DE".to_string(), "GNOME".to_string());
+        fields.insert("WM".to_string(), "Mutter".to_string());
+        fields.insert("WM Theme".to_string(), "Adwaita".to_string());
+        fields.insert("GTK Theme".to_string(), "Yaru".to_string());
+        fields.insert("Icon Theme".to_string(), "Yaru".to_string());
+        fields.insert("Font".to_string(), "Cantarell 11".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("GPU".to_string(), "Test GPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, false);
+        assert_eq!(
+            order,
+            vec![
+                "OS",
+                "Kernel",
+                "Uptime",
+                "Packages",
+                "Shell",
+                "Resolution",
+                "DE",
+                "WM",
+                "WM Theme",
+                "GTK Theme",
+                "Icon Theme",
+                "Font",
+                "Disk",
+                "CPU",
+                "GPU",
+                "RAM"
+            ]
+        );
+    }
+
+    #[test]
     fn test_get_display_field_order_positions_resolution_and_gpu() {
         let mut fields = BTreeMap::new();
         fields.insert("OS".to_string(), "Linux".to_string());
@@ -1856,6 +2005,10 @@ DP-1 connected (normal left inverted right x axis y axis)
         fields.insert("Kernel".to_string(), "6.x".to_string());
         fields.insert("Uptime".to_string(), "1h 2m".to_string());
         fields.insert("Resolution".to_string(), "1920x1080".to_string());
+        fields.insert("WM Theme".to_string(), "Adwaita".to_string());
+        fields.insert("GTK Theme".to_string(), "Yaru".to_string());
+        fields.insert("Icon Theme".to_string(), "Yaru".to_string());
+        fields.insert("Font".to_string(), "Cantarell 11".to_string());
         fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
         fields.insert("CPU".to_string(), "Test CPU".to_string());
         fields.insert("GPU".to_string(), "Test GPU".to_string());
@@ -1869,6 +2022,10 @@ DP-1 connected (normal left inverted right x axis y axis)
         let order = get_display_field_order(&snapshot, true);
         assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
         assert!(!order.contains(&"Resolution"));
+        assert!(!order.contains(&"WM Theme"));
+        assert!(!order.contains(&"GTK Theme"));
+        assert!(!order.contains(&"Icon Theme"));
+        assert!(!order.contains(&"Font"));
         assert!(!order.contains(&"GPU"));
     }
 }

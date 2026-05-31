@@ -287,6 +287,18 @@ mod tests {
             .insert("Resolution".to_string(), "1920x1080".to_string());
         snapshot
             .fields
+            .insert("WM Theme".to_string(), "Adwaita".to_string());
+        snapshot
+            .fields
+            .insert("GTK Theme".to_string(), "Yaru".to_string());
+        snapshot
+            .fields
+            .insert("Icon Theme".to_string(), "Yaru".to_string());
+        snapshot
+            .fields
+            .insert("Font".to_string(), "Cantarell 11".to_string());
+        snapshot
+            .fields
             .insert("GPU".to_string(), "Test GPU".to_string());
 
         let lines = app.build_info_lines(&snapshot);
@@ -304,6 +316,10 @@ mod tests {
             ]
         );
         assert!(!joined.contains("Resolution:"));
+        assert!(!joined.contains("WM Theme:"));
+        assert!(!joined.contains("GTK Theme:"));
+        assert!(!joined.contains("Icon Theme:"));
+        assert!(!joined.contains("Font:"));
         assert!(!joined.contains("GPU:"));
     }
 }
