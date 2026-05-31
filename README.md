@@ -42,6 +42,53 @@ After install, run:
 astrofetch
 ```
 
+## Shell Startup Integration
+
+`cargo install --path .` installs the `astrofetch` binary but does not
+automatically add it to your shell startup files (e.g., `~/.bashrc`,
+`~/.zshrc`).
+
+If you want AstroFetch to run automatically when you open a new interactive
+terminal, add one of the following snippets to your shell configuration.
+
+### Bash (~/.bashrc)
+
+```bash
+if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+    astrofetch
+fi
+```
+
+The `[[ $- == *i* ]]` guard ensures AstroFetch only runs in interactive shells,
+preventing issues in non-interactive contexts (e.g., SSH commands, scripts).
+
+For a compact output, you can use:
+
+```bash
+if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+    astrofetch --compact
+fi
+```
+
+### Zsh (~/.zshrc)
+
+```zsh
+if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+    astrofetch
+fi
+```
+
+Or use the compact form:
+
+```zsh
+if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+    astrofetch --compact
+fi
+```
+
+After editing your shell config, reload it with `source ~/.bashrc` (or
+`source ~/.zshrc`) or open a new terminal to see the changes.
+
 ## Usage
 
 ```bash
