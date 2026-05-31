@@ -132,6 +132,7 @@ pub fn shell_block(shell: SetupShell, compact: bool) -> String {
 }
 
 /// Infers a Unix shell from a `SHELL` environment value.
+#[cfg(any(unix, test))]
 pub fn infer_unix_shell(shell_path: &str) -> Option<SetupShell> {
     let name = Path::new(shell_path).file_name()?.to_str()?;
 
