@@ -404,6 +404,7 @@ fn get_packages() -> Option<String> {
 }
 
 /// Conta pacotes instalados em saída de `dpkg-query`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_dpkg_query_installed_count(output: &str) -> Option<usize> {
     let count = output
         .lines()
@@ -414,6 +415,7 @@ fn parse_dpkg_query_installed_count(output: &str) -> Option<usize> {
 }
 
 /// Conta pacotes instalados em saída de `dpkg --get-selections`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_dpkg_get_selections_installed_count(output: &str) -> Option<usize> {
     let count = output
         .lines()
@@ -467,6 +469,7 @@ fn get_uptime() -> String {
 }
 
 /// Formata segundos em formato legível.
+#[cfg(target_os = "linux")]
 fn format_uptime(seconds: u64) -> String {
     let minutes = seconds / 60;
     let hours = minutes / 60;
@@ -578,12 +581,14 @@ fn get_desktop_cosmetics() -> DesktopCosmetics {
 }
 
 /// Lê uma chave string do `gsettings`, sem depender de shell.
+#[cfg(target_os = "linux")]
 fn get_gsettings_string(schema: &str, key: &str) -> Option<String> {
     run_command_best_effort("gsettings", &["get", schema, key])
         .and_then(|output| parse_gsettings_value(&output))
 }
 
 /// Normaliza saída string do `gsettings get`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_gsettings_value(output: &str) -> Option<String> {
     let trimmed = output.trim();
     if trimmed.is_empty() || trimmed.starts_with('@') {
@@ -625,6 +630,7 @@ fn get_resolution() -> Option<String> {
 /// - Prefere monitor marcado como `primary`.
 /// - Caso contrário, usa o primeiro monitor `connected` com modo atual.
 /// - Ignora linhas `disconnected`.
+#[cfg(any(target_os = "linux", test))]
 fn parse_xrandr_resolution(output: &str) -> Option<String> {
     let lines: Vec<&str> = output.lines().collect();
     let mut fallback: Option<String> = None;
@@ -675,6 +681,7 @@ fn parse_xrandr_resolution(output: &str) -> Option<String> {
 
 /// Extrai resolução da linha principal de um monitor conectado.
 /// Exemplo suportado: `HDMI-0 connected primary 3440x1440+0+0 ...`
+#[cfg(any(target_os = "linux", test))]
 fn extract_resolution_from_connected_line(line: &str) -> Option<String> {
     for token in line.split_whitespace() {
         if let Some((resolution, _)) = token.split_once('+') {
@@ -688,6 +695,7 @@ fn extract_resolution_from_connected_line(line: &str) -> Option<String> {
 
 /// Extrai resolução da linha de modos do xrandr (bloco indentado).
 /// Exemplo suportado: `1920x1080     60.00*+ 59.93`.
+#[cfg(any(target_os = "linux", test))]
 fn extract_resolution_from_mode_line(line: &str) -> Option<String> {
     let trimmed = line.trim();
     let mode = trimmed.split_whitespace().next()?;
@@ -699,6 +707,7 @@ fn extract_resolution_from_mode_line(line: &str) -> Option<String> {
 }
 
 /// Verifica se uma string está no formato de resolução `WxH`.
+#[cfg(any(target_os = "linux", test))]
 fn is_resolution_token(token: &str) -> bool {
     let (width, height) = match token.split_once('x') {
         Some(parts) => parts,
@@ -726,6 +735,7 @@ fn get_gpu_info() -> Option<String> {
 }
 
 /// Faz parse da saída do `lspci` para controladores gráficos.
+#[cfg(any(target_os = "linux", test))]
 fn parse_lspci_gpu_info(output: &str) -> Option<String> {
     let mut gpus: Vec<String> = Vec::new();
 
@@ -750,6 +760,7 @@ fn parse_lspci_gpu_info(output: &str) -> Option<String> {
 }
 
 /// Extrai o nome bruto do controlador gráfico a partir de uma linha do `lspci`.
+#[cfg(any(target_os = "linux", test))]
 fn extract_lspci_gpu_name(line: &str) -> Option<&str> {
     let lower = line.to_ascii_lowercase();
     let markers = [
@@ -769,6 +780,7 @@ fn extract_lspci_gpu_name(line: &str) -> Option<&str> {
 }
 
 /// Normaliza nome bruto de GPU para uma versão mais concisa.
+#[cfg(any(target_os = "linux", test))]
 fn normalize_gpu_name(raw: &str) -> String {
     let cleaned = strip_lspci_revision(raw);
 
@@ -817,6 +829,7 @@ fn normalize_gpu_name(raw: &str) -> String {
 }
 
 /// Remove sufixo de revisão comum do `lspci`, ex: `(rev a1)`.
+#[cfg(any(target_os = "linux", test))]
 fn strip_lspci_revision(raw: &str) -> &str {
     let trimmed = raw.trim();
     if trimmed.ends_with(')') {
@@ -828,6 +841,7 @@ fn strip_lspci_revision(raw: &str) -> &str {
 }
 
 /// Busca conteúdo entre colchetes que contenha uma palavra-chave.
+#[cfg(any(target_os = "linux", test))]
 fn find_bracket_content_with_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
     let mut rest = text;
     while let Some(start) = rest.find('[') {
@@ -843,6 +857,7 @@ fn find_bracket_content_with_keyword<'a>(text: &'a str, keyword: &str) -> Option
 }
 
 /// Colapsa whitespace duplicado.
+#[cfg(any(target_os = "linux", test))]
 fn collapse_whitespace(text: &str) -> String {
     text.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
@@ -870,6 +885,7 @@ fn get_ram_info(system: &System) -> String {
 }
 
 /// Formata bytes em uma unidade apropriada (B, K, M, G, T).
+#[cfg(any(target_os = "linux", test))]
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{}B", bytes);
@@ -1006,7 +1022,7 @@ fn get_disk_info() -> String {
 }
 
 /// Parse tamanho de disco do df (ex: "1.8T", "3.9G", "100M").
-#[allow(dead_code)]
+#[cfg(target_os = "macos")]
 fn parse_df_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let (value, multiplier) = if s.ends_with('T') || s.ends_with('t') {
@@ -1580,12 +1596,12 @@ mod tests {
     #[test]
     fn test_run_command_best_effort_output_size_limit() {
         // Testa que output muito grande é detectado como truncado e retorna None
-        // Cria uma string grande (maior que 64KB)
-        let large_output: String = "x".repeat(70 * 1024); // 70KB
-
         // Usamos printf para gerar output grande
         #[cfg(target_os = "linux")]
         {
+            // Cria uma string grande (maior que 64KB)
+            let large_output: String = "x".repeat(70 * 1024); // 70KB
+
             // Cria um script que imprime output grande
             let result = run_command_best_effort(
                 "sh",
@@ -1654,6 +1670,10 @@ dpkg                                            install
 
         // Deve encontrar 10 pacotes
         assert_eq!(count, 10);
+        assert_eq!(
+            parse_dpkg_get_selections_installed_count(valid_output),
+            Some(10)
+        );
     }
 
     #[test]
@@ -1721,12 +1741,12 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
     #[test]
     fn test_run_command_best_effort_with_limit_truncation_detection() {
         // Testa que output truncado é detectado e retorna None
-        // Cria uma string grande (maior que 1KB)
-        let large_output: String = "x".repeat(2 * 1024); // 2KB
-
         // Usamos printf para gerar output grande
         #[cfg(target_os = "linux")]
         {
+            // Cria uma string grande (maior que 1KB)
+            let large_output: String = "x".repeat(2 * 1024); // 2KB
+
             // Tenta com limite pequeno (512 bytes) - deve ser truncado e retornar None
             let result = run_command_best_effort_with_limit(
                 "sh",
@@ -1745,10 +1765,10 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
     #[test]
     fn test_run_command_best_effort_with_limit_accepts_valid_output() {
         // Testa que output válido dentro do limite é aceito
-        let small_output = "hello world";
-
         #[cfg(target_os = "linux")]
         {
+            let small_output = "hello world";
+
             let result = run_command_best_effort_with_limit(
                 "echo",
                 &[small_output],
