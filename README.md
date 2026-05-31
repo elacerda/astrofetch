@@ -24,6 +24,52 @@ in a shell, but mostly built for the joy of making terminal output feel alive.
 
 ## Install
 
+## Installing from source
+
+AstroFetch is written in Rust. If you do not already have a working Rust
+toolchain, install Rust with `rustup` first.
+
+On Linux, macOS, or WSL:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+Then build and install AstroFetch:
+
+```bash
+git clone https://github.com/elacerda/astrofetch.git
+cd astrofetch
+cargo install --path .
+astrofetch
+```
+
+If `cargo install --path .` succeeds but `astrofetch` is not found, make sure
+Cargo's binary directory is in your `PATH`:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+astrofetch
+```
+
+To make this permanent for Bash:
+
+```bash
+echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+You can also run the installed binary directly:
+
+```bash
+"$HOME/.cargo/bin/astrofetch"
+```
+
+Note: distro-packaged Rust installations may work for building, but
+`cargo install` places binaries under `~/.cargo/bin`. If that directory is not
+in your `PATH`, the installed `astrofetch` command will not be found.
+
 Build a release binary:
 
 ```bash
