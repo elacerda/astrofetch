@@ -46,10 +46,50 @@ astrofetch
 
 `cargo install --path .` installs the `astrofetch` binary but does not
 automatically add it to your shell startup files (e.g., `~/.bashrc`,
-`~/.zshrc`).
+`~/.zshrc`, fish config, or a PowerShell profile). Startup integration is
+explicitly opt-in.
 
 If you want AstroFetch to run automatically when you open a new interactive
-terminal, add one of the following snippets to your shell configuration.
+terminal, use `setup-shell`. Start with `--dry-run` to see the target file and
+the exact managed block before anything is written:
+
+```bash
+astrofetch setup-shell --shell bash --dry-run
+```
+
+Then install the managed block:
+
+```bash
+astrofetch setup-shell --shell bash
+```
+
+For compact startup output:
+
+```bash
+astrofetch setup-shell --shell bash --compact
+```
+
+Other shells:
+
+```bash
+astrofetch setup-shell --shell zsh --dry-run
+astrofetch setup-shell --shell fish --dry-run
+astrofetch setup-shell --shell powershell --dry-run
+```
+
+`--dry-run` prints the selected shell, target startup file, and block without
+writing files. If a managed AstroFetch block already exists, `setup-shell` will
+not duplicate it; use `--force` to replace only that managed block while
+preserving the rest of the file.
+
+Advanced/manual testing option:
+
+```bash
+astrofetch setup-shell --shell bash --target-path /tmp/astrofetch-shell-test --dry-run
+```
+
+Manual snippets are still fine if you prefer editing shell configuration
+yourself.
 
 ### Bash (~/.bashrc)
 
@@ -73,7 +113,7 @@ fi
 ### Zsh (~/.zshrc)
 
 ```zsh
-if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then
     astrofetch
 fi
 ```
@@ -81,13 +121,30 @@ fi
 Or use the compact form:
 
 ```zsh
-if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then
     astrofetch --compact
 fi
 ```
 
+### Fish (~/.config/fish/config.fish)
+
+```fish
+if status is-interactive; and command -q astrofetch
+    astrofetch
+end
+```
+
+### PowerShell profile
+
+```powershell
+if ($Host.Name -eq "ConsoleHost" -and (Get-Command astrofetch -ErrorAction SilentlyContinue)) {
+    astrofetch
+}
+```
+
 After editing your shell config, reload it with `source ~/.bashrc` (or
-`source ~/.zshrc`) or open a new terminal to see the changes.
+`source ~/.zshrc`) or open a new terminal to see the changes. For fish and
+PowerShell, opening a new terminal is usually the simplest check.
 
 ## Usage
 
@@ -149,6 +206,8 @@ cargo run -- --version
 cargo run -- --info-only
 cargo run -- --compact
 cargo run --
+cargo run -- setup-shell --help
+cargo run -- setup-shell --shell bash --dry-run
 ```
 
 Release sanity:
@@ -170,6 +229,7 @@ src/
   engine.rs
   render.rs
   layout.rs
+  setup_shell.rs
   terminal.rs
   system.rs
   error.rs
@@ -180,6 +240,7 @@ src/
 - `engine.rs`: procedural brightness models.
 - `render.rs`: numeric canvas to ASCII.
 - `layout.rs`: side-by-side composition.
+- `setup_shell.rs`: opt-in managed shell startup integration.
 - `terminal.rs`: terminal width, ANSI, TTY, and color handling.
 - `system.rs`: best-effort system information collection.
 - `error.rs`: recoverable application errors.

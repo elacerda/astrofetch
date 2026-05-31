@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod layout;
 mod render;
+mod setup_shell;
 mod system;
 mod terminal;
 

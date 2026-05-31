@@ -194,6 +194,29 @@ Critério de aceite:
 - Valores inválidos retornam erro claro.
 - A execução padrão `astrofetch` funciona sem argumentos.
 
+### Fase 2.1: Integração Explícita com Startup de Shell
+
+Status: implementado em Patch K.
+
+O comando `astrofetch setup-shell` adiciona, de forma opt-in, um bloco gerenciado
+ao arquivo de inicialização de bash, zsh, fish ou PowerShell. A instalação via
+`cargo install --path .` continua sem editar arquivos do usuário.
+
+Regras implementadas:
+
+- suporte a `--shell bash|zsh|fish|powershell`;
+- inferência best-effort de shell quando seguro;
+- suporte a `--compact`, `--dry-run`, `--force` e `--target-path`;
+- criação de diretórios pais quando necessário;
+- preservação de todo conteúdo fora dos marcadores gerenciados;
+- não duplicar o bloco quando o comando roda mais de uma vez.
+
+Melhorias futuras possíveis:
+
+- `astrofetch uninstall-shell` para remover apenas o bloco gerenciado;
+- comando de diagnóstico para mostrar qual arquivo seria usado por plataforma;
+- documentação específica de remoção manual para cada shell.
+
 ## Fase 3: Terminal e Layout Primitives
 
 Antes de colorir ou sofisticar a arte, implemente primitivas corretas de terminal.

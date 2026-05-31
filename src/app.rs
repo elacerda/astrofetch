@@ -1,4 +1,4 @@
-use crate::cli::{Args, ArtModel};
+use crate::cli::{Args, ArtModel, Command};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::layout::compose_layout;
@@ -32,6 +32,12 @@ impl App {
 
     /// Executa a lógica principal.
     fn execute(&self) -> Result<(), AppError> {
+        if let Some(command) = &self.args.command {
+            return match command {
+                Command::SetupShell(args) => crate::setup_shell::run(args),
+            };
+        }
+
         // Verifica --no-color explicito
         let colors_enabled = if self.args.no_color {
             false
@@ -133,6 +139,7 @@ mod tests {
     fn build_test_app(compact: bool) -> App {
         App {
             args: Args {
+                command: None,
                 model: ArtModel::Random,
                 width: 40,
                 height: 20,
