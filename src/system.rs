@@ -443,17 +443,12 @@ fn get_uptime() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        // Tenta usar sysctl
-        if let Ok(output) = std::process::Command::new("sysctl")
+        // Tenta usar sysctl. Parsing real do boottime fica para um patch futuro.
+        let _ = std::process::Command::new("sysctl")
             .arg("-n")
             .arg("kern.boottime")
-            .output()
-        {
-            if let Ok(text) = String::from_utf8(output.stdout) {
-                // Parse boottime para calcular uptime
-                return "N/A".to_string(); // Simplificado para MVP
-            }
-        }
+            .output();
+
         "N/A".to_string()
     }
 
@@ -959,8 +954,8 @@ fn get_disk_info() -> String {
                         let used = parts[2];
                         let total = parts[1];
                         // Tenta calcular percentual
-                        if let Ok(used_val) = parse_df_size(used) {
-                            if let Ok(total_val) = parse_df_size(total) {
+                        if let Some(used_val) = parse_df_size(used) {
+                            if let Some(total_val) = parse_df_size(total) {
                                 if total_val > 0 {
                                     let percent = ((used_val as f64 / total_val as f64) * 100.0)
                                         .round()
