@@ -3,7 +3,7 @@ use crate::error::AppError;
 use clap::ValueEnum;
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const START_MARKER: &str = "# >>> astrofetch >>>";
 const END_MARKER: &str = "# <<< astrofetch <<<";
@@ -134,7 +134,7 @@ pub fn shell_block(shell: SetupShell, compact: bool) -> String {
 /// Infers a Unix shell from a `SHELL` environment value.
 #[cfg(any(unix, test))]
 pub fn infer_unix_shell(shell_path: &str) -> Option<SetupShell> {
-    let name = Path::new(shell_path).file_name()?.to_str()?;
+    let name = std::path::Path::new(shell_path).file_name()?.to_str()?;
 
     if name.ends_with("bash") {
         Some(SetupShell::Bash)
