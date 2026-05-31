@@ -277,4 +277,33 @@ mod tests {
         assert!(!joined.contains("Font:"));
         assert!(!joined.contains("GPU:"));
     }
+
+    #[test]
+    fn test_build_info_lines_compact_excludes_resolution_and_gpu_when_present() {
+        let app = build_test_app(true);
+        let mut snapshot = base_snapshot();
+        snapshot
+            .fields
+            .insert("Resolution".to_string(), "1920x1080".to_string());
+        snapshot
+            .fields
+            .insert("GPU".to_string(), "Test GPU".to_string());
+
+        let lines = app.build_info_lines(&snapshot);
+        let joined = lines.join("\n");
+
+        assert_eq!(
+            lines,
+            [
+                "OS: Linux",
+                "Kernel: 6.x",
+                "Uptime: 1h 2m",
+                "Disk: 1G/2G (50%)",
+                "CPU: Test CPU",
+                "RAM: 1.0GB / 2.0GB"
+            ]
+        );
+        assert!(!joined.contains("Resolution:"));
+        assert!(!joined.contains("GPU:"));
+    }
 }

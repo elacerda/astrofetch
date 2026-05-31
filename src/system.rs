@@ -160,7 +160,9 @@ impl SystemSnapshot {
         let uptime = get_uptime();
         let packages = get_packages();
         let shell = get_shell();
+        let resolution = get_resolution();
         let cpu = get_cpu_info(&system);
+        let gpu = get_gpu_info();
         let ram = get_ram_info(&system);
         let disk = get_disk_info();
         let de = get_desktop_environment();
@@ -176,7 +178,13 @@ impl SystemSnapshot {
             fields.insert("Packages".to_string(), packages_val);
         }
         fields.insert("Shell".to_string(), shell.clone());
+        if let Some(resolution_val) = resolution {
+            fields.insert("Resolution".to_string(), resolution_val);
+        }
         fields.insert("CPU".to_string(), cpu.clone());
+        if let Some(gpu_val) = gpu {
+            fields.insert("GPU".to_string(), gpu_val);
+        }
         fields.insert("RAM".to_string(), ram.clone());
         fields.insert("Disk".to_string(), disk.clone());
 
@@ -524,6 +532,250 @@ fn get_window_manager_or_session() -> Option<String> {
     }
 
     None
+}
+
+/// Obtém resolução ativa do display no Linux via `xrandr --current` (best-effort).
+/// Retorna apenas a resolução no formato `WxH` quando for possível identificar
+/// um monitor conectado com modo atual.
+fn get_resolution() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        run_command_best_effort("xrandr", &["--current"])
+            .and_then(|output| parse_xrandr_resolution(&output))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Faz parse da saída do `xrandr --current` e retorna a melhor resolução disponível.
+///
+/// Regras:
+/// - Prefere monitor marcado como `primary`.
+/// - Caso contrário, usa o primeiro monitor `connected` com modo atual.
+/// - Ignora linhas `disconnected`.
+fn parse_xrandr_resolution(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output.lines().collect();
+    let mut fallback: Option<String> = None;
+    let mut i = 0usize;
+
+    while i < lines.len() {
+        let line = lines[i];
+
+        if line.contains(" connected ") && !line.contains(" disconnected ") {
+            let is_primary = line.contains(" connected primary ");
+
+            let mut candidate = extract_resolution_from_connected_line(line);
+
+            // Fallback: alguns drivers não colocam `WxH+X+Y` na linha do monitor.
+            // Nesse caso, procura no bloco de modos abaixo (linha com `*`).
+            if candidate.is_none() {
+                let mut j = i + 1;
+                while j < lines.len() {
+                    let mode_line = lines[j];
+                    if !mode_line.starts_with(' ') && !mode_line.starts_with('\t') {
+                        break;
+                    }
+
+                    if let Some(mode_resolution) = extract_resolution_from_mode_line(mode_line) {
+                        candidate = Some(mode_resolution);
+                        break;
+                    }
+
+                    j += 1;
+                }
+            }
+
+            if let Some(resolution) = candidate {
+                if is_primary {
+                    return Some(resolution);
+                }
+                if fallback.is_none() {
+                    fallback = Some(resolution);
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    fallback
+}
+
+/// Extrai resolução da linha principal de um monitor conectado.
+/// Exemplo suportado: `HDMI-0 connected primary 3440x1440+0+0 ...`
+fn extract_resolution_from_connected_line(line: &str) -> Option<String> {
+    for token in line.split_whitespace() {
+        if let Some((resolution, _)) = token.split_once('+') {
+            if is_resolution_token(resolution) {
+                return Some(resolution.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extrai resolução da linha de modos do xrandr (bloco indentado).
+/// Exemplo suportado: `1920x1080     60.00*+ 59.93`.
+fn extract_resolution_from_mode_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    let mode = trimmed.split_whitespace().next()?;
+    if is_resolution_token(mode) {
+        Some(mode.to_string())
+    } else {
+        None
+    }
+}
+
+/// Verifica se uma string está no formato de resolução `WxH`.
+fn is_resolution_token(token: &str) -> bool {
+    let (width, height) = match token.split_once('x') {
+        Some(parts) => parts,
+        None => return false,
+    };
+
+    !width.is_empty()
+        && !height.is_empty()
+        && width.chars().all(|c| c.is_ascii_digit())
+        && height.chars().all(|c| c.is_ascii_digit())
+}
+
+/// Obtém GPU(s) do Linux via `lspci` (best-effort).
+/// Retorna um nome conciso por GPU, juntando múltiplas entradas com ` / `.
+fn get_gpu_info() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        run_command_best_effort("lspci", &[]).and_then(|output| parse_lspci_gpu_info(&output))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+/// Faz parse da saída do `lspci` para controladores gráficos.
+fn parse_lspci_gpu_info(output: &str) -> Option<String> {
+    let mut gpus: Vec<String> = Vec::new();
+
+    for line in output.lines() {
+        let Some(raw_name) = extract_lspci_gpu_name(line) else {
+            continue;
+        };
+
+        let normalized = normalize_gpu_name(raw_name);
+        if normalized.is_empty() || gpus.iter().any(|gpu| gpu == &normalized) {
+            continue;
+        }
+
+        gpus.push(normalized);
+    }
+
+    if gpus.is_empty() {
+        None
+    } else {
+        Some(gpus.join(" / "))
+    }
+}
+
+/// Extrai o nome bruto do controlador gráfico a partir de uma linha do `lspci`.
+fn extract_lspci_gpu_name(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    let markers = [
+        "vga compatible controller:",
+        "3d controller:",
+        "display controller:",
+    ];
+
+    for marker in markers {
+        if let Some(idx) = lower.find(marker) {
+            let start = idx + marker.len();
+            return Some(line[start..].trim());
+        }
+    }
+
+    None
+}
+
+/// Normaliza nome bruto de GPU para uma versão mais concisa.
+fn normalize_gpu_name(raw: &str) -> String {
+    let cleaned = strip_lspci_revision(raw);
+
+    if cleaned.contains("NVIDIA Corporation") {
+        let remainder = cleaned.replace("NVIDIA Corporation", "").trim().to_string();
+        if let Some(geforce) = find_bracket_content_with_keyword(&remainder, "GeForce") {
+            return collapse_whitespace(&format!("NVIDIA {}", geforce));
+        }
+        return collapse_whitespace(&format!("NVIDIA {}", remainder));
+    }
+
+    if cleaned.contains("Advanced Micro Devices")
+        || cleaned.contains("[AMD/ATI]")
+        || cleaned.starts_with("AMD ")
+    {
+        if let Some(radeon) = find_bracket_content_with_keyword(cleaned, "Radeon") {
+            return collapse_whitespace(&format!("AMD {}", radeon));
+        }
+
+        let remainder = cleaned
+            .replace("Advanced Micro Devices, Inc.", "")
+            .replace("Advanced Micro Devices, Inc", "")
+            .replace("[AMD/ATI]", "")
+            .replace("AMD/ATI", "")
+            .trim()
+            .to_string();
+
+        if remainder.is_empty() {
+            return "AMD".to_string();
+        }
+        if remainder.starts_with("AMD ") {
+            return collapse_whitespace(&remainder);
+        }
+        return collapse_whitespace(&format!("AMD {}", remainder));
+    }
+
+    if cleaned.contains("Intel Corporation") {
+        let remainder = cleaned.replace("Intel Corporation", "").trim().to_string();
+        if remainder.starts_with("Intel ") {
+            return collapse_whitespace(&remainder);
+        }
+        return collapse_whitespace(&format!("Intel {}", remainder));
+    }
+
+    collapse_whitespace(cleaned)
+}
+
+/// Remove sufixo de revisão comum do `lspci`, ex: `(rev a1)`.
+fn strip_lspci_revision(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.ends_with(')') {
+        if let Some(idx) = trimmed.rfind(" (rev ") {
+            return trimmed[..idx].trim();
+        }
+    }
+    trimmed
+}
+
+/// Busca conteúdo entre colchetes que contenha uma palavra-chave.
+fn find_bracket_content_with_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        let after_start = &rest[start + 1..];
+        let end = after_start.find(']')?;
+        let content = after_start[..end].trim();
+        if content.contains(keyword) {
+            return Some(content);
+        }
+        rest = &after_start[end + 1..];
+    }
+    None
+}
+
+/// Colapsa whitespace duplicado.
+fn collapse_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<&str>>().join(" ")
 }
 
 /// Obtém informações da CPU.
@@ -1507,5 +1759,116 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
         let order = get_display_field_order(&snapshot, true);
         // Compact mode deve excluir Packages
         assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
+    }
+
+    #[test]
+    fn test_parse_xrandr_resolution_primary_monitor() {
+        let xrandr_output = r#"Screen 0: minimum 8 x 8, current 3440 x 1440, maximum 32767 x 32767
+HDMI-0 connected primary 3440x1440+0+0 (normal left inverted right x axis y axis) 800mm x 340mm
+DP-0 disconnected (normal left inverted right x axis y axis)
+"#;
+
+        let resolution = parse_xrandr_resolution(xrandr_output);
+        assert_eq!(resolution, Some("3440x1440".to_string()));
+    }
+
+    #[test]
+    fn test_parse_xrandr_resolution_connected_non_primary_monitor() {
+        let xrandr_output = r#"Screen 0: minimum 8 x 8, current 1920 x 1080, maximum 32767 x 32767
+eDP-1 connected 1920x1080+0+0 (normal left inverted right x axis y axis) 309mm x 174mm
+HDMI-1 disconnected (normal left inverted right x axis y axis)
+"#;
+
+        let resolution = parse_xrandr_resolution(xrandr_output);
+        assert_eq!(resolution, Some("1920x1080".to_string()));
+    }
+
+    #[test]
+    fn test_parse_xrandr_resolution_disconnected_or_unusable_output() {
+        let xrandr_output = r#"Screen 0: minimum 8 x 8, current 0 x 0, maximum 32767 x 32767
+HDMI-1 disconnected (normal left inverted right x axis y axis)
+DP-1 connected (normal left inverted right x axis y axis)
+   60.00
+"#;
+
+        let resolution = parse_xrandr_resolution(xrandr_output);
+        assert_eq!(resolution, None);
+    }
+
+    #[test]
+    fn test_parse_lspci_gpu_info_nvidia() {
+        let lspci_output = r#"01:00.0 VGA compatible controller: NVIDIA Corporation GA106 [GeForce RTX 3060] (rev a1)
+"#;
+
+        let gpu = parse_lspci_gpu_info(lspci_output);
+        assert_eq!(gpu, Some("NVIDIA GeForce RTX 3060".to_string()));
+    }
+
+    #[test]
+    fn test_parse_lspci_gpu_info_amd_and_intel() {
+        let lspci_output = r#"00:02.0 VGA compatible controller: Intel Corporation UHD Graphics 620 (rev 07)
+01:00.0 Display controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600 XT] (rev c7)
+"#;
+
+        let gpu = parse_lspci_gpu_info(lspci_output);
+        assert_eq!(
+            gpu,
+            Some("Intel UHD Graphics 620 / AMD Radeon RX 6600 XT".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_display_field_order_positions_resolution_and_gpu() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Packages".to_string(), "1234".to_string());
+        fields.insert("Shell".to_string(), "bash".to_string());
+        fields.insert("Resolution".to_string(), "1920x1080".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("GPU".to_string(), "Test GPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, false);
+        let shell_idx = order.iter().position(|field| *field == "Shell").unwrap();
+        let resolution_idx = order
+            .iter()
+            .position(|field| *field == "Resolution")
+            .unwrap();
+        let cpu_idx = order.iter().position(|field| *field == "CPU").unwrap();
+        let gpu_idx = order.iter().position(|field| *field == "GPU").unwrap();
+
+        assert_eq!(resolution_idx, shell_idx + 1);
+        assert_eq!(gpu_idx, cpu_idx + 1);
+    }
+
+    #[test]
+    fn test_get_display_field_order_compact_excludes_resolution_and_gpu() {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), "Linux".to_string());
+        fields.insert("Kernel".to_string(), "6.x".to_string());
+        fields.insert("Uptime".to_string(), "1h 2m".to_string());
+        fields.insert("Resolution".to_string(), "1920x1080".to_string());
+        fields.insert("Disk".to_string(), "1G/2G (50%)".to_string());
+        fields.insert("CPU".to_string(), "Test CPU".to_string());
+        fields.insert("GPU".to_string(), "Test GPU".to_string());
+        fields.insert("RAM".to_string(), "1.0GB / 2.0GB".to_string());
+
+        let snapshot = SystemSnapshot {
+            user_host: "user@host".to_string(),
+            fields,
+        };
+
+        let order = get_display_field_order(&snapshot, true);
+        assert_eq!(order, vec!["OS", "Kernel", "Uptime", "Disk", "CPU", "RAM"]);
+        assert!(!order.contains(&"Resolution"));
+        assert!(!order.contains(&"GPU"));
     }
 }
