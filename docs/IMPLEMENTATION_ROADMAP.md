@@ -727,9 +727,9 @@ Política de performance:
 - Subprocessos devem ser chamados com `std::process::Command`, argumentos separados, timeout e limite de saída.
 - O app deve funcionar em Linux, macOS e Windows mesmo quando campos específicos não existirem.
 
-Status atual: os campos de paridade do MVP 0.2B são coletados em modo best-effort no Linux quando as fontes locais estão disponíveis.
+Status atual: MVP 0.2B está implementado para o painel principal. Os campos de paridade são coletados em modo best-effort, com foco Linux primeiro, e campos indisponíveis são omitidos.
 
-Estratégia sugerida:
+Estratégia concluída:
 
 - Primeiro completar campos baratos:
   - Disk;
@@ -757,3 +757,10 @@ Critérios de aceite:
 - Em macOS e Windows, campos ausentes são omitidos ou exibem `N/A`.
 - O app não fica lento por padrão.
 - O output permanece alinhado mesmo com campos longos.
+
+### Próximos trabalhos
+
+- Aplicar timeout real para comandos externos.
+- Considerar cache opcional ou modos fast/full para campos mais caros.
+- Preparar empacotamento e fluxo de release.
+- Melhorar fontes de informação em macOS e Windows.

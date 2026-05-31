@@ -3,52 +3,56 @@ use clap::Parser;
 /// Opções de modelo de arte ASCII.
 #[derive(Debug, Clone, clap::ValueEnum)]
 pub enum ArtModel {
-    /// Escolhe aleatoriamente entre os modelos disponíveis.
+    /// Choose randomly from the available models.
     Random,
-    /// Galáxia elíptica.
+    /// Elliptical galaxy.
     Elliptical,
-    /// Galáxia espiral.
+    /// Spiral galaxy.
     Spiral,
-    /// Aglomerado estelar.
+    /// Stellar cluster.
     Cluster,
-    /// Campo de estrelas simples.
+    /// Simple starfield.
     Starfield,
 }
 
 /// Argumentos de linha de comando do AstroFetch.
 #[derive(Debug, Clone, Parser)]
 #[command(name = "astrofetch")]
-#[command(about = "Um app de terminal que mostra informações do sistema ao lado de arte ASCII astrofísica", long_about = None)]
+#[command(
+    version,
+    about = "Show system info beside procedural astrophysical ASCII art",
+    long_about = "AstroFetch is a small screenFetch-inspired terminal app that replaces a static distro logo with procedural galaxies, clusters, and starfields."
+)]
 pub struct Args {
-    /// Modelo de arte ASCII (random, elliptical, spiral, cluster, starfield)
+    /// ASCII art model to render
     #[arg(short, long, default_value = "random")]
     pub model: ArtModel,
 
-    /// Largura da arte ASCII (padrão: 40)
+    /// Width of the ASCII art area
     #[arg(short, long, default_value = "40")]
     pub width: usize,
 
-    /// Altura da arte ASCII (padrão: 20)
+    /// Height of the ASCII art area
     #[arg(long, default_value = "20")]
     pub height: usize,
 
-    /// Seed para geração determinística
+    /// Seed for deterministic art generation
     #[arg(short, long)]
     pub seed: Option<u64>,
 
-    /// Desativa cores ANSI
+    /// Disable ANSI color output
     #[arg(long)]
     pub no_color: bool,
 
-    /// Imprime apenas a arte ASCII
+    /// Print only the ASCII art
     #[arg(long)]
     pub logo_only: bool,
 
-    /// Imprime apenas informações do sistema
+    /// Print only system information
     #[arg(long)]
     pub info_only: bool,
 
-    /// Modo compacto (menos campos)
+    /// Print the compact field set
     #[arg(long)]
     pub compact: bool,
 }

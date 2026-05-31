@@ -1,9 +1,11 @@
 [package]
 name = "astrofetch"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "A personal terminal fetch app inspired by screenFetch"
+description = "A screenFetch-inspired terminal app with procedural astrophysical ASCII art"
 license = "MIT"
+keywords = ["cli", "terminal", "fetch", "ascii-art"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

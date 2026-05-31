@@ -1,147 +1,113 @@
 # AstroFetch
 
-**AstroFetch** é um app pessoal de terminal, escrito em Rust, inspirado no estilo do `screenFetch`: ele mostra informações do sistema ao lado de uma imagem ASCII astrofísica gerada de forma procedural.
+**AstroFetch** is a small Rust terminal fetch app inspired by `screenFetch`.
+Instead of showing a static distro logo, it prints procedural astrophysical ASCII
+art next to a screenFetch-like system panel.
 
-A ideia é simples e despojada: trocar o logo fixo da distribuição por uma galáxia, aglomerado estelar ou campo de estrelas em ASCII, mantendo o charme dos antigos fetch tools de terminal.
+It is personal, lightweight, and a little starry on purpose: useful enough to run
+in a shell, but mostly built for the joy of making terminal output feel alive.
 
-> Status: projeto experimental, feito para uso pessoal e portfólio.
+## Features
 
-## Ideia
+- Procedural ASCII art models: random, elliptical galaxy, spiral galaxy, cluster,
+  and starfield.
+- ScreenFetch-like system info in full mode:
+  OS, Kernel, Uptime, Packages, Shell, Resolution, DE, WM, themes, Disk, CPU,
+  GPU, and RAM.
+- Compact mode with the stable core fields:
+  OS, Kernel, Uptime, Disk, CPU, RAM.
+- `--info-only` and `--logo-only` modes for scripts, screenshots, and quick checks.
+- Deterministic seeds for reproducible art.
+- Optional ANSI color, with `--no-color` support.
+- Best-effort platform behavior: unavailable local commands or settings simply
+  omit optional fields.
 
-O objetivo inicial é produzir uma saída parecida com isto:
+## Install
 
-```text
-[galáxia ASCII procedural]    user@host
-[ou aglomerado estelar]       OS: Ubuntu 24.04
-[ou campo de estrelas]        Kernel: Linux 6.x
-                              Uptime: 2h 34m
-                              Shell: bash
-                              CPU: AMD Ryzen ...
-                              RAM: ...
-                              Disk: ...
+Build a release binary:
+
+```bash
+cargo build --release
 ```
 
-O AstroFetch também pode mostrar informações opcionais mais ricas, como GPU, pacotes instalados, desktop environment, window manager e temas gráficos. Um pequeno resumo de logs do sistema segue como ideia futura.
+Install from this checkout:
 
-## Plataformas-alvo
-
-O AstroFetch deve funcionar em:
-
-- Linux;
-- macOS;
-- Windows.
-
-A experiência principal deve ser multiplataforma. Campos específicos de cada sistema operacional devem ser best-effort: quando uma informação não estiver disponível, o app deve omitir o campo ou mostrar um fallback simples, sem falhar.
-
-## Alvo visual e informacional
-
-O AstroFetch busca uma experiência semelhante ao `screenFetch`, mas com arte astrofísica procedural em vez de logo fixo da distribuição.
-
-Campos que servem como referência para o painel:
-
-```text
-user@host
-OS
-Kernel
-Uptime
-Packages
-Shell
-Resolution
-DE
-WM
-WM Theme
-GTK Theme
-Icon Theme
-Font
-Disk
-CPU
-GPU
-RAM
+```bash
+cargo install --path .
 ```
 
-Nem todos os campos precisam estar no caminho padrão. Campos potencialmente lentos ou dependentes de plataforma devem ser tratados como best-effort para preservar a velocidade do app.
+After install, run:
 
-A arte deve respeitar `--height` como número fixo de linhas. Não há necessidade de um `--max-art-lines` separado neste momento.
+```bash
+astrofetch
+```
 
-## Funcionalidades planejadas
-
-- Arte ASCII astrofísica procedural.
-- Modelos visuais como galáxia elíptica, galáxia espiral, aglomerado estelar e campo de estrelas.
-- Informações básicas do sistema no estilo `screenFetch`.
-- Layout com arte à esquerda e informações à direita.
-- Cores ANSI opcionais.
-- Modo sem cor para logs, prints, redirecionamento e compatibilidade.
-- Seeds determinísticas para reproduzir a mesma imagem.
-- Integrações opcionais por plataforma, como `journalctl` no Linux.
-- Modo dinâmico futuro, com atualização periódica.
-
-## Roadmap curto
-
-1. **Vertical slice multiplataforma:** imprimir uma arte ASCII simples à esquerda e informações básicas do sistema à direita em Linux, macOS e Windows.
-2. **Layout robusto:** calcular largura visual corretamente, sem quebrar com ANSI ou caracteres Unicode.
-3. **Motor astrofísico procedural:** gerar galáxias, clusters e campos estelares com normalização, contraste e correção de aspecto para terminal.
-4. **Campos de sistema confiáveis:** adicionar OS, kernel, uptime, shell, CPU, RAM e disco usando uma camada multiplataforma.
-5. **Campos avançados opcionais:** adicionar GPU, pacotes, resolução, DE/WM e temas como campos best-effort e nunca bloqueantes.
-6. **Customização:** adicionar opções como `--no-color`, `--logo-only`, `--info-only`, `--model`, `--seed`, `--width`, `--height`, `--palette`, `--fields` e `--hide`.
-7. **Logs opcionais:** exibir eventos recentes quando houver suporte na plataforma, começando por `journalctl` no Linux.
-8. **Arte reativa:** permitir que a imagem ASCII varie de acordo com CPU, RAM, load average ou eventos recentes.
-9. **Modo watch:** atualizar a tela periodicamente sem flicker excessivo.
-
-## Uso pretendido
+## Usage
 
 ```bash
 astrofetch
 ```
 
 ```bash
-astrofetch --model spiral --width 40 --height 20
+astrofetch --info-only
 ```
 
 ```bash
-astrofetch --seed 42 --no-color
+astrofetch --compact
 ```
 
 ```bash
-astrofetch --logo-only
+astrofetch --logo-only --model spiral --width 40 --height 16 --seed 42
 ```
 
 ```bash
-astrofetch --fields os,kernel,uptime,shell,cpu,ram,disk
+astrofetch --no-color
 ```
 
+Useful discovery commands:
+
 ```bash
-astrofetch --journal --journal-lines 5
+astrofetch --help
+astrofetch --version
 ```
 
-```bash
-astrofetch watch --interval 2s
-```
+## Optional Fields
 
-## Restrições técnicas importantes
+Some fields depend on local commands or desktop settings. On Linux, AstroFetch
+uses best-effort probes such as `dpkg-query`, `xrandr`, `lspci`, and `gsettings`
+when they are available.
 
-O comando padrão deve ser rápido. Campos que exigem subprocessos, como contagem de pacotes, GPU detalhada, temas de desktop e logs, devem ser best-effort, silenciosos e não bloquear o caminho principal.
+If a probe fails, is missing, or returns unusable output, AstroFetch omits that
+field instead of filling the terminal with `N/A`.
 
-O layout deve usar largura visual de terminal, não `String::len()`, porque códigos ANSI não ocupam colunas visuais e caracteres Unicode podem ter largura diferente de um byte.
-
-A paleta padrão deve ser ASCII puro para máxima compatibilidade. Paletas Unicode podem ser opcionais.
-
-A renderização astrofísica deve ser tratada como visualização de baixa resolução. Antes de mapear valores para caracteres ASCII, o app deve aplicar normalização, contraste e correção de aspecto.
-
-Cores ANSI devem ser desativadas quando `--no-color` for usado, quando a saída não for um TTY ou quando a variável `NO_COLOR` estiver definida.
-
-Subprocessos devem ser opcionais, ter timeout curto, limite de saída e ser executados sem shell interpolation.
-
-## Desenvolvimento
+## Development
 
 ```bash
-cargo build
-cargo run -- --help
-cargo test
 cargo fmt
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-## Arquitetura inicial
+Runtime checks:
+
+```bash
+cargo run -- --help
+cargo run -- --version
+cargo run -- --info-only
+cargo run -- --compact
+cargo run --
+```
+
+Release sanity:
+
+```bash
+cargo build --release
+./target/release/astrofetch --version
+./target/release/astrofetch --info-only
+./target/release/astrofetch --compact
+```
+
+## Project Shape
 
 ```text
 src/
@@ -156,28 +122,17 @@ src/
   error.rs
 ```
 
-- `cli.rs`: parsing de argumentos com `clap`.
-- `app.rs`: orquestra o fluxo principal.
-- `engine.rs`: geração procedural da matriz de luminosidade.
-- `render.rs`: conversão da matriz numérica para ASCII.
-- `layout.rs`: composição da arte com os dados textuais.
-- `terminal.rs`: largura visual, ANSI, TTY, cores e controle de terminal.
-- `system.rs`: coleta multiplataforma de informações do sistema.
-- `error.rs`: erros recuperáveis.
+- `cli.rs`: command-line arguments with `clap`.
+- `app.rs`: top-level application flow.
+- `engine.rs`: procedural brightness models.
+- `render.rs`: numeric canvas to ASCII.
+- `layout.rs`: side-by-side composition.
+- `terminal.rs`: terminal width, ANSI, TTY, and color handling.
+- `system.rs`: best-effort system information collection.
+- `error.rs`: recoverable application errors.
 
-Módulos específicos de plataforma podem surgir depois, por exemplo:
+## Philosophy
 
-```text
-src/system/
-  linux.rs
-  macos.rs
-  windows.rs
-```
-
-## Filosofia do projeto
-
-Este não é um produto empresarial nem uma tentativa de substituir ferramentas maduras como `fastfetch` ou `screenFetch`.
-
-O AstroFetch é um projeto pessoal, divertido e visual, criado para explorar Rust, terminal UI simples, arte ASCII procedural, coleta multiplataforma de sistema e um pouco de estética astrofísica no terminal.
-
-O objetivo é que ele seja leve, bonito, hackeável e agradável de rodar no próprio shell.
+AstroFetch is not trying to replace mature tools like `fastfetch` or
+`screenFetch`. It is a small, hackable terminal toy with enough practical polish
+to be pleasant in daily use.
