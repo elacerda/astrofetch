@@ -80,6 +80,12 @@ when they are available.
 If a probe fails, is missing, or returns unusable output, AstroFetch omits that
 field instead of filling the terminal with `N/A`.
 
+## Platform Support
+
+- Linux: actively tested locally and in CI.
+- macOS: build, clippy, and test validation enabled in CI.
+- Windows: build, clippy, and test validation enabled in CI.
+
 ## Development
 
 ```bash
