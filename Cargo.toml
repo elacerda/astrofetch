@@ -1,6 +1,6 @@
 [package]
 name = "astrofetch"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 description = "A screenFetch-inspired terminal app with procedural astrophysical ASCII art"
 license = "MIT"
