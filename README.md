@@ -18,6 +18,7 @@ in a shell, but mostly built for the joy of making terminal output feel alive.
   default.
 - Compact mode with the stable core fields:
   OS, Kernel, Uptime, Disk, CPU, RAM.
+- Optional per-filesystem disk details with `--disk-details` on Linux.
 - `--info-only` and `--logo-only` modes for scripts, screenshots, and quick checks.
 - Deterministic seeds for reproducible art.
 - Optional ANSI color for art and info labels, with `--no-color` support.
@@ -222,6 +223,26 @@ After editing your shell config, reload it with `source ~/.bashrc` (or
 PowerShell, opening a new terminal is usually the simplest check.
 
 ## Usage
+
+### Disk details
+
+To show the aggregate disk line plus per-filesystem details on Linux:
+
+```bash
+astrofetch --disk-details
+```
+
+Example disk detail output:
+
+```text
+Disk:           145.6G / 420.8G (35%)
+Disk /:         22.7G / 45.5G (50%)
+Disk /home:     123.0G / 374.8G (33%)
+Disk /boot/efi: 16.3M / 511.0M (3%)
+```
+
+On non-Linux platforms, `--disk-details` currently preserves the standard disk output without extra per-filesystem lines.
+
 
 ```bash
 astrofetch

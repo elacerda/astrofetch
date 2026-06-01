@@ -187,6 +187,7 @@ Argumentos iniciais:
 - `--logo-only`: imprime apenas a imagem ASCII.
 - `--info-only`: imprime apenas informações do sistema.
 - `--compact`: reduz a quantidade de campos exibidos.
+- `--disk-details`: exibe detalhes por filesystem contado no Linux, preservando a linha agregada `Disk`.
 
 Critério de aceite:
 
