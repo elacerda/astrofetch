@@ -997,7 +997,7 @@ fn normalize_disk_source(source: &str) -> String {
     source.trim().to_string()
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(target_os = "linux")]
 fn fallback_disk_identity_key(fs_type: &str, source: &str, mount_point: &str) -> String {
     let source = normalize_disk_source(source);
 
