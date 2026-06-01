@@ -153,23 +153,30 @@ pub fn insert_or_update_managed_block(
     block: &str,
     force: bool,
 ) -> Result<ManagedBlockResult, AppError> {
-    match find_managed_block(existing_content)? {
+    let content_without_legacy = remove_legacy_startup_blocks(existing_content);
+    let removed_legacy_blocks = content_without_legacy != existing_content;
+
+    match find_managed_block(&content_without_legacy)? {
         Some((start, end)) if force => {
             let mut content = String::new();
-            content.push_str(&existing_content[..start]);
+            content.push_str(&content_without_legacy[..start]);
             content.push_str(block);
-            content.push_str(&existing_content[end..]);
+            content.push_str(&content_without_legacy[end..]);
             Ok(ManagedBlockResult {
                 content,
                 action: ManagedBlockAction::Replaced,
             })
         }
+        Some(_) if removed_legacy_blocks => Ok(ManagedBlockResult {
+            content: content_without_legacy,
+            action: ManagedBlockAction::Replaced,
+        }),
         Some(_) => Ok(ManagedBlockResult {
-            content: existing_content.to_string(),
+            content: content_without_legacy,
             action: ManagedBlockAction::AlreadyInstalled,
         }),
         None => {
-            let mut content = existing_content.to_string();
+            let mut content = content_without_legacy;
             if !content.is_empty() && !content.ends_with('\n') {
                 content.push('\n');
             }
@@ -183,6 +190,38 @@ pub fn insert_or_update_managed_block(
             })
         }
     }
+}
+
+fn remove_legacy_startup_blocks(existing_content: &str) -> String {
+    let mut content = existing_content.to_string();
+
+    for legacy_block in legacy_startup_blocks() {
+        content = content.replace(&legacy_block, "");
+    }
+
+    content
+}
+
+fn legacy_startup_blocks() -> Vec<String> {
+    let commands = ["astrofetch", "astrofetch --compact"];
+    let mut blocks = Vec::new();
+
+    for command in commands {
+        blocks.push(format!(
+            "if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then\n    {command}\nfi\n"
+        ));
+        blocks.push(format!(
+            "if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then\n    {command}\nfi\n"
+        ));
+        blocks.push(format!(
+            "if status is-interactive; and command -q astrofetch\n    {command}\nend\n"
+        ));
+        blocks.push(format!(
+            "if ($Host.Name -eq \"ConsoleHost\" -and (Get-Command astrofetch -ErrorAction SilentlyContinue)) {{\n    {command}\n}}\n"
+        ));
+    }
+
+    blocks
 }
 
 fn resolve_shell(explicit_shell: Option<SetupShell>) -> Result<SetupShell, AppError> {
@@ -356,6 +395,36 @@ mod tests {
             insert_or_update_managed_block("set -g fish_greeting ''\n", "BLOCK\n", false).unwrap();
 
         assert_eq!(result.content, "set -g fish_greeting ''\n\nBLOCK\n");
+        assert_eq!(result.action, ManagedBlockAction::Inserted);
+    }
+
+    #[test]
+    fn test_replace_legacy_bash_block_with_managed_block() {
+        let existing = "before\nif [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then\n    astrofetch\nfi\nafter\n";
+        let result = insert_or_update_managed_block(existing, "BLOCK\n", false).unwrap();
+
+        assert_eq!(result.content, "before\nafter\n\nBLOCK\n");
+        assert_eq!(result.action, ManagedBlockAction::Inserted);
+    }
+
+    #[test]
+    fn test_remove_legacy_bash_block_when_managed_block_already_exists() {
+        let existing = "before\nif [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then\n    astrofetch\nfi\n# >>> astrofetch >>>\nmanaged\n# <<< astrofetch <<<\nafter\n";
+        let result = insert_or_update_managed_block(existing, "new\n", false).unwrap();
+
+        assert_eq!(
+            result.content,
+            "before\n# >>> astrofetch >>>\nmanaged\n# <<< astrofetch <<<\nafter\n"
+        );
+        assert_eq!(result.action, ManagedBlockAction::Replaced);
+    }
+
+    #[test]
+    fn test_replace_legacy_compact_zsh_block_with_managed_block() {
+        let existing = "if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then\n    astrofetch --compact\nfi\n";
+        let result = insert_or_update_managed_block(existing, "BLOCK\n", false).unwrap();
+
+        assert_eq!(result.content, "BLOCK\n");
         assert_eq!(result.action, ManagedBlockAction::Inserted);
     }
 
