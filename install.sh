@@ -1,6 +1,30 @@
 #!/bin/sh
 set -eu
 
+
+astrofetch_startup_references() {
+    found=0
+
+    for file in \
+        "$HOME/.bashrc" \
+        "$HOME/.bash_profile" \
+        "$HOME/.profile" \
+        "$HOME/.zshrc" \
+        "$HOME/.zprofile" \
+        "$HOME/.config/fish/config.fish" \
+        "$HOME/.config/powershell/Microsoft.PowerShell_profile.ps1" \
+        "$HOME/Documents/PowerShell/Microsoft.PowerShell_profile.ps1" \
+        "$HOME/Documents/WindowsPowerShell/Microsoft.PowerShell_profile.ps1"
+    do
+        if [ -f "$file" ] && grep -Eq '(^|[[:space:]])astrofetch([[:space:]]|$)' "$file"; then
+            printf '%s\n' "$file"
+            found=1
+        fi
+    done
+
+    return "$found"
+}
+
 REPO_OWNER="elacerda"
 REPO_NAME="astrofetch"
 DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
@@ -172,5 +196,18 @@ case ":$PATH:" in
         ;;
 esac
 
-printf '\nShell startup integration is opt-in. To preview it, run:\n'
-printf '  %s setup-shell --shell bash --dry-run\n' "$astrofetch_cmd"
+echo
+startup_refs="$(astrofetch_startup_references || true)"
+if [ -n "$startup_refs" ]; then
+    echo "Shell startup integration appears to already reference AstroFetch in:"
+    printf '%s\n' "$startup_refs" | sed 's/^/  /'
+    echo
+    echo "To avoid duplicate startup output, inspect those files before running setup-shell again."
+    echo "To preview startup changes, run:"
+    echo "  $astrofetch_cmd setup-shell --shell bash --dry-run"
+    echo "To remove startup integration, run:"
+    echo "  $astrofetch_cmd uninstall-shell --shell bash --dry-run"
+else
+    echo "Shell startup integration is opt-in. To preview it, run:"
+    echo "  $astrofetch_cmd setup-shell --shell bash --dry-run"
+fi
