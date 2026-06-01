@@ -1,4 +1,4 @@
-use crate::cli::SetupShellArgs;
+use crate::cli::{SetupShellArgs, UninstallShellArgs};
 use crate::error::AppError;
 use clap::ValueEnum;
 use std::env;
@@ -52,6 +52,24 @@ pub struct ManagedBlockResult {
     pub action: ManagedBlockAction,
 }
 
+/// Result of removing startup integration from an existing file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UninstallShellAction {
+    /// At least one AstroFetch startup block was removed.
+    Removed,
+    /// No AstroFetch startup integration was found.
+    NotInstalled,
+}
+
+/// Updated content plus the action used to produce it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UninstallShellResult {
+    /// File content after removing startup integration.
+    pub content: String,
+    /// Whether anything was removed.
+    pub action: UninstallShellAction,
+}
+
 /// Runs the shell startup integration command.
 pub fn run(args: &SetupShellArgs) -> Result<(), AppError> {
     let shell = resolve_shell(args.shell)?;
@@ -103,6 +121,50 @@ pub fn run(args: &SetupShellArgs) -> Result<(), AppError> {
     }
     println!("Target startup file: {}", target_path.display());
     println!("Open a new terminal or source the file to see AstroFetch on startup.");
+
+    Ok(())
+}
+
+/// Runs the shell startup integration removal command.
+pub fn uninstall(args: &UninstallShellArgs) -> Result<(), AppError> {
+    let shell = resolve_shell(args.shell)?;
+    let target_path = match &args.target_path {
+        Some(path) => path.clone(),
+        None => target_path(shell)?,
+    };
+
+    let existing_content = match fs::read_to_string(&target_path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err.into()),
+    };
+
+    let result = remove_startup_blocks(&existing_content)?;
+
+    if args.dry_run {
+        println!("Shell: {}", shell.display_name());
+        println!("Target startup file: {}", target_path.display());
+        match result.action {
+            UninstallShellAction::Removed => {
+                println!("AstroFetch startup integration would be removed.");
+            }
+            UninstallShellAction::NotInstalled => {
+                println!("AstroFetch startup integration is not installed.");
+            }
+        }
+        return Ok(());
+    }
+
+    if result.action == UninstallShellAction::NotInstalled {
+        println!("AstroFetch startup integration is not installed.");
+        println!("Target startup file: {}", target_path.display());
+        return Ok(());
+    }
+
+    fs::write(&target_path, result.content)?;
+
+    println!("AstroFetch startup integration removed.");
+    println!("Target startup file: {}", target_path.display());
 
     Ok(())
 }
@@ -190,6 +252,24 @@ pub fn insert_or_update_managed_block(
             })
         }
     }
+}
+
+/// Removes managed and known legacy AstroFetch startup blocks from existing content.
+pub fn remove_startup_blocks(existing_content: &str) -> Result<UninstallShellResult, AppError> {
+    let mut content = existing_content.to_string();
+
+    while let Some((start, end)) = find_managed_block(&content)? {
+        content.replace_range(start..end, "");
+    }
+
+    content = remove_legacy_startup_blocks(&content);
+    let action = if content == existing_content {
+        UninstallShellAction::NotInstalled
+    } else {
+        UninstallShellAction::Removed
+    };
+
+    Ok(UninstallShellResult { content, action })
 }
 
 fn remove_legacy_startup_blocks(existing_content: &str) -> String {
@@ -426,6 +506,62 @@ mod tests {
 
         assert_eq!(result.content, "BLOCK\n");
         assert_eq!(result.action, ManagedBlockAction::Inserted);
+    }
+
+    #[test]
+    fn test_remove_managed_startup_block() {
+        let existing = "before\n# >>> astrofetch >>>\nmanaged\n# <<< astrofetch <<<\nafter\n";
+        let result = remove_startup_blocks(existing).unwrap();
+
+        assert_eq!(result.content, "before\nafter\n");
+        assert_eq!(result.action, UninstallShellAction::Removed);
+    }
+
+    #[test]
+    fn test_remove_multiple_managed_startup_blocks() {
+        let existing =
+            "# >>> astrofetch >>>\none\n# <<< astrofetch <<<\nkeep\n# >>> astrofetch >>>\ntwo\n# <<< astrofetch <<<\n";
+        let result = remove_startup_blocks(existing).unwrap();
+
+        assert_eq!(result.content, "keep\n");
+        assert_eq!(result.action, UninstallShellAction::Removed);
+    }
+
+    #[test]
+    fn test_remove_legacy_bash_startup_block() {
+        let existing = "before\nif [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then\n    astrofetch\nfi\nafter\n";
+        let result = remove_startup_blocks(existing).unwrap();
+
+        assert_eq!(result.content, "before\nafter\n");
+        assert_eq!(result.action, UninstallShellAction::Removed);
+    }
+
+    #[test]
+    fn test_remove_startup_blocks_reports_not_installed() {
+        let existing = "alias ll='ls -la'\n";
+        let result = remove_startup_blocks(existing).unwrap();
+
+        assert_eq!(result.content, existing);
+        assert_eq!(result.action, UninstallShellAction::NotInstalled);
+    }
+
+    #[test]
+    fn test_uninstall_target_path_override_removes_block() {
+        let target_path = unique_temp_path();
+        fs::write(&target_path, shell_block(SetupShell::Bash, false)).unwrap();
+
+        let args = UninstallShellArgs {
+            shell: Some(SetupShell::Bash),
+            dry_run: false,
+            target_path: Some(target_path.clone()),
+        };
+
+        uninstall(&args).unwrap();
+
+        let content = fs::read_to_string(&target_path).unwrap();
+        assert!(content.is_empty());
+
+        fs::remove_file(target_path).unwrap();
     }
 
     #[test]

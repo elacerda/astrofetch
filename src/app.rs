@@ -46,6 +46,7 @@ impl App {
         if let Some(command) = &self.args.command {
             return match command {
                 Command::SetupShell(args) => crate::setup_shell::run(args),
+                Command::UninstallShell(args) => crate::setup_shell::uninstall(args),
             };
         }
 

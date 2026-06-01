@@ -72,6 +72,8 @@ pub struct Args {
 pub enum Command {
     /// Safely add AstroFetch to a shell startup file.
     SetupShell(SetupShellArgs),
+    /// Safely remove AstroFetch from a shell startup file.
+    UninstallShell(UninstallShellArgs),
 }
 
 /// Argumentos para integração explícita com arquivos de inicialização de shell.
@@ -92,6 +94,22 @@ pub struct SetupShellArgs {
     /// Replace an existing managed AstroFetch block.
     #[arg(long)]
     pub force: bool,
+
+    /// Advanced override for testing or manual setup against a specific file.
+    #[arg(long)]
+    pub target_path: Option<PathBuf>,
+}
+
+/// Arguments for explicitly removing shell startup integration.
+#[derive(Debug, Clone, clap::Args)]
+pub struct UninstallShellArgs {
+    /// Shell startup file to update.
+    #[arg(long, value_enum)]
+    pub shell: Option<SetupShell>,
+
+    /// Print what would be removed without writing any files.
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Advanced override for testing or manual setup against a specific file.
     #[arg(long)]
