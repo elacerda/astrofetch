@@ -161,9 +161,11 @@ printf 'AstroFetch %s installed to %s/astrofetch\n' "$version" "$install_dir"
 
 case ":$PATH:" in
     *":$install_dir:"*)
+        astrofetch_cmd="astrofetch"
         printf 'Run it with: astrofetch\n'
         ;;
     *)
+        astrofetch_cmd="${install_dir}/astrofetch"
         printf '\nNote: %s is not in your PATH.\n' "$install_dir"
         printf 'Add it to your shell profile or run AstroFetch directly:\n'
         printf '  %s/astrofetch\n' "$install_dir"
@@ -171,4 +173,4 @@ case ":$PATH:" in
 esac
 
 printf '\nShell startup integration is opt-in. To preview it, run:\n'
-printf '  astrofetch setup-shell --shell bash --dry-run\n'
+printf '  %s setup-shell --shell bash --dry-run\n' "$astrofetch_cmd"
