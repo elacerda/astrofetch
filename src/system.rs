@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use sysinfo::{CpuRefreshKind, System};
 
@@ -901,44 +901,204 @@ fn format_bytes(bytes: u64) -> String {
     format!("{:.1}T", tib)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiskUsageEntry {
+    key: String,
+    total_bytes: u64,
+    available_bytes: u64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinuxMountIdentity {
+    key: String,
+    fs_type: String,
+}
+
+fn format_disk_usage_entries(entries: &[DiskUsageEntry]) -> String {
+    let Some((used_bytes, total_bytes)) = aggregate_unique_disk_usage(entries) else {
+        return "N/A".to_string();
+    };
+
+    let used_formatted = format_bytes(used_bytes);
+    let total_formatted = format_bytes(total_bytes);
+    let percent = ((used_bytes as f64 / total_bytes as f64) * 100.0).round() as u8;
+
+    format!("{} / {} ({}%)", used_formatted, total_formatted, percent)
+}
+
+fn aggregate_unique_disk_usage(entries: &[DiskUsageEntry]) -> Option<(u64, u64)> {
+    let mut seen = BTreeSet::new();
+    let mut total_bytes: u64 = 0;
+    let mut used_bytes: u64 = 0;
+
+    for entry in entries {
+        if entry.total_bytes == 0 || !seen.insert(entry.key.clone()) {
+            continue;
+        }
+
+        total_bytes = total_bytes.saturating_add(entry.total_bytes);
+        used_bytes =
+            used_bytes.saturating_add(entry.total_bytes.saturating_sub(entry.available_bytes));
+    }
+
+    if total_bytes == 0 {
+        None
+    } else {
+        Some((used_bytes, total_bytes))
+    }
+}
+
+fn is_ignored_filesystem(fs_type: &str) -> bool {
+    matches!(
+        fs_type,
+        "tmpfs"
+            | "devtmpfs"
+            | "proc"
+            | "sysfs"
+            | "cgroup"
+            | "cgroup2"
+            | "squashfs"
+            | "overlay"
+            | "debugfs"
+            | "tracefs"
+            | "efivarfs"
+            | "fusectl"
+            | "ramfs"
+            | "autofs"
+            | "devpts"
+            | "hugetlbfs"
+            | "mqueue"
+            | "configfs"
+            | "securityfs"
+            | "pstore"
+            | "bpf"
+            | "binfmt_misc"
+            | "nsfs"
+    ) || fs_type.starts_with("fuse.")
+}
+
+fn normalize_disk_source(source: &str) -> String {
+    let source = source.trim();
+    let source = source.split_once('[').map_or(source, |(base, _)| base);
+    source.trim().to_string()
+}
+
+fn fallback_disk_identity_key(fs_type: &str, source: &str, mount_point: &str) -> String {
+    let source = normalize_disk_source(source);
+
+    if source.is_empty() || source == "none" {
+        format!("mount:{fs_type}:{mount_point}")
+    } else {
+        format!("source:{fs_type}:{source}")
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn collect_linux_disk_usage_entries(disks: &sysinfo::Disks) -> Vec<DiskUsageEntry> {
+    let mount_identities = linux_mount_identities_by_mount_point();
+
+    disks
+        .iter()
+        .filter_map(|disk| linux_disk_usage_entry(disk, &mount_identities))
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_disk_usage_entry(
+    disk: &sysinfo::Disk,
+    mount_identities: &BTreeMap<String, LinuxMountIdentity>,
+) -> Option<DiskUsageEntry> {
+    let total_bytes = disk.total_space();
+
+    if total_bytes == 0 {
+        return None;
+    }
+
+    let mount_point = disk.mount_point().to_string_lossy().to_string();
+    let sysinfo_fs_type = disk.file_system().to_string_lossy().to_ascii_lowercase();
+    let source = disk.name().to_string_lossy();
+
+    let (fs_type, key) = mount_identities
+        .get(&mount_point)
+        .map(|identity| (identity.fs_type.as_str(), identity.key.clone()))
+        .unwrap_or_else(|| {
+            (
+                sysinfo_fs_type.as_str(),
+                fallback_disk_identity_key(&sysinfo_fs_type, &source, &mount_point),
+            )
+        });
+
+    if is_ignored_filesystem(fs_type) {
+        return None;
+    }
+
+    Some(DiskUsageEntry {
+        key,
+        total_bytes,
+        available_bytes: disk.available_space(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn linux_mount_identities_by_mount_point() -> BTreeMap<String, LinuxMountIdentity> {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return BTreeMap::new();
+    };
+
+    parse_linux_mountinfo_identities(&text)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_mountinfo_identities(text: &str) -> BTreeMap<String, LinuxMountIdentity> {
+    let mut identities = BTreeMap::new();
+
+    for line in text.lines() {
+        if let Some((mount_point, identity)) = parse_linux_mountinfo_line(line) {
+            identities.insert(mount_point, identity);
+        }
+    }
+
+    identities
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_mountinfo_line(line: &str) -> Option<(String, LinuxMountIdentity)> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+
+    if parts.len() < 10 {
+        return None;
+    }
+
+    let device_id = parts[2];
+    let mount_point = decode_mountinfo_path(parts[4]);
+    let separator_index = parts.iter().position(|part| *part == "-")?;
+
+    if parts.len() <= separator_index + 1 {
+        return None;
+    }
+
+    let fs_type = parts[separator_index + 1].to_ascii_lowercase();
+    let key = format!("mountinfo:{fs_type}:{device_id}");
+
+    Some((mount_point, LinuxMountIdentity { key, fs_type }))
+}
+
+#[cfg(target_os = "linux")]
+fn decode_mountinfo_path(path: &str) -> String {
+    path.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\012", "\n")
+        .replace("\\134", "\\")
+}
+
 /// Obtém informações de disco usando sysinfo.
 fn get_disk_info() -> String {
     #[cfg(target_os = "linux")]
     {
-        // Tenta obter informações do disco raiz
         let disks = sysinfo::Disks::new_with_refreshed_list();
-        let mut total_bytes: u64 = 0;
-        let mut used_bytes: u64 = 0;
-
-        for disk in disks.iter() {
-            let disk_total = disk.total_space();
-            let disk_available = disk.available_space();
-
-            // Ignora discos com total zero (pseudo/empty entries)
-            if disk_total == 0 {
-                continue;
-            }
-
-            let disk_used = disk_total - disk_available;
-            total_bytes += disk_total;
-            used_bytes += disk_used;
-        }
-
-        // Se não encontrou discos válidos, retorna N/A
-        if total_bytes == 0 {
-            return "N/A".to_string();
-        }
-
-        let used_formatted = format_bytes(used_bytes);
-        let total_formatted = format_bytes(total_bytes);
-
-        let percent = if total_bytes > 0 {
-            ((used_bytes as f64 / total_bytes as f64) * 100.0).round() as u8
-        } else {
-            0
-        };
-
-        format!("{} / {} ({}%)", used_formatted, total_formatted, percent)
+        let entries = collect_linux_disk_usage_entries(&disks);
+        format_disk_usage_entries(&entries)
     }
 
     #[cfg(target_os = "macos")]
@@ -1114,6 +1274,142 @@ mod tests {
         assert_eq!(format_bytes(1500), "1.5K");
         assert_eq!(format_bytes(1_500_000), "1.4M");
         assert_eq!(format_bytes(1_500_000_000), "1.4G");
+    }
+
+    #[test]
+    fn test_aggregate_unique_disk_usage_single_filesystem() {
+        let entries = vec![DiskUsageEntry {
+            key: "mountinfo:btrfs:254:0".to_string(),
+            total_bytes: 100,
+            available_bytes: 40,
+        }];
+
+        assert_eq!(aggregate_unique_disk_usage(&entries), Some((60, 100)));
+        assert_eq!(format_disk_usage_entries(&entries), "60B / 100B (60%)");
+    }
+
+    #[test]
+    fn test_aggregate_unique_disk_usage_multiple_unique_filesystems() {
+        let entries = vec![
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:0".to_string(),
+                total_bytes: 100,
+                available_bytes: 40,
+            },
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:1".to_string(),
+                total_bytes: 300,
+                available_bytes: 100,
+            },
+        ];
+
+        assert_eq!(aggregate_unique_disk_usage(&entries), Some((260, 400)));
+        assert_eq!(format_disk_usage_entries(&entries), "260B / 400B (65%)");
+    }
+
+    #[test]
+    fn test_aggregate_unique_disk_usage_deduplicates_btrfs_subvolumes() {
+        let entries = vec![
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:0".to_string(),
+                total_bytes: 235,
+                available_bytes: 116,
+            },
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:0".to_string(),
+                total_bytes: 235,
+                available_bytes: 116,
+            },
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:0".to_string(),
+                total_bytes: 235,
+                available_bytes: 116,
+            },
+            DiskUsageEntry {
+                key: "mountinfo:btrfs:254:1".to_string(),
+                total_bytes: 932,
+                available_bytes: 42,
+            },
+        ];
+
+        assert_eq!(aggregate_unique_disk_usage(&entries), Some((1009, 1167)));
+    }
+
+    #[test]
+    fn test_format_disk_usage_entries_returns_na_for_no_counted_filesystems() {
+        let entries = vec![
+            DiskUsageEntry {
+                key: "mountinfo:tmpfs:0:42".to_string(),
+                total_bytes: 0,
+                available_bytes: 0,
+            },
+            DiskUsageEntry {
+                key: "mountinfo:proc:0:43".to_string(),
+                total_bytes: 0,
+                available_bytes: 0,
+            },
+        ];
+
+        assert_eq!(aggregate_unique_disk_usage(&entries), None);
+        assert_eq!(format_disk_usage_entries(&entries), "N/A");
+    }
+
+    #[test]
+    fn test_is_ignored_filesystem_filters_virtual_and_transient_filesystems() {
+        for fs_type in [
+            "tmpfs",
+            "devtmpfs",
+            "proc",
+            "sysfs",
+            "cgroup2",
+            "overlay",
+            "squashfs",
+            "fuse.portal",
+            "fuse.gvfsd-fuse",
+        ] {
+            assert!(
+                is_ignored_filesystem(fs_type),
+                "{fs_type} should be ignored"
+            );
+        }
+
+        for fs_type in ["btrfs", "ext4", "xfs", "vfat", "ntfs", "exfat"] {
+            assert!(
+                !is_ignored_filesystem(fs_type),
+                "{fs_type} should be counted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_disk_source_removes_btrfs_subvolume_suffix() {
+        assert_eq!(
+            normalize_disk_source("/dev/mapper/luks-abc[/@home]"),
+            "/dev/mapper/luks-abc"
+        );
+        assert_eq!(
+            normalize_disk_source("/dev/mapper/luks-abc[/@cache]"),
+            "/dev/mapper/luks-abc"
+        );
+        assert_eq!(normalize_disk_source("/dev/sda1"), "/dev/sda1");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_linux_mountinfo_deduplicates_btrfs_subvolume_identity() {
+        let text = "\
+25 1 254:0 /@ / rw,relatime - btrfs /dev/mapper/root rw,subvol=/@
+26 1 254:0 /@home /home rw,relatime - btrfs /dev/mapper/root rw,subvol=/@home
+27 1 254:1 /@data /mnt/Data rw,relatime - btrfs /dev/mapper/data rw,subvol=/@data
+28 1 259:2 / /boot rw,relatime - vfat /dev/nvme0n1p2 rw
+";
+
+        let identities = parse_linux_mountinfo_identities(text);
+
+        assert_eq!(identities["/"].key, "mountinfo:btrfs:254:0");
+        assert_eq!(identities["/home"].key, "mountinfo:btrfs:254:0");
+        assert_eq!(identities["/mnt/Data"].key, "mountinfo:btrfs:254:1");
+        assert_eq!(identities["/boot"].key, "mountinfo:vfat:259:2");
     }
 
     #[test]
