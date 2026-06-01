@@ -607,6 +607,44 @@ Testes importantes:
 - fallback de campos ausentes;
 - providers de sistema mockados.
 
+## Fase 15: Distribuição e Releases
+
+Objetivo: oferecer uma instalação simples para usuários normais sem exigir Rust
+na máquina local.
+
+Ordem de distribuição:
+
+1. releases binários confiáveis no GitHub, com `install.sh` para Linux/macOS;
+2. preparação para crates.io e publicação via `cargo publish`;
+3. Homebrew tap;
+4. outros ecossistemas de pacotes, somente depois.
+
+Trabalho atual:
+
+- gerar artefatos versionados em GitHub Releases para Linux, macOS e Windows;
+- manter nomes previsíveis de artefatos por versão e target;
+- oferecer `install.sh` POSIX-sh para baixar e instalar binários em
+  `~/.local/bin`;
+- manter startup de shell separado e opt-in via `astrofetch setup-shell`.
+
+Fora de escopo por enquanto:
+
+- `.deb`/apt;
+- rpm;
+- snap;
+- flatpak;
+- AUR;
+- Nix;
+- Scoop;
+- WinGet.
+
+Critério de aceite:
+
+- usuários em Linux/macOS conseguem instalar com `install.sh` sem toolchain Rust;
+- usuários no Windows conseguem baixar o zip manualmente no GitHub Releases;
+- `cargo install --path .` continua documentado como fluxo de desenvolvimento;
+- crates.io e Homebrew aparecem apenas como canais futuros.
+
 ## Estrutura Inicial Sugerida
 
 ```text
@@ -785,5 +823,7 @@ Critérios de aceite:
 
 - Aplicar timeout real para comandos externos.
 - Considerar cache opcional ou modos fast/full para campos mais caros.
-- Preparar empacotamento e fluxo de release.
+- Consolidar GitHub Releases binários e `install.sh`.
+- Preparar crates.io e Homebrew como canais futuros, depois dos releases
+  binários.
 - Melhorar fontes de informação em macOS e Windows.

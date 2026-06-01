@@ -14,35 +14,81 @@ in a shell, but mostly built for the joy of making terminal output feel alive.
 - ScreenFetch-like system info in full mode:
   OS, Kernel, Uptime, Packages, Shell, Resolution, DE, WM, themes, Disk, CPU,
   GPU, and RAM.
+- Aligned label/value styling in the info panel, with subtle label color by
+  default.
 - Compact mode with the stable core fields:
   OS, Kernel, Uptime, Disk, CPU, RAM.
 - `--info-only` and `--logo-only` modes for scripts, screenshots, and quick checks.
 - Deterministic seeds for reproducible art.
-- Optional ANSI color, with `--no-color` support.
+- Optional ANSI color for art and info labels, with `--no-color` support.
 - Best-effort platform behavior: unavailable local commands or settings simply
   omit optional fields.
 
 ## Install
 
-## Installing from source
+### Recommended: install a release binary
 
-AstroFetch is written in Rust. If you do not already have a working Rust
-toolchain, install Rust with `rustup` first.
-
-On Linux, macOS, or WSL:
+For regular Linux and macOS users, install the latest GitHub Release binary with:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh
 ```
 
-Then build and install AstroFetch:
+To install a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.2.0
+```
+
+The installer downloads a prebuilt binary into `~/.local/bin` by default. It
+does not edit shell startup files or run `astrofetch setup-shell` automatically.
+
+If you do not like piping scripts into `sh`, download and inspect the installer
+first:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
+less install.sh
+sh install.sh
+```
+
+### Manual binary installation
+
+Download the artifact for your platform from
+[GitHub Releases](https://github.com/elacerda/astrofetch/releases):
+
+- Linux x86_64: `astrofetch-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- Linux arm64: `astrofetch-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
+- macOS x86_64: `astrofetch-vX.Y.Z-x86_64-apple-darwin.tar.gz`
+- macOS arm64: `astrofetch-vX.Y.Z-aarch64-apple-darwin.tar.gz`
+- Windows x86_64: `astrofetch-vX.Y.Z-x86_64-pc-windows-msvc.zip`
+
+For Linux or macOS:
+
+```bash
+tar -xzf astrofetch-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
+mkdir -p "$HOME/.local/bin"
+mv astrofetch "$HOME/.local/bin/"
+astrofetch
+```
+
+For Windows, download the zip file, extract `astrofetch.exe`, and place it in a
+directory that is on your `PATH`.
+
+### Rust developer installation
+
+AstroFetch is not yet published to crates.io, so this does not work yet:
+
+```bash
+cargo install astrofetch
+```
+
+For now, Rust users can install from a local checkout:
 
 ```bash
 git clone https://github.com/elacerda/astrofetch.git
 cd astrofetch
 cargo install --path .
-astrofetch
 ```
 
 If `cargo install --path .` succeeds but `astrofetch` is not found, make sure
@@ -53,47 +99,30 @@ export PATH="$HOME/.cargo/bin:$PATH"
 astrofetch
 ```
 
-To make this permanent for Bash:
+### From source
+
+If you do not already have a working Rust toolchain, install Rust with `rustup`
+first. On Linux, macOS, or WSL:
 
 ```bash
-echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 ```
-
-You can also run the installed binary directly:
-
-```bash
-"$HOME/.cargo/bin/astrofetch"
-```
-
-Note: distro-packaged Rust installations may work for building, but
-`cargo install` places binaries under `~/.cargo/bin`. If that directory is not
-in your `PATH`, the installed `astrofetch` command will not be found.
 
 Build a release binary:
 
 ```bash
+git clone https://github.com/elacerda/astrofetch.git
+cd astrofetch
 cargo build --release
-```
-
-Install from this checkout:
-
-```bash
-cargo install --path .
-```
-
-After install, run:
-
-```bash
-astrofetch
+./target/release/astrofetch
 ```
 
 ## Shell Startup Integration
 
-`cargo install --path .` installs the `astrofetch` binary but does not
-automatically add it to your shell startup files (e.g., `~/.bashrc`,
-`~/.zshrc`, fish config, or a PowerShell profile). Startup integration is
-explicitly opt-in.
+Installing the `astrofetch` binary does not automatically add it to your shell
+startup files (e.g., `~/.bashrc`, `~/.zshrc`, fish config, or a PowerShell
+profile). Startup integration is explicitly opt-in.
 
 If you want AstroFetch to run automatically when you open a new interactive
 terminal, use `setup-shell`. Start with `--dry-run` to see the target file and

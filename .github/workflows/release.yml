@@ -1,0 +1,75 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-26
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package Unix binary
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          package="astrofetch-${version}-${{ matrix.target }}"
+          mkdir -p "dist/${package}"
+          cp "target/${{ matrix.target }}/release/astrofetch" "dist/${package}/astrofetch"
+          tar -czf "dist/${package}.tar.gz" -C "dist/${package}" astrofetch
+
+      - name: Package Windows binary
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME
+          $package = "astrofetch-$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$package" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/astrofetch.exe" "dist/$package/astrofetch.exe"
+          Compress-Archive -Path "dist/$package/astrofetch.exe" -DestinationPath "dist/$package.zip" -Force
+
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/astrofetch-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
