@@ -4,6 +4,9 @@ version = "0.2.8"
 edition = "2021"
 description = "A screenFetch-inspired terminal app with procedural astrophysical ASCII art"
 license = "MIT"
+repository = "https://github.com/elacerda/astrofetch"
+homepage = "https://github.com/elacerda/astrofetch"
+readme = "README.md"
 keywords = ["cli", "terminal", "fetch", "ascii-art"]
 categories = ["command-line-utilities"]
 
