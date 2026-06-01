@@ -6,8 +6,19 @@ use crate::render::{
     normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
 };
 use crate::system::{get_display_field_order, SystemSnapshot};
-use crate::terminal::Terminal;
+use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
+
+const HEADER_COLOR: &str = "\x1b[93m";
+const LABEL_COLOR: &str = "\x1b[94m";
+const VALUE_COLOR: &str = "\x1b[97m";
+const RESET: &str = "\x1b[0m";
+
+#[derive(Debug)]
+struct InfoLine {
+    label: &'static str,
+    value: String,
+}
 
 /// Aplicação principal do AstroFetch.
 pub struct App {
@@ -107,25 +118,58 @@ impl App {
     /// Constrói as linhas de informações do sistema.
     fn build_info_lines(&self, system: &SystemSnapshot) -> Vec<String> {
         let mut lines = Vec::new();
+        let colors_enabled = self.info_colors_enabled();
 
         // user@host (apenas em modo full)
         if !self.args.compact {
-            lines.push(system.user_host.clone());
+            lines.push(format_header(&system.user_host, colors_enabled));
         }
 
-        // Compact mode: OS, Kernel, Uptime, Disk, CPU, RAM
-        if self.args.compact {
-            for field_name in get_display_field_order(system, true) {
-                lines.push(format!("{}: {}", field_name, system.get(field_name)));
-            }
-        } else {
-            // Full mode: ordem screenFetch-like, omitindo campos indisponíveis.
-            for field_name in get_display_field_order(system, false) {
-                lines.push(format!("{}: {}", field_name, system.get(field_name)));
-            }
-        }
+        let info_fields: Vec<InfoLine> = get_display_field_order(system, self.args.compact)
+            .into_iter()
+            .map(|field_name| InfoLine {
+                label: field_name,
+                value: system.get(field_name),
+            })
+            .collect();
+        let label_width = info_fields
+            .iter()
+            .map(|line| visible_width(line.label))
+            .max()
+            .unwrap_or(0);
+
+        lines.extend(
+            info_fields
+                .iter()
+                .map(|line| format_info_line(line, label_width, colors_enabled)),
+        );
 
         lines
+    }
+
+    fn info_colors_enabled(&self) -> bool {
+        !self.args.no_color && self.terminal.colors_enabled()
+    }
+}
+
+fn format_header(text: &str, colors_enabled: bool) -> String {
+    if colors_enabled {
+        format!("{}{}{}", HEADER_COLOR, text, RESET)
+    } else {
+        text.to_string()
+    }
+}
+
+fn format_info_line(line: &InfoLine, label_width: usize, colors_enabled: bool) -> String {
+    let label_padding = " ".repeat(label_width.saturating_sub(visible_width(line.label)) + 1);
+
+    if colors_enabled {
+        format!(
+            "{}{}:{}{}{}{}{}",
+            LABEL_COLOR, line.label, RESET, label_padding, VALUE_COLOR, line.value, RESET
+        )
+    } else {
+        format!("{}:{}{}", line.label, label_padding, line.value)
     }
 }
 
@@ -136,7 +180,7 @@ mod tests {
     use crate::terminal::Terminal;
     use std::collections::BTreeMap;
 
-    fn build_test_app(compact: bool) -> App {
+    fn build_test_app(compact: bool, no_color: bool, colors_enabled: bool) -> App {
         App {
             args: Args {
                 command: None,
@@ -144,14 +188,14 @@ mod tests {
                 width: 40,
                 height: 20,
                 seed: None,
-                no_color: true,
+                no_color,
                 logo_only: false,
                 info_only: false,
                 compact,
             },
             terminal: Terminal {
-                is_tty: false,
-                colors_enabled: false,
+                is_tty: colors_enabled,
+                colors_enabled,
             },
         }
     }
@@ -174,45 +218,46 @@ mod tests {
 
     #[test]
     fn test_build_info_lines_full_field_ordering() {
-        let app = build_test_app(false);
+        let app = build_test_app(false, true, false);
         let lines = app.build_info_lines(&base_snapshot());
 
         assert_eq!(lines[0], "astro@station");
         assert_eq!(
             lines[1..],
             [
-                "OS: Linux",
+                "OS:     Linux",
                 "Kernel: 6.x",
                 "Uptime: 1h 2m",
-                "Shell: bash",
-                "Disk: 1G/2G (50%)",
-                "CPU: Test CPU",
-                "RAM: 1.0GB / 2.0GB"
+                "Shell:  bash",
+                "Disk:   1G/2G (50%)",
+                "CPU:    Test CPU",
+                "RAM:    1.0GB / 2.0GB"
             ]
         );
+        assert!(!lines.join("\n").contains('\x1b'));
     }
 
     #[test]
     fn test_build_info_lines_compact_field_ordering() {
-        let app = build_test_app(true);
+        let app = build_test_app(true, true, false);
         let lines = app.build_info_lines(&base_snapshot());
 
         assert_eq!(
             lines,
             [
-                "OS: Linux",
+                "OS:     Linux",
                 "Kernel: 6.x",
                 "Uptime: 1h 2m",
-                "Disk: 1G/2G (50%)",
-                "CPU: Test CPU",
-                "RAM: 1.0GB / 2.0GB"
+                "Disk:   1G/2G (50%)",
+                "CPU:    Test CPU",
+                "RAM:    1.0GB / 2.0GB"
             ]
         );
     }
 
     #[test]
     fn test_build_info_lines_full_future_ordering_when_present() {
-        let app = build_test_app(false);
+        let app = build_test_app(false, true, false);
         let mut snapshot = base_snapshot();
         snapshot
             .fields
@@ -248,29 +293,29 @@ mod tests {
         assert_eq!(
             lines[1..],
             [
-                "OS: Linux",
-                "Kernel: 6.x",
-                "Uptime: 1h 2m",
-                "Packages: 1234",
-                "Shell: bash",
+                "OS:         Linux",
+                "Kernel:     6.x",
+                "Uptime:     1h 2m",
+                "Packages:   1234",
+                "Shell:      bash",
                 "Resolution: 1920x1080",
-                "DE: GNOME",
-                "WM: Mutter",
-                "WM Theme: Adwaita",
-                "GTK Theme: Adwaita",
+                "DE:         GNOME",
+                "WM:         Mutter",
+                "WM Theme:   Adwaita",
+                "GTK Theme:  Adwaita",
                 "Icon Theme: Adwaita",
-                "Font: Noto Sans 11",
-                "Disk: 1G/2G (50%)",
-                "CPU: Test CPU",
-                "GPU: Test GPU",
-                "RAM: 1.0GB / 2.0GB"
+                "Font:       Noto Sans 11",
+                "Disk:       1G/2G (50%)",
+                "CPU:        Test CPU",
+                "GPU:        Test GPU",
+                "RAM:        1.0GB / 2.0GB"
             ]
         );
     }
 
     #[test]
     fn test_build_info_lines_full_omits_missing_advanced_fields() {
-        let app = build_test_app(false);
+        let app = build_test_app(false, true, false);
         let lines = app.build_info_lines(&base_snapshot());
         let joined = lines.join("\n");
 
@@ -287,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_build_info_lines_compact_excludes_resolution_and_gpu_when_present() {
-        let app = build_test_app(true);
+        let app = build_test_app(true, true, false);
         let mut snapshot = base_snapshot();
         snapshot
             .fields
@@ -314,12 +359,12 @@ mod tests {
         assert_eq!(
             lines,
             [
-                "OS: Linux",
+                "OS:     Linux",
                 "Kernel: 6.x",
                 "Uptime: 1h 2m",
-                "Disk: 1G/2G (50%)",
-                "CPU: Test CPU",
-                "RAM: 1.0GB / 2.0GB"
+                "Disk:   1G/2G (50%)",
+                "CPU:    Test CPU",
+                "RAM:    1.0GB / 2.0GB"
             ]
         );
         assert!(!joined.contains("Resolution:"));
@@ -328,5 +373,37 @@ mod tests {
         assert!(!joined.contains("Icon Theme:"));
         assert!(!joined.contains("Font:"));
         assert!(!joined.contains("GPU:"));
+    }
+
+    #[test]
+    fn test_build_info_lines_colorizes_header_labels_and_values() {
+        let app = build_test_app(false, false, true);
+        let lines = app.build_info_lines(&base_snapshot());
+
+        assert_eq!(lines[0], "\x1b[93mastro@station\x1b[0m");
+        assert_eq!(lines[1], "\x1b[94mOS:\x1b[0m     \x1b[97mLinux\x1b[0m");
+        assert_eq!(lines[2], "\x1b[94mKernel:\x1b[0m \x1b[97m6.x\x1b[0m");
+        assert!(lines.join("\n").contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_build_info_lines_no_color_overrides_colored_terminal() {
+        let app = build_test_app(false, true, true);
+        let lines = app.build_info_lines(&base_snapshot());
+
+        assert_eq!(lines[0], "astro@station");
+        assert_eq!(lines[1], "OS:     Linux");
+        assert!(!lines.join("\n").contains('\x1b'));
+    }
+
+    #[test]
+    fn test_compose_layout_keeps_info_ansi_from_affecting_art_padding() {
+        let app = build_test_app(false, false, true);
+        let info = app.build_info_lines(&base_snapshot());
+        let art = vec!["**".to_string()];
+
+        let result = compose_layout(&art, &info, 6, 2);
+
+        assert!(result[0].starts_with("**      \x1b[93mastro@station\x1b[0m"));
     }
 }
