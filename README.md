@@ -145,6 +145,13 @@ For compact startup output:
 astrofetch setup-shell --shell bash --compact
 ```
 
+To remove AstroFetch from shell startup without deleting the binary:
+
+```bash
+astrofetch uninstall-shell --shell bash --dry-run
+astrofetch uninstall-shell --shell bash
+```
+
 Other shells:
 
 ```bash
@@ -153,10 +160,22 @@ astrofetch setup-shell --shell fish --dry-run
 astrofetch setup-shell --shell powershell --dry-run
 ```
 
+Startup removal supports the same shells:
+
+```bash
+astrofetch uninstall-shell --shell zsh --dry-run
+astrofetch uninstall-shell --shell fish --dry-run
+astrofetch uninstall-shell --shell powershell --dry-run
+```
+
 `--dry-run` prints the selected shell, target startup file, and block without
 writing files. If a managed AstroFetch block already exists, `setup-shell` will
 not duplicate it; use `--force` to replace only that managed block while
 preserving the rest of the file.
+
+`uninstall-shell` removes AstroFetch startup integration only. It removes the
+managed block and known legacy AstroFetch startup snippets, but it does not
+delete the `astrofetch` binary.
 
 Advanced/manual testing option:
 

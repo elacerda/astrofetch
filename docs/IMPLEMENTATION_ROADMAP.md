@@ -203,6 +203,14 @@ O comando `astrofetch setup-shell` adiciona, de forma opt-in, um bloco gerenciad
 ao arquivo de inicialização de bash, zsh, fish ou PowerShell. A instalação via
 `cargo install --path .` continua sem editar arquivos do usuário.
 
+### Fase 2.2: Remoção da Integração com Startup de Shell
+
+Status: implementado em Patch uninstall-shell.
+
+O comando `astrofetch uninstall-shell` remove a integração de startup para bash,
+zsh, fish ou PowerShell sem apagar o binário. A remoção cobre blocos gerenciados
+e snippets legados conhecidos para evitar chamadas residuais no terminal.
+
 Regras implementadas:
 
 - suporte a `--shell bash|zsh|fish|powershell`;
