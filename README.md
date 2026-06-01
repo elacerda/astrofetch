@@ -1,380 +1,159 @@
 # AstroFetch
 
-**AstroFetch** is a small Rust terminal fetch app inspired by `screenFetch`.
-Instead of showing a static distro logo, it prints procedural astrophysical ASCII
-art next to a screenFetch-like system panel.
+AstroFetch is a small, space-themed system information tool for your terminal.
 
-It is personal, lightweight, and a little starry on purpose: useful enough to run
-in a shell, but mostly built for the joy of making terminal output feel alive.
+It prints a compact summary of your machine next to an ASCII space logo. It is designed to be simple, fast, and pleasant to run when opening a shell.
 
-## Features
+## Preview
 
-- Procedural ASCII art models: random, elliptical galaxy, spiral galaxy, cluster,
-  and starfield.
-- ScreenFetch-like system info in full mode:
-  OS, Kernel, Uptime, Packages, Shell, Resolution, DE, WM, themes, Disk, CPU,
-  GPU, and RAM.
-- Aligned label/value styling in the info panel, with subtle label color by
-  default.
-- Compact mode with the stable core fields:
-  OS, Kernel, Uptime, Disk, CPU, RAM.
-- Optional per-filesystem disk details with `--disk-details` on Linux.
-- `--info-only` and `--logo-only` modes for scripts, screenshots, and quick checks.
-- Deterministic seeds for reproducible art.
-- Optional ANSI color for art and info labels, with `--no-color` support.
-- Best-effort platform behavior: unavailable local commands or settings simply
-  omit optional fields.
-
-## Install
-
-### Recommended: install a release binary
-
-For regular Linux and macOS users, install the latest GitHub Release binary with:
+Run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh
-```
-
-To install a specific release:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.2.0
-```
-
-The installer downloads a prebuilt binary into `~/.local/bin` by default. It
-does not edit shell startup files or run `astrofetch setup-shell` automatically.
-
-If you do not like piping scripts into `sh`, download and inspect the installer
-first:
-
-```bash
-curl -fsSLO https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
-less install.sh
-sh install.sh
-```
-
-### Manual binary installation
-
-Download the artifact for your platform from
-[GitHub Releases](https://github.com/elacerda/astrofetch/releases):
-
-- Linux x86_64: `astrofetch-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
-- Linux arm64: `astrofetch-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz`
-- macOS x86_64: `astrofetch-vX.Y.Z-x86_64-apple-darwin.tar.gz`
-- macOS arm64: `astrofetch-vX.Y.Z-aarch64-apple-darwin.tar.gz`
-- Windows x86_64: `astrofetch-vX.Y.Z-x86_64-pc-windows-msvc.zip`
-
-For Linux or macOS:
-
-```bash
-tar -xzf astrofetch-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz
-mkdir -p "$HOME/.local/bin"
-mv astrofetch "$HOME/.local/bin/"
 astrofetch
 ```
 
-For Windows, download the zip file, extract `astrofetch.exe`, and place it in a
-directory that is on your `PATH`.
+AstroFetch shows basic system information such as OS, kernel, uptime, disk usage, memory, shell, and terminal.
 
-### Rust developer installation
+## Installation
 
-AstroFetch is not yet published to crates.io, so this does not work yet:
+AstroFetch is meant to be easy to install on personal laptops, observatory workstations, and research environments where scientists want a quick terminal summary without thinking about Rust tooling.
+
+### Install script (recommended)
+
+The recommended installation method is the install script:
 
 ```bash
-cargo install astrofetch
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | bash
 ```
 
-For now, Rust users can install from a local checkout:
+After installing, restart your terminal or reload your shell configuration if needed.
+
+Check that AstroFetch is available:
+
+```bash
+astrofetch --help
+```
+
+### Homebrew
+
+If you use Homebrew on macOS or Linux, you can install AstroFetch with:
+
+```bash
+brew tap elacerda/astrofetch
+brew install astrofetch
+```
+
+Homebrew is a good option for researchers who already use it to manage command-line tools across notebooks, lab machines, or shared scientific workstations.
+## Install from a local clone
+
+If you cloned the repository, run:
 
 ```bash
 git clone https://github.com/elacerda/astrofetch.git
 cd astrofetch
-cargo install --path .
+./install.sh
 ```
 
-If `cargo install --path .` succeeds but `astrofetch` is not found, make sure
-Cargo's binary directory is in your `PATH`:
+## Run AstroFetch when opening Bash
+
+To show AstroFetch automatically when opening a Bash terminal, add it to your `~/.bashrc`.
+
+Minimal setup:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-astrofetch
-```
+cat >> ~/.bashrc <<'EOF_BASHRC'
 
-### From source
-
-If you do not already have a working Rust toolchain, install Rust with `rustup`
-first. On Linux, macOS, or WSL:
-
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source "$HOME/.cargo/env"
-```
-
-Build a release binary:
-
-```bash
-git clone https://github.com/elacerda/astrofetch.git
-cd astrofetch
-cargo build --release
-./target/release/astrofetch
-```
-
-## Shell Startup Integration
-
-Installing the `astrofetch` binary does not automatically add it to your shell
-startup files (e.g., `~/.bashrc`, `~/.zshrc`, fish config, or a PowerShell
-profile). Startup integration is explicitly opt-in.
-
-If you want AstroFetch to run automatically when you open a new interactive
-terminal, use `setup-shell`. Start with `--dry-run` to see the target file and
-the exact managed block before anything is written:
-
-```bash
-astrofetch setup-shell --shell bash --dry-run
-```
-
-Then install the managed block:
-
-```bash
-astrofetch setup-shell --shell bash
-```
-
-For compact startup output:
-
-```bash
-astrofetch setup-shell --shell bash --compact
-```
-
-To remove AstroFetch from shell startup without deleting the binary:
-
-```bash
-astrofetch uninstall-shell --shell bash --dry-run
-astrofetch uninstall-shell --shell bash
-```
-
-Other shells:
-
-```bash
-astrofetch setup-shell --shell zsh --dry-run
-astrofetch setup-shell --shell fish --dry-run
-astrofetch setup-shell --shell powershell --dry-run
-```
-
-Startup removal supports the same shells:
-
-```bash
-astrofetch uninstall-shell --shell zsh --dry-run
-astrofetch uninstall-shell --shell fish --dry-run
-astrofetch uninstall-shell --shell powershell --dry-run
-```
-
-`--dry-run` prints the selected shell, target startup file, and block without
-writing files. If a managed AstroFetch block already exists, `setup-shell` will
-not duplicate it; use `--force` to replace only that managed block while
-preserving the rest of the file.
-
-`uninstall-shell` removes AstroFetch startup integration only. It removes the
-managed block and known legacy AstroFetch startup snippets, but it does not
-delete the `astrofetch` binary.
-
-To uninstall the binary installed by `install.sh`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh
-```
-
-To uninstall the binary and remove shell startup integration:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh \
-  | sh -s -- --remove-shell-integration --shell bash
-```
-
-Advanced/manual testing option:
-
-```bash
-astrofetch setup-shell --shell bash --target-path /tmp/astrofetch-shell-test --dry-run
-```
-
-Manual snippets are still fine if you prefer editing shell configuration
-yourself.
-
-### Bash (~/.bashrc)
-
-```bash
-if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+# AstroFetch
+if command -v astrofetch >/dev/null 2>&1; then
     astrofetch
 fi
+EOF_BASHRC
 ```
 
-The `[[ $- == *i* ]]` guard ensures AstroFetch only runs in interactive shells,
-preventing issues in non-interactive contexts (e.g., SSH commands, scripts).
-
-For a compact output, you can use:
+Then reload Bash:
 
 ```bash
-if [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then
+source ~/.bashrc
+```
+
+For compact output on shell startup, use this block instead:
+
+```bash
+cat >> ~/.bashrc <<'EOF_BASHRC'
+
+# AstroFetch
+if command -v astrofetch >/dev/null 2>&1; then
     astrofetch --compact
 fi
+EOF_BASHRC
 ```
-
-### Zsh (~/.zshrc)
-
-```zsh
-if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then
-    astrofetch
-fi
-```
-
-Or use the compact form:
-
-```zsh
-if [[ -o interactive ]] && command -v astrofetch >/dev/null 2>&1; then
-    astrofetch --compact
-fi
-```
-
-### Fish (~/.config/fish/config.fish)
-
-```fish
-if status is-interactive; and command -q astrofetch
-    astrofetch
-end
-```
-
-### PowerShell profile
-
-```powershell
-if ($Host.Name -eq "ConsoleHost" -and (Get-Command astrofetch -ErrorAction SilentlyContinue)) {
-    astrofetch
-}
-```
-
-After editing your shell config, reload it with `source ~/.bashrc` (or
-`source ~/.zshrc`) or open a new terminal to see the changes. For fish and
-PowerShell, opening a new terminal is usually the simplest check.
 
 ## Usage
 
-### Disk details
-
-To show the aggregate disk line plus per-filesystem details on Linux:
-
-```bash
-astrofetch --disk-details
-```
-
-Example disk detail output:
-
-```text
-Disk:           145.6G / 420.8G (35%)
-Disk /:         22.7G / 45.5G (50%)
-Disk /home:     123.0G / 374.8G (33%)
-Disk /boot/efi: 16.3M / 511.0M (3%)
-```
-
-On non-Linux platforms, `--disk-details` currently preserves the standard disk output without extra per-filesystem lines.
-
+Default output:
 
 ```bash
 astrofetch
 ```
 
-```bash
-astrofetch --info-only
-```
+Compact output:
 
 ```bash
 astrofetch --compact
 ```
 
+Logo only:
+
 ```bash
-astrofetch --logo-only --model spiral --width 40 --height 16 --seed 42
+astrofetch --logo-only
 ```
+
+Disable colors:
 
 ```bash
 astrofetch --no-color
 ```
 
-Useful discovery commands:
+Show help:
 
 ```bash
 astrofetch --help
-astrofetch --version
 ```
 
-## Optional Fields
+## Uninstalling
 
-Some fields depend on local commands or desktop settings. On Linux, AstroFetch
-uses best-effort probes such as `dpkg-query`, `xrandr`, `lspci`, and `gsettings`
-when they are available.
+If you installed AstroFetch using the install script, remove the installed binary manually:
 
-If a probe fails, is missing, or returns unusable output, AstroFetch omits that
-field instead of filling the terminal with `N/A`.
+```bash
+rm -f ~/.local/bin/astrofetch
+```
 
-## Platform Support
-
-- Linux: actively tested locally and in CI.
-- macOS: build, clippy, and test validation enabled in CI.
-- Windows: build, clippy, and test validation enabled in CI.
+If you added AstroFetch to your `~/.bashrc`, remove the AstroFetch block from that file.
 
 ## Development
 
+AstroFetch is written in Rust.
+
+For development from source:
+
 ```bash
-cargo fmt
-cargo clippy --all-targets -- -D warnings
+cargo run
 cargo test
 ```
 
-Runtime checks:
+Formatting and linting:
 
 ```bash
-cargo run -- --help
-cargo run -- --version
-cargo run -- --info-only
-cargo run -- --compact
-cargo run --
-cargo run -- setup-shell --help
-cargo run -- setup-shell --shell bash --dry-run
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-Release sanity:
+Building a release binary:
 
 ```bash
 cargo build --release
-./target/release/astrofetch --version
-./target/release/astrofetch --info-only
-./target/release/astrofetch --compact
 ```
 
-## Project Shape
+## License
 
-```text
-src/
-  main.rs
-  cli.rs
-  app.rs
-  engine.rs
-  render.rs
-  layout.rs
-  setup_shell.rs
-  terminal.rs
-  system.rs
-  error.rs
-```
-
-- `cli.rs`: command-line arguments with `clap`.
-- `app.rs`: top-level application flow.
-- `engine.rs`: procedural brightness models.
-- `render.rs`: numeric canvas to ASCII.
-- `layout.rs`: side-by-side composition.
-- `setup_shell.rs`: opt-in managed shell startup integration.
-- `terminal.rs`: terminal width, ANSI, TTY, and color handling.
-- `system.rs`: best-effort system information collection.
-- `error.rs`: recoverable application errors.
-
-## Philosophy
-
-AstroFetch is not trying to replace mature tools like `fastfetch` or
-`screenFetch`. It is a small, hackable terminal toy with enough practical polish
-to be pleasant in daily use.
+MIT
