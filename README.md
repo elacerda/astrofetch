@@ -177,6 +177,19 @@ preserving the rest of the file.
 managed block and known legacy AstroFetch startup snippets, but it does not
 delete the `astrofetch` binary.
 
+To uninstall the binary installed by `install.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh
+```
+
+To uninstall the binary and remove shell startup integration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh \
+  | sh -s -- --remove-shell-integration --shell bash
+```
+
 Advanced/manual testing option:
 
 ```bash

@@ -211,6 +211,14 @@ O comando `astrofetch uninstall-shell` remove a integração de startup para bas
 zsh, fish ou PowerShell sem apagar o binário. A remoção cobre blocos gerenciados
 e snippets legados conhecidos para evitar chamadas residuais no terminal.
 
+### Fase 2.3: Script de Desinstalação
+
+Status: implementado em Patch uninstall-script.
+
+O script `uninstall.sh` remove o binário instalado via `install.sh`. A remoção da
+integração de startup permanece opt-in via `--remove-shell-integration`, para
+evitar editar arquivos de shell sem pedido explícito do usuário.
+
 Regras implementadas:
 
 - suporte a `--shell bash|zsh|fish|powershell`;
