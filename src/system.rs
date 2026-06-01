@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+
+#[cfg(any(target_os = "linux", test))]
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 use sysinfo::{CpuRefreshKind, System};
 
@@ -902,6 +905,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(target_os = "linux", test))]
 struct DiskUsageEntry {
     key: String,
     total_bytes: u64,
@@ -915,6 +919,7 @@ struct LinuxMountIdentity {
     fs_type: String,
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn format_disk_usage_entries(entries: &[DiskUsageEntry]) -> String {
     let Some((used_bytes, total_bytes)) = aggregate_unique_disk_usage(entries) else {
         return "N/A".to_string();
@@ -927,6 +932,7 @@ fn format_disk_usage_entries(entries: &[DiskUsageEntry]) -> String {
     format!("{} / {} ({}%)", used_formatted, total_formatted, percent)
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn aggregate_unique_disk_usage(entries: &[DiskUsageEntry]) -> Option<(u64, u64)> {
     let mut seen = BTreeSet::new();
     let mut total_bytes: u64 = 0;
@@ -949,6 +955,7 @@ fn aggregate_unique_disk_usage(entries: &[DiskUsageEntry]) -> Option<(u64, u64)>
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn is_ignored_filesystem(fs_type: &str) -> bool {
     matches!(
         fs_type,
@@ -978,12 +985,14 @@ fn is_ignored_filesystem(fs_type: &str) -> bool {
     ) || fs_type.starts_with("fuse.")
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn normalize_disk_source(source: &str) -> String {
     let source = source.trim();
     let source = source.split_once('[').map_or(source, |(base, _)| base);
     source.trim().to_string()
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn fallback_disk_identity_key(fs_type: &str, source: &str, mount_point: &str) -> String {
     let source = normalize_disk_source(source);
 
