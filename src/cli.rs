@@ -61,6 +61,10 @@ pub struct Args {
     /// Print the compact field set
     #[arg(long)]
     pub compact: bool,
+
+    /// Show per-filesystem disk usage details
+    #[arg(long)]
+    pub disk_details: bool,
 }
 
 /// Subcomandos explícitos do AstroFetch.

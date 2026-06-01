@@ -5,7 +5,7 @@ use crate::layout::compose_layout;
 use crate::render::{
     normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
 };
-use crate::system::{get_display_field_order, SystemSnapshot};
+use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
 
@@ -16,7 +16,7 @@ const RESET: &str = "\x1b[0m";
 
 #[derive(Debug)]
 struct InfoLine {
-    label: &'static str,
+    label: String,
     value: String,
 }
 
@@ -125,16 +125,34 @@ impl App {
             lines.push(format_header(&system.user_host, colors_enabled));
         }
 
-        let info_fields: Vec<InfoLine> = get_display_field_order(system, self.args.compact)
+        let mut info_fields: Vec<InfoLine> = get_display_field_order(system, self.args.compact)
             .into_iter()
             .map(|field_name| InfoLine {
-                label: field_name,
+                label: field_name.to_string(),
                 value: system.get(field_name),
             })
             .collect();
+
+        if self.args.disk_details {
+            let disk_detail_fields: Vec<InfoLine> = get_disk_detail_fields()
+                .into_iter()
+                .map(|field| InfoLine {
+                    label: field.label,
+                    value: field.value,
+                })
+                .collect();
+
+            if !disk_detail_fields.is_empty() {
+                if let Some(disk_index) = info_fields.iter().position(|line| line.label == "Disk") {
+                    info_fields.splice(disk_index + 1..disk_index + 1, disk_detail_fields);
+                } else {
+                    info_fields.extend(disk_detail_fields);
+                }
+            }
+        }
         let label_width = info_fields
             .iter()
-            .map(|line| visible_width(line.label))
+            .map(|line| visible_width(&line.label))
             .max()
             .unwrap_or(0);
 
@@ -161,7 +179,7 @@ fn format_header(text: &str, colors_enabled: bool) -> String {
 }
 
 fn format_info_line(line: &InfoLine, label_width: usize, colors_enabled: bool) -> String {
-    let label_padding = " ".repeat(label_width.saturating_sub(visible_width(line.label)) + 1);
+    let label_padding = " ".repeat(label_width.saturating_sub(visible_width(&line.label)) + 1);
 
     if colors_enabled {
         format!(
@@ -192,6 +210,7 @@ mod tests {
                 logo_only: false,
                 info_only: false,
                 compact,
+                disk_details: false,
             },
             terminal: Terminal {
                 is_tty: colors_enabled,

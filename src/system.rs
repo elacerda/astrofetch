@@ -920,16 +920,21 @@ struct LinuxMountIdentity {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn format_disk_usage_entries(entries: &[DiskUsageEntry]) -> String {
-    let Some((used_bytes, total_bytes)) = aggregate_unique_disk_usage(entries) else {
-        return "N/A".to_string();
-    };
-
+fn format_disk_usage_bytes(used_bytes: u64, total_bytes: u64) -> String {
     let used_formatted = format_bytes(used_bytes);
     let total_formatted = format_bytes(total_bytes);
     let percent = ((used_bytes as f64 / total_bytes as f64) * 100.0).round() as u8;
 
     format!("{} / {} ({}%)", used_formatted, total_formatted, percent)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn format_disk_usage_entries(entries: &[DiskUsageEntry]) -> String {
+    let Some((used_bytes, total_bytes)) = aggregate_unique_disk_usage(entries) else {
+        return "N/A".to_string();
+    };
+
+    format_disk_usage_bytes(used_bytes, total_bytes)
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1182,6 +1187,45 @@ fn get_disk_info() -> String {
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         "N/A".to_string()
+    }
+}
+
+/// Obtém detalhes de disco por filesystem contado.
+///
+/// Atualmente os detalhes usam a mesma deduplicação do Linux. Em outras
+/// plataformas, a flag `--disk-details` mantém a saída padrão sem linhas extras.
+pub fn get_disk_detail_fields() -> Vec<SystemField> {
+    #[cfg(target_os = "linux")]
+    {
+        let disks = sysinfo::Disks::new_with_refreshed_list();
+        let mount_identities = linux_mount_identities_by_mount_point();
+        let mut seen = BTreeSet::new();
+        let mut details = Vec::new();
+
+        for disk in disks.iter() {
+            let mount_point = disk.mount_point().to_string_lossy().to_string();
+
+            let Some(entry) = linux_disk_usage_entry(disk, &mount_identities) else {
+                continue;
+            };
+
+            if !seen.insert(entry.key) {
+                continue;
+            }
+
+            let used_bytes = entry.total_bytes.saturating_sub(entry.available_bytes);
+            details.push(SystemField::new(
+                format!("Disk {}", mount_point),
+                format_disk_usage_bytes(used_bytes, entry.total_bytes),
+            ));
+        }
+
+        details
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
     }
 }
 
