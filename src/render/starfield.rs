@@ -1,4 +1,7 @@
-use super::{hash_cell, hash_to_unit, RESET};
+use super::{
+    hash::{hash_cell, hash_to_unit},
+    RESET,
+};
 use crate::terminal::Terminal;
 
 pub fn render_starfield(
