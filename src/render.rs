@@ -278,10 +278,10 @@ fn intensity_to_ansi(value: f64) -> &'static str {
 /// Gamma < 1 aumenta contraste em valores baixos.
 mod stretch;
 
-pub use stretch::{
-    apply_asinh_stretch, apply_gamma_stretch, apply_log_stretch, normalize_canvas,
-    normalize_with_stretch, StretchType,
-};
+pub use stretch::{normalize_with_stretch, StretchType};
+
+#[cfg(test)]
+pub use stretch::{apply_asinh_stretch, apply_gamma_stretch, apply_log_stretch, normalize_canvas};
 
 #[cfg(test)]
 mod tests {
