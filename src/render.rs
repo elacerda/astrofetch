@@ -90,7 +90,12 @@ pub fn render_galaxy(
 }
 
 fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> {
-    let threshold = adaptive_threshold(canvas);
+    let adaptive = adaptive_threshold(canvas);
+
+    // Lower than the structural threshold because the glyph palette below
+    // can represent diffuse light without filling everything with solid blocks.
+    let threshold = (adaptive * 0.60).clamp(0.06, 0.26);
+
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
 
@@ -105,12 +110,7 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
                 .copied()
                 .unwrap_or(0.0);
 
-            let ch = match (top >= threshold, bottom >= threshold) {
-                (false, false) => ' ',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (true, true) => '█',
-            };
+            let ch = glyph_for_density_pair(top, bottom, threshold);
 
             if colors_enabled && ch != ' ' {
                 let color = intensity_to_ansi(top.max(bottom));
@@ -126,6 +126,43 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
     }
 
     lines
+}
+
+fn glyph_for_density_pair(top: f64, bottom: f64, threshold: f64) -> char {
+    let top_on = top >= threshold;
+    let bottom_on = bottom >= threshold;
+
+    match (top_on, bottom_on) {
+        (false, false) => ' ',
+        (true, true) => shade_for_intensity((top + bottom) * 0.5, threshold),
+        (true, false) => half_or_diffuse('▀', top, threshold),
+        (false, true) => half_or_diffuse('▄', bottom, threshold),
+    }
+}
+
+fn half_or_diffuse(half_block: char, value: f64, threshold: f64) -> char {
+    let normalized = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
+
+    // Very faint one-sided pixels should look like diffuse glow, not hard strokes.
+    if normalized < 0.22 {
+        '░'
+    } else {
+        half_block
+    }
+}
+
+fn shade_for_intensity(value: f64, threshold: f64) -> char {
+    let normalized = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
+
+    if normalized < 0.18 {
+        '░'
+    } else if normalized < 0.42 {
+        '▒'
+    } else if normalized < 0.68 {
+        '▓'
+    } else {
+        '█'
+    }
 }
 
 fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
@@ -145,10 +182,10 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     // The clamp avoids the two bad extremes we observed:
     // - too low: solid ellipse
     // - too high: only the nucleus
-    let percentile = 0.72;
+    let percentile = 0.62;
     let idx = ((values.len().saturating_sub(1)) as f64 * percentile).round() as usize;
 
-    values[idx].clamp(0.16, 0.52)
+    values[idx].clamp(0.10, 0.42)
 }
 
 /// Converte intensidade para cor ANSI.
