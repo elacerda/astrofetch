@@ -89,17 +89,13 @@ impl App {
             terminal.print_lines(&info_lines)?;
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
-            let art_lines = match engine_model {
-                EngineModel::Starfield => render_starfield(&canvas, colors_enabled, &terminal),
-                _ => render_galaxy(&canvas, colors_enabled, &terminal),
-            };
+            let art_lines =
+                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
             terminal.print_lines(&art_lines)?;
         } else {
             // Modo normal: arte + informações (side-by-side)
-            let art_lines = match engine_model {
-                EngineModel::Starfield => render_starfield(&canvas, colors_enabled, &terminal),
-                _ => render_galaxy(&canvas, colors_enabled, &terminal),
-            };
+            let art_lines =
+                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
 
             let system = SystemSnapshot::collect();
             let info_lines = self.build_info_lines(&system);
@@ -108,6 +104,19 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Renderiza a arte usando o renderer adequado para cada modelo.
+    fn render_art_lines(
+        engine_model: EngineModel,
+        canvas: &[Vec<f64>],
+        colors_enabled: bool,
+        terminal: &Terminal,
+    ) -> Vec<String> {
+        match engine_model {
+            EngineModel::Starfield => render_starfield(canvas, colors_enabled, terminal),
+            _ => render_galaxy(canvas, colors_enabled, terminal),
+        }
     }
 
     /// Constrói as linhas de informações do sistema.
