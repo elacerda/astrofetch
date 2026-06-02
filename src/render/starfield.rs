@@ -1,6 +1,6 @@
 use super::{
+    color::RESET,
     hash::{hash_cell, hash_to_unit},
-    RESET,
 };
 use crate::terminal::Terminal;
 

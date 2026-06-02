@@ -1,7 +1,6 @@
 use crate::terminal::Terminal;
 
-const RESET: &str = "\x1b[0m";
-
+use color::{intensity_to_ansi, RESET};
 use hash::{hash_cell, hash_to_unit};
 
 /// Paleta de caracteres ASCII para renderização.
@@ -237,29 +236,11 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     values[idx].clamp(0.06, 0.28)
 }
 
+mod color;
 mod hash;
 mod starfield;
 
 pub use starfield::render_starfield;
-
-/// Converte intensidade para cor ANSI.
-fn intensity_to_ansi(value: f64) -> &'static str {
-    if value < 0.16 {
-        "\x1b[2;38;5;17m" // dim deep blue
-    } else if value < 0.30 {
-        "\x1b[2;38;5;24m" // dim blue
-    } else if value < 0.44 {
-        "\x1b[38;5;30m" // muted cyan/teal
-    } else if value < 0.58 {
-        "\x1b[38;5;65m" // muted green
-    } else if value < 0.72 {
-        "\x1b[38;5;136m" // muted amber
-    } else if value < 0.88 {
-        "\x1b[38;5;130m" // muted orange/red
-    } else {
-        "\x1b[38;5;255m" // soft white core
-    }
-}
 
 /// Aplica stretch (contraste) no valor usando gamma.
 /// Gamma < 1 aumenta contraste em valores baixos.
