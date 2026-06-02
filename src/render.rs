@@ -129,36 +129,36 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
 }
 
 fn glyph_for_density_pair(top: f64, bottom: f64, threshold: f64) -> char {
-    let top_on = top >= threshold;
-    let bottom_on = bottom >= threshold;
+    let max_value = top.max(bottom);
 
-    match (top_on, bottom_on) {
-        (false, false) => ' ',
-        (true, true) => shade_for_intensity((top + bottom) * 0.5, threshold),
-        (true, false) => half_or_diffuse('▀', top, threshold),
-        (false, true) => half_or_diffuse('▄', bottom, threshold),
+    if max_value < threshold {
+        return ' ';
     }
-}
 
-fn half_or_diffuse(half_block: char, value: f64, threshold: f64) -> char {
-    let normalized = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
+    let avg_value = (top + bottom) * 0.5;
+    let contrast = (top - bottom).abs();
+    let normalized = ((max_value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
 
-    // Very faint one-sided pixels should look like diffuse glow, not hard strokes.
-    if normalized < 0.22 {
-        '░'
-    } else {
-        half_block
+    // Use half-blocks only for bright, vertically asymmetric pixels.
+    // This keeps fine structure but avoids turning spiral arms into hard strokes.
+    if normalized > 0.62 && contrast > max_value * 0.55 {
+        if top > bottom {
+            return '▀';
+        }
+        return '▄';
     }
+
+    shade_for_intensity(avg_value.max(max_value * 0.72), threshold)
 }
 
 fn shade_for_intensity(value: f64, threshold: f64) -> char {
     let normalized = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
 
-    if normalized < 0.18 {
+    if normalized < 0.16 {
         '░'
-    } else if normalized < 0.42 {
+    } else if normalized < 0.38 {
         '▒'
-    } else if normalized < 0.68 {
+    } else if normalized < 0.64 {
         '▓'
     } else {
         '█'
