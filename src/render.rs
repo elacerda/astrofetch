@@ -92,9 +92,8 @@ pub fn render_galaxy(
 fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> {
     let adaptive = adaptive_threshold(canvas);
 
-    // Lower than the structural threshold because the glyph palette below
-    // can represent diffuse light without filling everything with solid blocks.
-    let threshold = (adaptive * 0.55).clamp(0.05, 0.24);
+    // Shade-only renderer: favor diffuse luminosity over hard spiral strokes.
+    let threshold = (adaptive * 0.42).clamp(0.035, 0.18);
 
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
@@ -113,7 +112,7 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
             let ch = glyph_for_density_pair(top, bottom, threshold);
 
             if colors_enabled && ch != ' ' {
-                let color = intensity_to_ansi(top.max(bottom));
+                let color = intensity_to_ansi((top + bottom) * 0.5);
                 line.push_str(color);
                 line.push(ch);
                 line.push_str(RESET);
@@ -129,36 +128,25 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
 }
 
 fn glyph_for_density_pair(top: f64, bottom: f64, threshold: f64) -> char {
-    let max_value = top.max(bottom);
-
-    if max_value < threshold {
+    let maxv = top.max(bottom);
+    if maxv < threshold {
         return ' ';
     }
 
-    let avg_value = (top + bottom) * 0.5;
-    let contrast = (top - bottom).abs();
-    let normalized = ((max_value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
-
-    // Use half-blocks only for bright, vertically asymmetric pixels.
-    // This keeps fine structure but avoids turning spiral arms into hard strokes.
-    if normalized > 0.62 && contrast > max_value * 0.55 {
-        if top > bottom {
-            return '▀';
-        }
-        return '▄';
-    }
-
-    shade_for_intensity(avg_value.max(max_value * 0.72), threshold)
+    // A small max contribution preserves thin arms, while the average keeps
+    // the result visually diffuse instead of line-like.
+    let value = ((top + bottom) * 0.5).max(maxv * 0.62);
+    shade_for_intensity(value, threshold)
 }
 
 fn shade_for_intensity(value: f64, threshold: f64) -> char {
     let normalized = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
 
-    if normalized < 0.16 {
+    if normalized < 0.10 {
         '░'
-    } else if normalized < 0.38 {
+    } else if normalized < 0.26 {
         '▒'
-    } else if normalized < 0.64 {
+    } else if normalized < 0.48 {
         '▓'
     } else {
         '█'
@@ -185,7 +173,7 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     let percentile = 0.58;
     let idx = ((values.len().saturating_sub(1)) as f64 * percentile).round() as usize;
 
-    values[idx].clamp(0.10, 0.42)
+    values[idx].clamp(0.06, 0.28)
 }
 
 /// Converte intensidade para cor ANSI.
@@ -340,13 +328,13 @@ mod tests {
     }
 
     #[test]
-    fn test_render_galaxy_half_blocks() {
+    fn test_render_galaxy_shade_only_blocks() {
         let terminal = crate::terminal::Terminal::with_colors(true, false);
         let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
 
         let result = render_galaxy(&canvas, false, &terminal);
 
-        assert_eq!(result, vec!["▀▄█"]);
+        assert_eq!(result, vec!["███"]);
     }
 
     #[test]
