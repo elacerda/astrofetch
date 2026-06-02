@@ -219,7 +219,11 @@ pub fn insert_or_update_managed_block(
     let removed_legacy_blocks = content_without_legacy != existing_content;
 
     match find_managed_block(&content_without_legacy)? {
-        Some((start, end)) if force => {
+        Some((start, end))
+            if force
+                || removed_legacy_blocks
+                || managed_block_body_is_empty(&content_without_legacy, start, end) =>
+        {
             let mut content = String::new();
             content.push_str(&content_without_legacy[..start]);
             content.push_str(block);
@@ -229,10 +233,6 @@ pub fn insert_or_update_managed_block(
                 action: ManagedBlockAction::Replaced,
             })
         }
-        Some(_) if removed_legacy_blocks => Ok(ManagedBlockResult {
-            content: content_without_legacy,
-            action: ManagedBlockAction::Replaced,
-        }),
         Some(_) => Ok(ManagedBlockResult {
             content: content_without_legacy,
             action: ManagedBlockAction::AlreadyInstalled,
@@ -280,6 +280,21 @@ fn remove_legacy_startup_blocks(existing_content: &str) -> String {
     }
 
     content
+}
+
+fn managed_block_body_is_empty(existing_content: &str, start: usize, end: usize) -> bool {
+    let block = &existing_content[start..end];
+    let Some(after_start) = block.strip_prefix(START_MARKER) else {
+        return false;
+    };
+
+    let after_start = after_start.strip_prefix('\n').unwrap_or(after_start);
+    let body = match after_start.find(END_MARKER) {
+        Some(end_marker_start) => &after_start[..end_marker_start],
+        None => after_start,
+    };
+
+    body.trim().is_empty()
 }
 
 fn legacy_startup_blocks() -> Vec<String> {
@@ -488,14 +503,11 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_legacy_bash_block_when_managed_block_already_exists() {
+    fn test_replace_managed_block_when_removing_legacy_startup_block() {
         let existing = "before\nif [[ $- == *i* ]] && command -v astrofetch >/dev/null 2>&1; then\n    astrofetch\nfi\n# >>> astrofetch >>>\nmanaged\n# <<< astrofetch <<<\nafter\n";
         let result = insert_or_update_managed_block(existing, "new\n", false).unwrap();
 
-        assert_eq!(
-            result.content,
-            "before\n# >>> astrofetch >>>\nmanaged\n# <<< astrofetch <<<\nafter\n"
-        );
+        assert_eq!(result.content, "before\nnew\nafter\n");
         assert_eq!(result.action, ManagedBlockAction::Replaced);
     }
 
@@ -571,6 +583,15 @@ mod tests {
 
         assert_eq!(result.content, existing);
         assert_eq!(result.action, ManagedBlockAction::AlreadyInstalled);
+    }
+
+    #[test]
+    fn test_replace_empty_managed_block_without_force() {
+        let existing = "before\n# >>> astrofetch >>>\n# <<< astrofetch <<<\nafter\n";
+        let result = insert_or_update_managed_block(existing, "new\n", false).unwrap();
+
+        assert_eq!(result.content, "before\nnew\nafter\n");
+        assert_eq!(result.action, ManagedBlockAction::Replaced);
     }
 
     #[test]
