@@ -98,7 +98,7 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
     let star_seed = star_field_seed(canvas);
 
     let width = canvas.first().map_or(0, Vec::len);
-    let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
+    let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
     for y in (0..canvas.len()).step_by(2) {
         let mut line = String::with_capacity(width);

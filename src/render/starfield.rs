@@ -10,7 +10,7 @@ pub fn render_starfield(
     terminal: &Terminal,
 ) -> Vec<String> {
     let width = canvas.first().map_or(0, Vec::len);
-    let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
+    let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
     for y in (0..canvas.len()).step_by(2) {
         let mut line = String::with_capacity(width);
