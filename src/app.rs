@@ -2,9 +2,7 @@ use crate::cli::{Args, ArtModel, Command};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::layout::compose_layout;
-use crate::render::{
-    normalize_with_stretch, render_ascii, render_colored_ascii, Palette, StretchType,
-};
+use crate::render::{normalize_with_stretch, render_galaxy, render_starfield, StretchType};
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
@@ -72,48 +70,53 @@ impl App {
             ArtModel::Starfield => EngineModel::Starfield,
         };
 
-        // Gera a arte ASCII
-        let mut canvas = engine_model.generate(self.args.width, self.args.height, self.args.seed);
-
-        // Aplica stretch para melhor contraste
-        canvas = normalize_with_stretch(&canvas, StretchType::default());
-
-        let palette = Palette::DEFAULT;
+        // Gera a arte terminal.
+        //
+        // Starfield is intentionally rendered from raw sparse values. Normalizing
+        // it would turn every faint star into a bright glyph. Density-based
+        // galaxy models still benefit from contrast stretching.
+        let generated_canvas =
+            engine_model.generate(self.args.width, self.args.height, self.args.seed);
+        let canvas = match engine_model {
+            EngineModel::Starfield => generated_canvas,
+            _ => normalize_with_stretch(&generated_canvas, StretchType::default()),
+        };
 
         // Imprime na saída
         if self.args.info_only {
             // Modo info-only: apenas informações, sem arte ASCII
             let info_lines = self.build_info_lines(&SystemSnapshot::collect());
-            for line in info_lines {
-                println!("{}", line);
-            }
+            terminal.print_lines(&info_lines)?;
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
-            let art_lines = if colors_enabled {
-                render_colored_ascii(&canvas, &palette, &terminal)
-            } else {
-                render_ascii(&canvas, &palette)
-            };
-            for line in art_lines {
-                println!("{}", line);
-            }
+            let art_lines =
+                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
+            terminal.print_lines(&art_lines)?;
         } else {
             // Modo normal: arte + informações (side-by-side)
-            let art_lines = if colors_enabled {
-                render_colored_ascii(&canvas, &palette, &terminal)
-            } else {
-                render_ascii(&canvas, &palette)
-            };
+            let art_lines =
+                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
 
             let system = SystemSnapshot::collect();
             let info_lines = self.build_info_lines(&system);
             let output_lines = compose_layout(&art_lines, &info_lines, self.args.width, 2);
-            for line in output_lines {
-                println!("{}", line);
-            }
+            terminal.print_lines(&output_lines)?;
         }
 
         Ok(())
+    }
+
+    /// Renderiza a arte usando o renderer adequado para cada modelo.
+    fn render_art_lines(
+        engine_model: EngineModel,
+        canvas: &[Vec<f64>],
+        colors_enabled: bool,
+        terminal: &Terminal,
+    ) -> Vec<String> {
+        match engine_model {
+            EngineModel::Starfield => render_starfield(canvas, colors_enabled, terminal),
+            _ => render_galaxy(canvas, colors_enabled, terminal),
+        }
     }
 
     /// Constrói as linhas de informações do sistema.
