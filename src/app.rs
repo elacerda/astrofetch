@@ -2,7 +2,7 @@ use crate::cli::{Args, ArtModel, Command};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::layout::compose_layout;
-use crate::render::{normalize_with_stretch, render_galaxy, StretchType};
+use crate::render::{normalize_with_stretch, render_galaxy, render_starfield, StretchType};
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
@@ -70,11 +70,17 @@ impl App {
             ArtModel::Starfield => EngineModel::Starfield,
         };
 
-        // Gera a arte ASCII
-        let mut canvas = engine_model.generate(self.args.width, self.args.height, self.args.seed);
-
-        // Aplica stretch para melhor contraste
-        canvas = normalize_with_stretch(&canvas, StretchType::default());
+        // Gera a arte terminal.
+        //
+        // Starfield is intentionally rendered from raw sparse values. Normalizing
+        // it would turn every faint star into a bright glyph. Density-based
+        // galaxy models still benefit from contrast stretching.
+        let generated_canvas =
+            engine_model.generate(self.args.width, self.args.height, self.args.seed);
+        let canvas = match engine_model {
+            EngineModel::Starfield => generated_canvas,
+            _ => normalize_with_stretch(&generated_canvas, StretchType::default()),
+        };
 
         // Imprime na saída
         if self.args.info_only {
@@ -83,11 +89,17 @@ impl App {
             terminal.print_lines(&info_lines)?;
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
-            let art_lines = render_galaxy(&canvas, colors_enabled, &terminal);
+            let art_lines = match engine_model {
+                EngineModel::Starfield => render_starfield(&canvas),
+                _ => render_galaxy(&canvas, colors_enabled, &terminal),
+            };
             terminal.print_lines(&art_lines)?;
         } else {
             // Modo normal: arte + informações (side-by-side)
-            let art_lines = render_galaxy(&canvas, colors_enabled, &terminal);
+            let art_lines = match engine_model {
+                EngineModel::Starfield => render_starfield(&canvas),
+                _ => render_galaxy(&canvas, colors_enabled, &terminal),
+            };
 
             let system = SystemSnapshot::collect();
             let info_lines = self.build_info_lines(&system);

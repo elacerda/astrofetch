@@ -251,6 +251,42 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     values[idx].clamp(0.06, 0.28)
 }
 
+pub fn render_starfield(canvas: &[Vec<f64>]) -> Vec<String> {
+    let width = canvas.first().map_or(0, Vec::len);
+    let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
+
+    for y in (0..canvas.len()).step_by(2) {
+        let mut line = String::with_capacity(width);
+
+        for x in 0..width {
+            let top = canvas[y].get(x).copied().unwrap_or(0.0);
+            let bottom = canvas
+                .get(y + 1)
+                .and_then(|row| row.get(x))
+                .copied()
+                .unwrap_or(0.0);
+
+            line.push(starfield_glyph(top.max(bottom)));
+        }
+
+        lines.push(line);
+    }
+
+    lines
+}
+
+fn starfield_glyph(value: f64) -> char {
+    if value < 0.030 {
+        ' '
+    } else if value < 0.085 {
+        '.'
+    } else if value < 0.150 {
+        '*'
+    } else {
+        '+'
+    }
+}
+
 /// Converte intensidade para cor ANSI.
 fn intensity_to_ansi(value: f64) -> &'static str {
     if value < 0.20 {

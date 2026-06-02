@@ -47,27 +47,22 @@ impl ArtModel {
 
 /// Gera um campo de estrelas simples.
 fn generate_starfield(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f64>> {
-    let mut canvas = vec![vec![0.0; width]; height];
+    let mut canvas: Vec<Vec<f64>> = vec![vec![0.0_f64; width]; height];
 
-    let num_stars = width * height / 6;
+    // Keep the density map very sparse. The renderer will add ASCII point
+    // stars over empty cells, so this model should not fill the whole canvas.
+    let num_stars = (width * height / 64).max(8);
     for _ in 0..num_stars {
         let x = rng.gen_range(0..width);
         let y = rng.gen_range(0..height);
-        let brightness = rng.gen_range(0.3..1.0);
-        canvas[y][x] = brightness;
+        let brightness: f64 = rng.gen_range(0.040_f64..0.180_f64);
+        canvas[y][x] = canvas[y][x].max(brightness);
     }
 
-    let center_x = width / 2;
-    let center_y = height / 2;
-    for (y, row) in canvas.iter_mut().enumerate() {
-        for (x, value) in row.iter_mut().enumerate() {
-            let dx = (x as f64 - center_x as f64) / width as f64;
-            let dy = (y as f64 - center_y as f64) / height as f64;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let nebula = (1.0 - dist).max(0.0) * 0.1;
-            *value = (*value + nebula).min(1.0);
-        }
-    }
+    // Tiny invisible seed signature so the renderer-derived star overlay varies
+    // by seed even when the field is mostly empty.
+    let seed_signature: f64 = rng.gen_range(0.001_f64..0.004_f64);
+    canvas[0][0] = canvas[0][0].max(seed_signature);
 
     canvas
 }
@@ -109,7 +104,19 @@ fn generate_elliptical(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec
 
     for y in 0..height {
         for x in 0..width {
-            let value = map.get(x, y) + rng.gen_range(-0.05_f64..0.05_f64);
+            let mut value = map.get(x, y);
+
+            // Cut very faint outskirts so the renderer does not turn the whole
+            // terminal area into a noisy filled cloud.
+            if value < 0.018 {
+                value = 0.0;
+            }
+
+            // Very light grain only where the galaxy is actually visible.
+            if value > 0.0 {
+                value += rng.gen_range(-0.012_f64..0.012_f64);
+            }
+
             map.set(x, y, value.clamp(0.0_f64, 1.0_f64));
         }
     }
@@ -124,7 +131,7 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
 
-    let num_stars = 50 + rng.gen_range(0..100);
+    let num_stars = 22 + rng.gen_range(0..45);
 
     for _ in 0..num_stars {
         let angle = rng.gen_range(0.0..2.0 * std::f64::consts::PI);
@@ -144,15 +151,19 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
             let dx = (x as f64 - center_x) / width as f64;
             let dy = (y as f64 - center_y) / height as f64;
             let dist = (dx * dx + dy * dy).sqrt();
-            let nebula = (1.0 - dist).max(0.0).powf(4.0) * 0.15;
+            let nebula = (1.0 - dist).max(0.0).powf(5.0) * 0.08;
             *value = (*value + nebula).min(1.0);
         }
     }
 
     for row in &mut canvas {
         for value in row {
-            *value += rng.gen_range(-0.03_f64..0.03_f64);
-            *value = value.clamp(0.0_f64, 1.0_f64);
+            if *value < 0.012 {
+                *value = 0.0;
+            } else {
+                *value += rng.gen_range(-0.008_f64..0.008_f64);
+                *value = value.clamp(0.0_f64, 1.0_f64);
+            }
         }
     }
 
