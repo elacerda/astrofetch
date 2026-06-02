@@ -251,7 +251,11 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     values[idx].clamp(0.06, 0.28)
 }
 
-pub fn render_starfield(canvas: &[Vec<f64>]) -> Vec<String> {
+pub fn render_starfield(
+    canvas: &[Vec<f64>],
+    colors_enabled: bool,
+    terminal: &Terminal,
+) -> Vec<String> {
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
 
@@ -266,13 +270,43 @@ pub fn render_starfield(canvas: &[Vec<f64>]) -> Vec<String> {
                 .copied()
                 .unwrap_or(0.0);
 
-            line.push(starfield_glyph(top.max(bottom)));
+            let value = top.max(bottom);
+            let ch = starfield_glyph(value);
+
+            if colors_enabled && terminal.colors_enabled() && ch != ' ' {
+                let color = starfield_to_ansi(value, x, y / 2);
+                line.push_str(color);
+                line.push(ch);
+                line.push_str(RESET);
+            } else {
+                line.push(ch);
+            }
         }
 
         lines.push(line);
     }
 
     lines
+}
+
+fn starfield_to_ansi(value: f64, x: usize, y: usize) -> &'static str {
+    let hue = hash_to_unit(hash_cell(x, y, 0x51a7_f17e_d00d_cafe));
+
+    if value < 0.085 {
+        "\x1b[2;37m" // faint gray
+    } else if value < 0.150 {
+        if hue < 0.50 {
+            "\x1b[38;5;67m" // muted pale blue
+        } else {
+            "\x1b[38;5;109m" // muted pale cyan
+        }
+    } else if hue < 0.58 {
+        "\x1b[38;5;250m" // soft white
+    } else if hue < 0.84 {
+        "\x1b[38;5;180m" // soft warm star
+    } else {
+        "\x1b[38;5;167m" // rare muted red star
+    }
 }
 
 fn starfield_glyph(value: f64) -> char {
@@ -289,16 +323,20 @@ fn starfield_glyph(value: f64) -> char {
 
 /// Converte intensidade para cor ANSI.
 fn intensity_to_ansi(value: f64) -> &'static str {
-    if value < 0.20 {
-        "\x1b[90m" // Preto suave (dim)
-    } else if value < 0.38 {
-        "\x1b[34m" // Azul
+    if value < 0.16 {
+        "\x1b[2;38;5;17m" // dim deep blue
+    } else if value < 0.30 {
+        "\x1b[2;38;5;24m" // dim blue
+    } else if value < 0.44 {
+        "\x1b[38;5;30m" // muted cyan/teal
     } else if value < 0.58 {
-        "\x1b[36m" // Ciano
-    } else if value < 0.78 {
-        "\x1b[33m" // Amarelo
+        "\x1b[38;5;65m" // muted green
+    } else if value < 0.72 {
+        "\x1b[38;5;136m" // muted amber
+    } else if value < 0.88 {
+        "\x1b[38;5;130m" // muted orange/red
     } else {
-        "\x1b[97m" // Branco brilhante
+        "\x1b[38;5;255m" // soft white core
     }
 }
 

@@ -131,17 +131,17 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
 
-    let num_stars = 22 + rng.gen_range(0..45);
+    let num_stars = 34 + rng.gen_range(0..56);
 
     for _ in 0..num_stars {
         let angle = rng.gen_range(0.0..2.0 * std::f64::consts::PI);
-        let r = rng.gen_range(0.0_f64..1.0).sqrt() * 0.4;
+        let r = rng.gen_range(0.0_f64..1.0).powf(1.75) * 0.44;
 
         let x = (center_x + r * width as f64 * angle.cos()) as usize;
         let y = (center_y + r * height as f64 * angle.sin()) as usize;
 
         if x < width && y < height {
-            let brightness = rng.gen_range(0.2..1.0);
+            let brightness = rng.gen_range(0.16_f64..0.95_f64);
             canvas[y][x] = brightness;
         }
     }
@@ -151,17 +151,17 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
             let dx = (x as f64 - center_x) / width as f64;
             let dy = (y as f64 - center_y) / height as f64;
             let dist = (dx * dx + dy * dy).sqrt();
-            let nebula = (1.0 - dist).max(0.0).powf(5.0) * 0.08;
+            let nebula = (1.0 - dist / 0.30).max(0.0).powf(5.5) * 0.045;
             *value = (*value + nebula).min(1.0);
         }
     }
 
     for row in &mut canvas {
         for value in row {
-            if *value < 0.012 {
+            if *value < 0.020 {
                 *value = 0.0;
             } else {
-                *value += rng.gen_range(-0.008_f64..0.008_f64);
+                *value += rng.gen_range(-0.006_f64..0.006_f64);
                 *value = value.clamp(0.0_f64, 1.0_f64);
             }
         }
