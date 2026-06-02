@@ -542,6 +542,43 @@ mod tests {
     }
 
     #[test]
+    fn test_render_starfield_collapses_density_rows() {
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let canvas = vec![
+            vec![0.0, 0.04, 0.10, 0.20],
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![0.02, 0.08, 0.15, 0.18],
+            vec![0.0, 0.0, 0.0, 0.0],
+        ];
+
+        let result = render_starfield(&canvas, false, &terminal);
+
+        assert_eq!(result, vec![" .*+", " .++"]);
+    }
+
+    #[test]
+    fn test_render_starfield_no_color_is_ansi_free() {
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let canvas = vec![vec![0.20]];
+
+        let result = render_starfield(&canvas, false, &terminal);
+
+        assert_eq!(result, vec!["+"]);
+        assert!(!result[0].contains('\x1b'));
+    }
+
+    #[test]
+    fn test_render_starfield_colored_contains_ansi() {
+        let terminal = crate::terminal::Terminal::with_colors(true, true);
+        let canvas = vec![vec![0.20]];
+
+        let result = render_starfield(&canvas, true, &terminal);
+
+        assert!(result[0].contains('\x1b'));
+        assert!(result[0].contains('+'));
+    }
+
+    #[test]
     fn test_colored_contains_ansi() {
         let terminal = crate::terminal::Terminal::with_colors(true, true);
         let canvas = vec![vec![0.5]];
