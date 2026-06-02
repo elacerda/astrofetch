@@ -2,7 +2,7 @@
 
 AstroFetch is a small, space-themed system information tool for your terminal.
 
-It prints a compact summary of your machine next to an ASCII space logo. It is designed to be simple, fast, and pleasant to run when opening a shell.
+It prints a compact summary of your machine next to procedural astrophysical ASCII art. It is designed to be simple, fast, and pleasant to run when opening a shell.
 
 ## Preview
 
@@ -12,7 +12,7 @@ Run:
 astrofetch
 ```
 
-By default, AstroFetch renders a procedural spiral galaxy next to a compact system summary.
+By default, AstroFetch randomly selects one of the available procedural art models and renders it next to a compact system summary.
 
 Example visual models:
 
@@ -40,7 +40,19 @@ AstroFetch is meant to be easy to install on personal laptops, observatory works
 The recommended installation method is the install script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh
+```
+
+Install a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.3.0
+```
+
+Preview what the installer would do:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --dry-run
 ```
 
 After installing, restart your terminal or reload your shell configuration if needed.
@@ -72,39 +84,15 @@ cd astrofetch
 ./install.sh
 ```
 
-## Run AstroFetch when opening Bash
+### Install from source with Cargo
 
-To show AstroFetch automatically when opening a Bash terminal, add it to your `~/.bashrc`.
-
-Minimal setup:
+For local development or source-based installs:
 
 ```bash
-cat >> ~/.bashrc <<'EOF_BASHRC'
-
-# AstroFetch
-if command -v astrofetch >/dev/null 2>&1; then
-    astrofetch
-fi
-EOF_BASHRC
+cargo install --path .
 ```
 
-Then reload Bash:
-
-```bash
-source ~/.bashrc
-```
-
-For compact output on shell startup, use this block instead:
-
-```bash
-cat >> ~/.bashrc <<'EOF_BASHRC'
-
-# AstroFetch
-if command -v astrofetch >/dev/null 2>&1; then
-    astrofetch --compact
-fi
-EOF_BASHRC
-```
+This installs `astrofetch` under Cargo's binary directory, usually `~/.cargo/bin`.
 
 ## Usage
 
@@ -123,6 +111,7 @@ astrofetch --compact
 Choose a visual model:
 
 ```bash
+astrofetch --model random
 astrofetch --model spiral
 astrofetch --model elliptical
 astrofetch --model cluster
@@ -131,7 +120,8 @@ astrofetch --model starfield
 
 Available models:
 
-- `spiral`: the default procedural galaxy renderer.
+- `random`: randomly selects one of the available models.
+- `spiral`: a procedural spiral galaxy renderer.
 - `elliptical`: a smooth radial galaxy model.
 - `cluster`: a sparse stellar cluster-style model.
 - `starfield`: a point-like field using `.`, `*`, and `+` instead of diffuse galaxy blocks.
@@ -160,15 +150,139 @@ Show help:
 astrofetch --help
 ```
 
-## Uninstalling
+## Shell startup integration
 
-If you installed AstroFetch using the install script, remove the installed binary manually:
+AstroFetch can add a managed startup block to your shell configuration. The managed block is marked with:
 
-```bash
-rm -f ~/.local/bin/astrofetch
+```text
+# >>> astrofetch >>>
+# <<< astrofetch <<<
 ```
 
-If you added AstroFetch to your `~/.bashrc`, remove the AstroFetch block from that file.
+Preview the startup integration before changing files:
+
+```bash
+astrofetch setup-shell --shell bash --dry-run
+```
+
+Install startup integration for Bash:
+
+```bash
+astrofetch setup-shell --shell bash
+```
+
+Use compact output on shell startup:
+
+```bash
+astrofetch setup-shell --shell bash --compact
+```
+
+Supported shells:
+
+```bash
+astrofetch setup-shell --shell bash
+astrofetch setup-shell --shell zsh
+astrofetch setup-shell --shell fish
+astrofetch setup-shell --shell powershell
+```
+
+Remove startup integration:
+
+```bash
+astrofetch uninstall-shell --shell bash
+```
+
+Preview removal first:
+
+```bash
+astrofetch uninstall-shell --shell bash --dry-run
+```
+
+## Uninstalling
+
+The uninstall method depends on how AstroFetch was installed.
+
+### Install script
+
+If you installed AstroFetch with `install.sh`, remove the default binary with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh
+```
+
+Also remove shell startup integration:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --remove-shell-integration --shell bash
+```
+
+Preview uninstall actions without changing files:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --dry-run
+```
+
+If you installed to a custom directory:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --dir "$HOME/bin"
+```
+
+### Homebrew
+
+If you installed AstroFetch with Homebrew:
+
+```bash
+brew uninstall astrofetch
+```
+
+Optionally remove the tap:
+
+```bash
+brew untap elacerda/astrofetch
+```
+
+If you also enabled shell startup integration, remove it before uninstalling or use another available AstroFetch binary:
+
+```bash
+astrofetch uninstall-shell --shell bash
+```
+
+### Cargo
+
+If you installed AstroFetch with Cargo:
+
+```bash
+cargo uninstall astrofetch
+```
+
+If you also enabled shell startup integration, remove it before uninstalling:
+
+```bash
+astrofetch uninstall-shell --shell bash
+cargo uninstall astrofetch
+```
+
+For development clones, you can also run the current source tree directly:
+
+```bash
+cargo run -- uninstall-shell --shell bash
+```
+
+### Verify removal
+
+Check whether any AstroFetch binary is still available:
+
+```bash
+type -a astrofetch || true
+which -a astrofetch || true
+```
+
+Check for shell startup references:
+
+```bash
+grep -n 'astrofetch' ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zprofile 2>/dev/null || true
+```
 
 ## Development
 
