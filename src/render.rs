@@ -94,7 +94,7 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
 
     // Lower than the structural threshold because the glyph palette below
     // can represent diffuse light without filling everything with solid blocks.
-    let threshold = (adaptive * 0.60).clamp(0.06, 0.26);
+    let threshold = (adaptive * 0.55).clamp(0.05, 0.24);
 
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
@@ -182,7 +182,7 @@ fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
     // The clamp avoids the two bad extremes we observed:
     // - too low: solid ellipse
     // - too high: only the nucleus
-    let percentile = 0.62;
+    let percentile = 0.58;
     let idx = ((values.len().saturating_sub(1)) as f64 * percentile).round() as usize;
 
     values[idx].clamp(0.10, 0.42)
