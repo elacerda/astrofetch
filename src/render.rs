@@ -92,8 +92,9 @@ pub fn render_galaxy(
 fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> {
     let adaptive = adaptive_threshold(canvas);
 
-    // Shade-only renderer: favor diffuse luminosity over hard spiral strokes.
+    // Shade-first renderer: favor diffuse luminosity over hard spiral strokes.
     let threshold = (adaptive * 0.42).clamp(0.035, 0.18);
+    let star_seed = star_field_seed(canvas);
 
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
@@ -109,15 +110,26 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
                 .copied()
                 .unwrap_or(0.0);
 
-            let ch = glyph_for_density_pair(top, bottom, threshold);
+            let galaxy_ch = glyph_for_density_pair(top, bottom, threshold);
 
-            if colors_enabled && ch != ' ' {
+            if galaxy_ch == ' ' {
+                if let Some(star_ch) =
+                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
+                {
+                    // Keep stars uncolored for portability and to avoid turning the
+                    // background into ANSI pixel-art noise.
+                    line.push(star_ch);
+                    continue;
+                }
+            }
+
+            if colors_enabled && galaxy_ch != ' ' {
                 let color = intensity_to_ansi((top + bottom) * 0.5);
                 line.push_str(color);
-                line.push(ch);
+                line.push(galaxy_ch);
                 line.push_str(RESET);
             } else {
-                line.push(ch);
+                line.push(galaxy_ch);
             }
         }
 
@@ -151,6 +163,69 @@ fn shade_for_intensity(value: f64, threshold: f64) -> char {
     } else {
         '█'
     }
+}
+
+fn star_glyph_for_cell(
+    x: usize,
+    y: usize,
+    top: f64,
+    bottom: f64,
+    threshold: f64,
+    seed: u64,
+) -> Option<char> {
+    let local_density = top.max(bottom);
+
+    // Do not draw background stars over visible galaxy structure.
+    if local_density > threshold * 0.35 {
+        return None;
+    }
+
+    let r = hash_to_unit(hash_cell(x, y, seed));
+
+    // Sparse background:
+    // - "." = faint common stars
+    // - "*" = medium rare stars
+    // - "+" = bright very rare stars
+    if r < 0.0004 {
+        Some('+')
+    } else if r < 0.0022 {
+        Some('*')
+    } else if r < 0.0132 {
+        Some('.')
+    } else {
+        None
+    }
+}
+
+fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+
+    for (i, value) in canvas.iter().flatten().enumerate() {
+        // Sample all values but quantize them. This keeps the star field
+        // deterministic and makes it vary with the galaxy seed without passing
+        // the CLI seed into the renderer API.
+        let quantized = (value.clamp(0.0, 1.0) * 4096.0).round() as u64;
+        hash ^= quantized.wrapping_add((i as u64).wrapping_mul(0x9e3779b97f4a7c15));
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+
+    hash
+}
+
+fn hash_cell(x: usize, y: usize, seed: u64) -> u64 {
+    let mut value = seed;
+    value ^= (x as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    value ^= (y as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d049bb133111eb);
+    value ^ (value >> 31)
+}
+
+fn hash_to_unit(hash: u64) -> f64 {
+    const SCALE: f64 = 1.0 / ((1_u64 << 53) as f64);
+    ((hash >> 11) as f64) * SCALE
 }
 
 fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
