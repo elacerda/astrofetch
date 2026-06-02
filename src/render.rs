@@ -1,5 +1,7 @@
 use crate::terminal::Terminal;
 
+const RESET: &str = "\x1b[0m";
+
 /// Paleta de caracteres ASCII para renderização.
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -9,6 +11,7 @@ pub struct Palette {
 impl Palette {
     /// Paleta padrão (do mais claro para mais escuro).
     /// O espaço ' ' é o nível mais baixo de intensidade para reduzir ruído visual.
+    #[allow(dead_code)]
     pub const DEFAULT: Palette = Palette {
         chars: &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'],
     };
@@ -37,6 +40,7 @@ impl Palette {
 }
 
 /// Renderiza uma matriz de luminosidade em ASCII.
+#[allow(dead_code)]
 pub fn render_ascii(canvas: &[Vec<f64>], palette: &Palette) -> Vec<String> {
     canvas
         .iter()
@@ -45,6 +49,7 @@ pub fn render_ascii(canvas: &[Vec<f64>], palette: &Palette) -> Vec<String> {
 }
 
 /// Renderiza ASCII com cores ANSI.
+#[allow(dead_code)]
 pub fn render_colored_ascii(
     canvas: &[Vec<f64>],
     palette: &Palette,
@@ -56,10 +61,9 @@ pub fn render_colored_ascii(
             row.iter()
                 .map(|&v| {
                     let c = palette.get_char(v);
-                    // Aplica cor baseada na intensidade
                     if terminal.colors_enabled() {
                         let color = intensity_to_ansi(v);
-                        format!("{}{}\x1b[0m", color, c)
+                        format!("{}{}{}", color, c, RESET)
                     } else {
                         c.to_string()
                     }
@@ -69,22 +73,96 @@ pub fn render_colored_ascii(
         .collect()
 }
 
+/// Renderiza o mapa de densidade usando half-block Unicode.
+///
+/// The input canvas is expected to have twice the requested terminal height.
+/// Two density rows are collapsed into one terminal glyph row using:
+/// - top only:    ▀
+/// - bottom only: ▄
+/// - both:        █
+/// - none:        space
+pub fn render_galaxy(
+    canvas: &[Vec<f64>],
+    colors_enabled: bool,
+    terminal: &Terminal,
+) -> Vec<String> {
+    render_half_blocks(canvas, colors_enabled && terminal.colors_enabled())
+}
+
+fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> {
+    let threshold = adaptive_threshold(canvas);
+    let width = canvas.first().map_or(0, Vec::len);
+    let mut lines = Vec::with_capacity((canvas.len() + 1) / 2);
+
+    for y in (0..canvas.len()).step_by(2) {
+        let mut line = String::with_capacity(width);
+
+        for x in 0..width {
+            let top = canvas[y].get(x).copied().unwrap_or(0.0);
+            let bottom = canvas
+                .get(y + 1)
+                .and_then(|row| row.get(x))
+                .copied()
+                .unwrap_or(0.0);
+
+            let ch = match (top >= threshold, bottom >= threshold) {
+                (false, false) => ' ',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (true, true) => '█',
+            };
+
+            if colors_enabled && ch != ' ' {
+                let color = intensity_to_ansi(top.max(bottom));
+                line.push_str(color);
+                line.push(ch);
+                line.push_str(RESET);
+            } else {
+                line.push(ch);
+            }
+        }
+
+        lines.push(line);
+    }
+
+    lines
+}
+
+fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
+    let mut values: Vec<f64> = canvas
+        .iter()
+        .flat_map(|row| row.iter().copied())
+        .filter(|value| *value > 1.0e-6)
+        .collect();
+
+    if values.is_empty() {
+        return 1.0;
+    }
+
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Keep only the brighter structure instead of filling the whole disk.
+    // The clamp avoids the two bad extremes we observed:
+    // - too low: solid ellipse
+    // - too high: only the nucleus
+    let percentile = 0.72;
+    let idx = ((values.len().saturating_sub(1)) as f64 * percentile).round() as usize;
+
+    values[idx].clamp(0.16, 0.52)
+}
+
 /// Converte intensidade para cor ANSI.
 fn intensity_to_ansi(value: f64) -> &'static str {
-    if value < 0.15 {
+    if value < 0.20 {
         "\x1b[90m" // Preto suave (dim)
-    } else if value < 0.3 {
+    } else if value < 0.38 {
         "\x1b[34m" // Azul
-    } else if value < 0.5 {
+    } else if value < 0.58 {
         "\x1b[36m" // Ciano
-    } else if value < 0.7 {
-        "\x1b[32m" // Verde
-    } else if value < 0.85 {
+    } else if value < 0.78 {
         "\x1b[33m" // Amarelo
-    } else if value < 0.95 {
-        "\x1b[35m" // Magenta
     } else {
-        "\x1b[37m" // Branco
+        "\x1b[97m" // Branco brilhante
     }
 }
 
@@ -108,7 +186,6 @@ pub fn apply_log_stretch(value: f64, base: f64) -> f64 {
     if value >= 1.0 {
         return 1.0;
     }
-    // log(base * value + 1) / log(base + 1)
     (value * base + 1.0).log(base + 1.0)
 }
 
@@ -120,7 +197,6 @@ pub fn apply_asinh_stretch(value: f64, scale: f64) -> f64 {
     if value >= 1.0 {
         return 1.0;
     }
-    // asinh(value * scale) / asinh(scale)
     (value * scale).asinh() / scale.asinh()
 }
 
@@ -141,7 +217,6 @@ pub fn normalize_canvas(canvas: &[Vec<f64>]) -> Vec<Vec<f64>> {
     }
 
     if (max_val - min_val).abs() < f64::EPSILON {
-        // Todos os valores são iguais
         return canvas
             .iter()
             .map(|row| row.iter().map(|_| 0.0).collect())
@@ -151,11 +226,7 @@ pub fn normalize_canvas(canvas: &[Vec<f64>]) -> Vec<Vec<f64>> {
     let range = max_val - min_val;
     canvas
         .iter()
-        .map(|row| {
-            row.iter()
-                .map(|&v| (v - min_val) / range)
-                .collect::<Vec<f64>>()
-        })
+        .map(|row| row.iter().map(|&v| (v - min_val) / range).collect())
         .collect()
 }
 
@@ -211,14 +282,13 @@ mod tests {
     #[test]
     fn test_palette_get_char() {
         let palette = Palette::DEFAULT;
-        assert_eq!(palette.get_char(0.0), ' '); // Espaço é o primeiro caractere
+        assert_eq!(palette.get_char(0.0), ' ');
         assert_eq!(palette.get_char(1.0), '@');
     }
 
     #[test]
     fn test_palette_maps_low_to_space() {
         let palette = Palette::DEFAULT;
-        // O primeiro caractere é ' ', que deve ser usado para valores baixos
         assert_eq!(palette.chars[0], ' ');
     }
 
@@ -228,17 +298,22 @@ mod tests {
         let palette = Palette::DEFAULT;
         let result = render_ascii(&canvas, &palette);
 
-        // Palette: [' ', '.', ':', '-', '=', '+', '*', '#', '%', '@']
-        // 0.0 -> ' ' (index 0)
-        // 0.5 -> (0.5 * 9).floor() = 4 -> '='
-        // 1.0 -> '@' (index 9)
         assert_eq!(result[0], " =@");
         assert_eq!(result[1], "@= ");
     }
 
     #[test]
+    fn test_render_galaxy_half_blocks() {
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
+
+        let result = render_galaxy(&canvas, false, &terminal);
+
+        assert_eq!(result, vec!["▀▄█"]);
+    }
+
+    #[test]
     fn test_deterministic_render() {
-        // Mesma seed deve produzir mesma saída
         let model = crate::engine::ArtModel::Starfield;
         let canvas1 = model.generate(10, 5, Some(42));
         let canvas2 = model.generate(10, 5, Some(42));
@@ -248,7 +323,6 @@ mod tests {
 
     #[test]
     fn test_gamma_stretch() {
-        // Gamma < 1 aumenta contraste em valores baixos
         assert!(apply_gamma_stretch(0.5, 0.6) > 0.5);
         assert_eq!(apply_gamma_stretch(0.0, 0.6), 0.0);
         assert_eq!(apply_gamma_stretch(1.0, 0.6), 1.0);
@@ -256,7 +330,6 @@ mod tests {
 
     #[test]
     fn test_log_stretch() {
-        // Log stretch
         assert!(apply_log_stretch(0.5, 10.0) > 0.5);
         assert_eq!(apply_log_stretch(0.0, 10.0), 0.0);
         assert_eq!(apply_log_stretch(1.0, 10.0), 1.0);
@@ -264,7 +337,6 @@ mod tests {
 
     #[test]
     fn test_asinh_stretch() {
-        // Asinh stretch
         assert!(apply_asinh_stretch(0.5, 2.0) > 0.5);
         assert_eq!(apply_asinh_stretch(0.0, 2.0), 0.0);
         assert_eq!(apply_asinh_stretch(1.0, 2.0), 1.0);
@@ -275,18 +347,15 @@ mod tests {
         let canvas = vec![vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.0]];
         let normalized = normalize_canvas(&canvas);
 
-        // Valores devem estar entre 0 e 1
         for row in &normalized {
             for &val in row {
-                assert!(val >= 0.0);
-                assert!(val <= 1.0);
+                assert!((0.0..=1.0).contains(&val));
             }
         }
     }
 
     #[test]
     fn test_no_color_ansi_free() {
-        // Quando colors_enabled é false, não deve haver códigos ANSI
         let terminal = crate::terminal::Terminal::with_colors(true, false);
         let canvas = vec![vec![0.5]];
         let palette = Palette::DEFAULT;
@@ -294,14 +363,12 @@ mod tests {
         let result = render_colored_ascii(&canvas, &palette, &terminal);
         let line = &result[0];
 
-        // Não deve conter códigos ANSI
         assert!(!line.contains('\x1b'));
         assert_eq!(line, "=");
     }
 
     #[test]
     fn test_colored_contains_ansi() {
-        // Quando colors_enabled é true, deve haver códigos ANSI
         let terminal = crate::terminal::Terminal::with_colors(true, true);
         let canvas = vec![vec![0.5]];
         let palette = Palette::DEFAULT;
@@ -309,7 +376,6 @@ mod tests {
         let result = render_colored_ascii(&canvas, &palette, &terminal);
         let line = &result[0];
 
-        // Deve conter códigos ANSI
         assert!(line.contains('\x1b'));
     }
 }

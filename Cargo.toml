@@ -16,5 +16,7 @@ rand = "0.8"
 sysinfo = "0.30"
 unicode-width = "0.1"
 is-terminal = "0.4"
+crossterm = "0.29"
+noise = "0.9"
 
 [dev-dependencies]

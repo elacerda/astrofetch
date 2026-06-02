@@ -1,5 +1,9 @@
+use crossterm::{queue, style::Print};
 use is_terminal::IsTerminal;
 use std::env;
+use std::io::{self, Write};
+
+const RESET: &str = "\x1b[0m";
 
 /// Estrutura para gerenciar configurações do terminal.
 #[derive(Debug, Clone)]
@@ -43,11 +47,22 @@ impl Terminal {
         self.colors_enabled
     }
 
+    /// Prints lines using crossterm's cross-platform command queue.
+    pub fn print_lines(&self, lines: &[String]) -> io::Result<()> {
+        let mut stdout = io::stdout();
+
+        for line in lines {
+            queue!(stdout, Print(line), Print("\n"))?;
+        }
+
+        stdout.flush()
+    }
+
     /// Aplica cor ANSI se estiver habilitada, caso contrário retorna a string original.
     #[allow(dead_code)]
     pub fn colorize<S: AsRef<str>>(&self, text: S, color: &str) -> String {
         if self.colors_enabled {
-            format!("{}{}{}\x1b[0m", color, text.as_ref(), color)
+            format!("{}{}{}", color, text.as_ref(), RESET)
         } else {
             text.as_ref().to_string()
         }
@@ -58,9 +73,7 @@ impl Terminal {
 ///
 /// Usa `unicode_width` para caracteres Unicode e remove códigos ANSI.
 pub fn visible_width(s: &str) -> usize {
-    // Remove códigos ANSI
     let without_ansi = remove_ansi_codes(s);
-    // Usa unicode_width para calcular a largura visual
     unicode_width::UnicodeWidthStr::width(without_ansi.as_str())
 }
 
@@ -71,7 +84,6 @@ fn remove_ansi_codes(s: &str) -> String {
 
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Ignora sequência ANSI completa
             while let Some(&next) = chars.peek() {
                 if next.is_ascii_uppercase() || next.is_ascii_lowercase() || next == 'm' {
                     chars.next();
@@ -104,7 +116,6 @@ mod tests {
 
     #[test]
     fn test_visible_width_ansi() {
-        // Sequência ANSI para vermelho
         let red = "\x1b[31m";
         let reset = "\x1b[0m";
 
@@ -114,9 +125,8 @@ mod tests {
 
     #[test]
     fn test_visible_width_unicode() {
-        // Caracteres Unicode de largura 2 (como muitos caracteres CJK)
-        // Mas para ASCII puro, cada caractere tem largura 1
         assert_eq!(visible_width("hello"), 5);
+        assert_eq!(visible_width("▀▄█"), 3);
     }
 
     #[test]
@@ -128,9 +138,8 @@ mod tests {
 
     #[test]
     fn test_visible_width_complex_ansi() {
-        // Sequências ANSI mais complexas
         let input = "\x1b[1;31mred\x1b[0m and \x1b[2;32mgreen\x1b[0m";
-        assert_eq!(visible_width(input), 13); // "red and green"
+        assert_eq!(visible_width(input), 13);
     }
 
     #[test]

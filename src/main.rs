@@ -1,7 +1,9 @@
 mod app;
 mod cli;
+mod density;
 mod engine;
 mod error;
+mod galaxy;
 mod layout;
 mod render;
 mod setup_shell;
