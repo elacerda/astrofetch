@@ -2,7 +2,7 @@
 
 AstroFetch is a small, space-themed system information tool for your terminal.
 
-It prints a compact summary of your machine next to procedural astrophysical ASCII art. It is designed to be simple, fast, and pleasant to run when opening a shell.
+It prints a compact summary of your machine next to procedural astrophysical ASCII art. It is designed to be simple, fast, pleasant to run on shell startup, and easy to install on Linux, macOS, and Windows.
 
 ## Preview
 
@@ -12,41 +12,30 @@ Run:
 astrofetch
 ```
 
-By default, AstroFetch randomly selects one of the available procedural art models and renders it next to a compact system summary.
+By default, AstroFetch randomly selects one of the available procedural visual models and renders it next to a compact system summary.
 
-Example visual models:
+Examples:
 
 ```bash
 astrofetch --model spiral
 astrofetch --model elliptical
 astrofetch --model cluster
 astrofetch --model starfield
-```
-
-Use `--seed` when you want reproducible output for screenshots, demos, or visual checks:
-
-```bash
 astrofetch --model spiral --seed 42
 ```
 
-AstroFetch shows basic system information such as OS, kernel, uptime, disk usage, memory, shell, terminal, desktop environment, CPU, GPU, and RAM when available.
+AstroFetch can show OS, kernel, uptime, packages, shell, resolution, desktop environment, window manager, themes, disk usage, CPU, GPU, and RAM when available.
+
+For the scientific and technical background of the procedural renderer, see [`docs/procedural-galaxies.md`](docs/procedural-galaxies.md).
 
 ## Installation
 
-AstroFetch is meant to be easy to install on personal laptops, observatory workstations, and research environments where scientists want a quick terminal summary without thinking about Rust tooling.
+### Install script
 
-### Install script (recommended)
-
-The recommended installation method is the install script:
+The recommended install method downloads the latest GitHub Release binary:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh
-```
-
-Install a specific release:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.3.0
 ```
 
 Preview what the installer would do:
@@ -55,40 +44,35 @@ Preview what the installer would do:
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --dry-run
 ```
 
-After installing, restart your terminal or reload your shell configuration if needed.
-
-Check that AstroFetch is available:
+Install a specific release tag:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.3.1
+```
+
+Check the installed binary:
+
+```bash
+astrofetch --version
 astrofetch --help
 ```
 
 ### Homebrew
 
-If you use Homebrew on macOS or Linux, you can install AstroFetch with:
+If you use Homebrew on macOS or Linux:
 
 ```bash
 brew tap elacerda/astrofetch
 brew install astrofetch
 ```
 
-Homebrew is a good option for researchers who already use it to manage command-line tools across notebooks, lab machines, or shared scientific workstations.
-
-### Install from a local clone
-
-If you cloned the repository, run:
-
-```bash
-git clone https://github.com/elacerda/astrofetch.git
-cd astrofetch
-./install.sh
-```
-
-### Install from source with Cargo
+### Source install for development
 
 For local development or source-based installs:
 
 ```bash
+git clone https://github.com/elacerda/astrofetch.git
+cd astrofetch
 cargo install --path .
 ```
 
@@ -96,16 +80,14 @@ This installs `astrofetch` under Cargo's binary directory, usually `~/.cargo/bin
 
 ## Usage
 
-Default output:
+Basic commands:
 
 ```bash
 astrofetch
-```
-
-Compact output:
-
-```bash
 astrofetch --compact
+astrofetch --logo-only
+astrofetch --info-only
+astrofetch --no-color
 ```
 
 Choose a visual model:
@@ -124,7 +106,7 @@ Available models:
 - `spiral`: a procedural spiral galaxy renderer.
 - `elliptical`: a smooth radial galaxy model.
 - `cluster`: a sparse stellar cluster-style model.
-- `starfield`: a point-like field using `.`, `*`, and `+` instead of diffuse galaxy blocks.
+- `starfield`: a point-like star field using `.`, `*`, and `+`.
 
 Use a fixed seed for reproducible output:
 
@@ -132,49 +114,31 @@ Use a fixed seed for reproducible output:
 astrofetch --model spiral --seed 42
 ```
 
-Logo only:
-
-```bash
-astrofetch --logo-only
-```
-
-Disable colors:
-
-```bash
-astrofetch --no-color
-```
-
-Show help:
-
-```bash
-astrofetch --help
-```
-
 ## Shell startup integration
 
-AstroFetch can add a managed startup block to your shell configuration. The managed block is marked with:
+AstroFetch can add a managed block to your shell startup file. The block is marked with:
 
 ```text
 # >>> astrofetch >>>
 # <<< astrofetch <<<
 ```
 
-Preview the startup integration before changing files:
+Preview startup integration:
 
 ```bash
 astrofetch setup-shell --shell bash --dry-run
 ```
 
-Install startup integration for Bash:
+Install startup integration:
 
 ```bash
 astrofetch setup-shell --shell bash
 ```
 
-Use compact output on shell startup:
+Use compact output on startup:
 
 ```bash
-astrofetch setup-shell --shell bash --compact
+astrofetch setup-shell --shell bash --compact --force
 ```
 
 Supported shells:
@@ -189,22 +153,15 @@ astrofetch setup-shell --shell powershell
 Remove startup integration:
 
 ```bash
-astrofetch uninstall-shell --shell bash
-```
-
-Preview removal first:
-
-```bash
 astrofetch uninstall-shell --shell bash --dry-run
+astrofetch uninstall-shell --shell bash
 ```
 
 ## Uninstalling
 
 The uninstall method depends on how AstroFetch was installed.
 
-### Install script
-
-If you installed AstroFetch with `install.sh`, remove the default binary with:
+If you installed with `install.sh`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh
@@ -216,71 +173,37 @@ Also remove shell startup integration:
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --remove-shell-integration --shell bash
 ```
 
-Preview uninstall actions without changing files:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --dry-run
-```
-
 If you installed to a custom directory:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/uninstall.sh | sh -s -- --dir "$HOME/bin"
 ```
 
-### Homebrew
-
-If you installed AstroFetch with Homebrew:
+If you installed with Homebrew:
 
 ```bash
 brew uninstall astrofetch
-```
-
-Optionally remove the tap:
-
-```bash
 brew untap elacerda/astrofetch
 ```
 
-If you also enabled shell startup integration, remove it before uninstalling or use another available AstroFetch binary:
-
-```bash
-astrofetch uninstall-shell --shell bash
-```
-
-### Cargo
-
-If you installed AstroFetch with Cargo:
-
-```bash
-cargo uninstall astrofetch
-```
-
-If you also enabled shell startup integration, remove it before uninstalling:
+If you installed with Cargo:
 
 ```bash
 astrofetch uninstall-shell --shell bash
 cargo uninstall astrofetch
 ```
 
-For development clones, you can also run the current source tree directly:
+For a development clone, you can remove the shell integration using the current source tree:
 
 ```bash
 cargo run -- uninstall-shell --shell bash
 ```
 
-### Verify removal
-
-Check whether any AstroFetch binary is still available:
+Verify removal:
 
 ```bash
 type -a astrofetch || true
 which -a astrofetch || true
-```
-
-Check for shell startup references:
-
-```bash
 grep -n 'astrofetch' ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zprofile 2>/dev/null || true
 ```
 
@@ -288,25 +211,22 @@ grep -n 'astrofetch' ~/.bashrc ~/.bash_profile ~/.profile ~/.zshrc ~/.zprofile 2
 
 AstroFetch is written in Rust.
 
-For development from source:
+Common development commands:
 
 ```bash
 cargo run
-cargo test
-```
-
-Formatting and linting:
-
-```bash
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-Building a release binary:
-
-```bash
+cargo clippy --all-targets -- -D warnings
+cargo test
 cargo build --release
 ```
+
+Release binaries are built by GitHub Actions when a `v*` tag is pushed.
+
+## Documentation
+
+- [`docs/procedural-galaxies.md`](docs/procedural-galaxies.md): scientific and technical notes about the procedural renderer.
+- [`docs/DEVELOPMENT_NOTES.md`](docs/DEVELOPMENT_NOTES.md): historical implementation notes and roadmap-style development context.
 
 ## License
 

@@ -1,3 +1,9 @@
+# Development notes
+
+This document contains historical planning notes and implementation guidance for AstroFetch. It may mention completed milestones or older design assumptions. For user-facing documentation, see [`../README.md`](../README.md). For the current procedural renderer explanation, see [`procedural-galaxies.md`](procedural-galaxies.md).
+
+---
+
 # AstroFetch - Implementation Roadmap
 
 Este documento serve como um roteiro leve para implementar o **AstroFetch** com ajuda de IA.
