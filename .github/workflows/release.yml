@@ -70,7 +70,32 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/astrofetch.exe" "dist/$package/astrofetch.exe"
           Compress-Archive -Path "dist/$package/astrofetch.exe" -DestinationPath "dist/$package.zip" -Force
 
-      - name: Upload release artifact
+      - name: Upload packaged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrofetch-${{ github.ref_name }}-${{ matrix.target }}
+          path: dist/astrofetch-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f -print | sort
+
+      - name: Publish release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/astrofetch-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
+          files: dist/*
