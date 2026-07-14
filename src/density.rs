@@ -124,6 +124,32 @@ impl DensityMap {
             .map(|row| row.to_vec())
             .collect()
     }
+
+    /// Creates a DensityMap from a row-major matrix.
+    ///
+    /// All rows must have the same length. Returns None if rows are empty or
+    /// inconsistent in width.
+    pub fn from_rows(rows: Vec<Vec<f64>>) -> Option<Self> {
+        if rows.is_empty() {
+            return None;
+        }
+        let width = rows[0].len();
+        if width == 0 {
+            return None;
+        }
+        for row in &rows {
+            if row.len() != width {
+                return None;
+            }
+        }
+        let height = rows.len();
+        let data: Vec<f64> = rows.into_iter().flatten().collect();
+        Some(Self {
+            width,
+            height,
+            data,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +178,42 @@ mod tests {
         assert_eq!(out.width, 2);
         assert_eq!(out.height, 1);
         assert_eq!(out.data, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn test_density_map_from_rows() {
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let map = DensityMap::from_rows(rows).unwrap();
+        assert_eq!(map.width, 2);
+        assert_eq!(map.height, 2);
+        assert_eq!(map.get(0, 0), 1.0);
+        assert_eq!(map.get(1, 0), 2.0);
+        assert_eq!(map.get(0, 1), 3.0);
+        assert_eq!(map.get(1, 1), 4.0);
+    }
+
+    #[test]
+    fn test_density_map_from_rows_empty() {
+        assert!(DensityMap::from_rows(vec![]).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_ragged() {
+        let rows = vec![vec![1.0, 2.0], vec![3.0]];
+        assert!(DensityMap::from_rows(rows).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_zero_width() {
+        let rows = vec![vec![]];
+        assert!(DensityMap::from_rows(rows).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_roundtrip() {
+        let original = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let map = DensityMap::from_rows(original.clone()).unwrap();
+        let rows = map.into_rows();
+        assert_eq!(original, rows);
     }
 }
