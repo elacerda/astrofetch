@@ -57,37 +57,6 @@ impl DensityMap {
         self.data[idx] = value;
     }
 
-    /// Normalizes the map linearly to [0, 1].
-    pub fn normalize(&self) -> Self {
-        let min = self.data.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = self.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let range = max - min;
-
-        if range.abs() < f64::EPSILON {
-            return Self::new(self.width, self.height);
-        }
-
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self.data.iter().map(|v| (v - min) / range).collect(),
-        }
-    }
-
-    /// Applies a gamma stretch to normalized values.
-    #[allow(dead_code)]
-    pub fn gamma_stretch(&self, gamma: f64) -> Self {
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self
-                .data
-                .iter()
-                .map(|v| v.clamp(0.0, 1.0).powf(gamma))
-                .collect(),
-        }
-    }
-
     /// Downsamples this map by averaging rectangular bins.
     pub fn downsample_average(&self, out_width: usize, out_height: usize) -> Self {
         let mut out = Self::new(out_width, out_height);

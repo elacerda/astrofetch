@@ -2,25 +2,12 @@ use crate::cli::{Args, ArtModel, Command};
 use crate::engine::{ArtModel as EngineModel, GeneratedScene};
 use crate::error::AppError;
 use crate::layout::compose_layout;
-use crate::render::{normalize_with_stretch, render_galaxy, render_starfield, StretchType};
+use crate::render::{
+    prepare_density, render_shades, render_starfield, PreparedDensity, RenderProfile,
+};
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
-
-/// Caminho de renderização interno para decidir qual renderer usar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RendererPath {
-    Starfield,
-    Galaxy,
-}
-
-/// Retorna o caminho de renderização apropriado para o modelo.
-fn renderer_for_model(model: EngineModel) -> RendererPath {
-    match model {
-        EngineModel::Starfield => RendererPath::Starfield,
-        _ => RendererPath::Galaxy,
-    }
-}
 
 const HEADER_COLOR: &str = "\x1b[93m";
 const LABEL_COLOR: &str = "\x1b[94m";
@@ -92,14 +79,11 @@ impl App {
             ..
         } = engine_model.generate_scene(self.args.width, self.args.height, self.args.seed);
 
-        // Usa o resolved_model para decidir se deve aplicar stretch/normalização
-        // Starfield é renderizado diretamente dos valores brutos (sem normalização)
-        // Outros modelos (galáxias) beneficiam-se de stretch
-        let generated_canvas = density.into_rows();
-        let canvas = match resolved_model {
-            EngineModel::Starfield => generated_canvas,
-            _ => normalize_with_stretch(&generated_canvas, StretchType::default()),
-        };
+        // Obtém o perfil de renderização para este modelo
+        let profile: RenderProfile = RenderProfile::for_model(resolved_model);
+
+        // Prepara a densidade para renderização
+        let prepared = prepare_density(density, profile);
 
         // Imprime na saída
         if self.args.info_only {
@@ -108,13 +92,11 @@ impl App {
             terminal.print_lines(&info_lines)?;
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
-            let art_lines =
-                Self::render_art_lines(resolved_model, &canvas, colors_enabled, &terminal);
+            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
             terminal.print_lines(&art_lines)?;
         } else {
             // Modo normal: arte + informações (side-by-side)
-            let art_lines =
-                Self::render_art_lines(resolved_model, &canvas, colors_enabled, &terminal);
+            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
 
             let system = SystemSnapshot::collect();
             let info_lines = self.build_info_lines(&system);
@@ -127,18 +109,27 @@ impl App {
 
     /// Renderiza a arte usando o renderer adequado para cada modelo.
     ///
-    /// Usa `resolved_model` para selecionar o renderer correto,
+    /// Usa o PreparedDensity para selecionar o renderer correto,
     /// garantindo que tanto Starfield explícito quanto Random que resolve
     /// para Starfield usem o renderer de campo de estrelas.
     fn render_art_lines(
-        resolved_model: EngineModel,
-        canvas: &[Vec<f64>],
+        prepared: PreparedDensity,
         colors_enabled: bool,
         terminal: &Terminal,
     ) -> Vec<String> {
-        match renderer_for_model(resolved_model) {
-            RendererPath::Starfield => render_starfield(canvas, colors_enabled, terminal),
-            RendererPath::Galaxy => render_galaxy(canvas, colors_enabled, terminal),
+        match prepared {
+            PreparedDensity::Starfield { density } => {
+                let canvas = density.into_rows();
+                render_starfield(&canvas, colors_enabled, terminal)
+            }
+            PreparedDensity::Shade { density, threshold } => {
+                let canvas = density.into_rows();
+                render_shades(
+                    &canvas,
+                    threshold,
+                    colors_enabled && terminal.colors_enabled(),
+                )
+            }
         }
     }
 
@@ -222,7 +213,6 @@ fn format_info_line(line: &InfoLine, label_width: usize, colors_enabled: bool) -
 mod tests {
     use super::*;
     use crate::cli::ArtModel;
-    use crate::engine::ArtModel as EngineModel;
     use crate::terminal::Terminal;
     use std::collections::BTreeMap;
 
@@ -452,67 +442,5 @@ mod tests {
         let result = compose_layout(&art, &info, 6, 2);
 
         assert!(result[0].starts_with("**      \x1b[93mastro@station\x1b[0m"));
-    }
-
-    // Testes para seleção de renderer (usando renderer_for_model)
-
-    #[test]
-    fn test_renderer_for_explicit_starfield() {
-        let scene = EngineModel::Starfield.generate_scene(20, 10, Some(42));
-        assert_eq!(
-            renderer_for_model(scene.resolved_model),
-            RendererPath::Starfield
-        );
-    }
-
-    #[test]
-    fn test_renderer_for_random_resolved_to_starfield() {
-        // Seed 3 resolve Random para Starfield
-        let scene = EngineModel::Random.generate_scene(20, 10, Some(3));
-        assert_eq!(scene.resolved_model, EngineModel::Starfield);
-        assert_eq!(
-            renderer_for_model(scene.resolved_model),
-            RendererPath::Starfield
-        );
-    }
-
-    #[test]
-    fn test_renderer_for_spiral() {
-        let scene = EngineModel::Spiral.generate_scene(20, 10, Some(42));
-        assert_eq!(
-            renderer_for_model(scene.resolved_model),
-            RendererPath::Galaxy
-        );
-    }
-
-    #[test]
-    fn test_renderer_for_elliptical() {
-        let scene = EngineModel::Elliptical.generate_scene(20, 10, Some(42));
-        assert_eq!(
-            renderer_for_model(scene.resolved_model),
-            RendererPath::Galaxy
-        );
-    }
-
-    #[test]
-    fn test_renderer_for_cluster() {
-        let scene = EngineModel::Cluster.generate_scene(20, 10, Some(42));
-        assert_eq!(
-            renderer_for_model(scene.resolved_model),
-            RendererPath::Galaxy
-        );
-    }
-
-    #[test]
-    fn test_random_resolved_model_never_random() {
-        for seed in 1..=100 {
-            let scene = EngineModel::Random.generate_scene(20, 10, Some(seed));
-            assert_ne!(
-                scene.resolved_model,
-                EngineModel::Random,
-                "Random should never resolve to Random for seed {}",
-                seed
-            );
-        }
     }
 }

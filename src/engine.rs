@@ -96,15 +96,6 @@ impl ArtModel {
             density,
         }
     }
-
-    /// Gera uma matriz de luminosidade baseada no modelo.
-    ///
-    /// Este método é mantido para compatibilidade com testes existentes.
-    /// Ele gera uma cena e retorna apenas o canvas.
-    #[allow(dead_code)]
-    pub fn generate(&self, width: usize, height: usize, seed: Option<u64>) -> Vec<Vec<f64>> {
-        self.generate_scene(width, height, seed).density.into_rows()
-    }
 }
 
 /// Gera um campo de estrelas simples.
@@ -220,12 +211,10 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
 
     for row in &mut canvas {
         for value in row {
-            if *value < 0.020 {
-                *value = 0.0;
-            } else {
-                *value += rng.gen_range(-0.006_f64..0.006_f64);
-                *value = value.clamp(0.0_f64, 1.0_f64);
-            }
+            // Add light noise only where there is structure
+            *value += rng.gen_range(-0.006_f64..0.006_f64);
+            // Clamp only negative values to zero (no positive display cutoff)
+            *value = value.clamp(0.0_f64, 1.0_f64);
         }
     }
 
@@ -347,49 +336,82 @@ mod tests {
 
     #[test]
     fn test_deterministic_spiral() {
-        let canvas1 = ArtModel::Spiral.generate(20, 10, Some(42));
-        let canvas2 = ArtModel::Spiral.generate(20, 10, Some(42));
+        let canvas1 = ArtModel::Spiral
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
+        let canvas2 = ArtModel::Spiral
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
         assert_eq!(canvas1, canvas2);
     }
 
     #[test]
     fn test_deterministic_elliptical() {
-        let canvas1 = ArtModel::Elliptical.generate(20, 10, Some(42));
-        let canvas2 = ArtModel::Elliptical.generate(20, 10, Some(42));
+        let canvas1 = ArtModel::Elliptical
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
+        let canvas2 = ArtModel::Elliptical
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
         assert_eq!(canvas1, canvas2);
     }
 
     #[test]
     fn test_different_seeds_different_art() {
-        let canvas1 = ArtModel::Spiral.generate(20, 10, Some(42));
-        let canvas2 = ArtModel::Spiral.generate(20, 10, Some(43));
+        let canvas1 = ArtModel::Spiral
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
+        let canvas2 = ArtModel::Spiral
+            .generate_scene(20, 10, Some(43))
+            .density
+            .into_rows();
         assert_ne!(canvas1, canvas2);
     }
 
     #[test]
     fn test_different_seeds_different_elliptical() {
-        let canvas1 = ArtModel::Elliptical.generate(20, 10, Some(42));
-        let canvas2 = ArtModel::Elliptical.generate(20, 10, Some(43));
+        let canvas1 = ArtModel::Elliptical
+            .generate_scene(20, 10, Some(42))
+            .density
+            .into_rows();
+        let canvas2 = ArtModel::Elliptical
+            .generate_scene(20, 10, Some(43))
+            .density
+            .into_rows();
         assert_ne!(canvas1, canvas2);
     }
 
     #[test]
     fn test_spiral_has_arms() {
-        let canvas = ArtModel::Spiral.generate(30, 15, Some(42));
+        let canvas = ArtModel::Spiral
+            .generate_scene(30, 15, Some(42))
+            .density
+            .into_rows();
         let has_structure = canvas.iter().any(|row| row.iter().any(|&v| v > 0.1));
         assert!(has_structure);
     }
 
     #[test]
     fn test_elliptical_has_structure() {
-        let canvas = ArtModel::Elliptical.generate(30, 15, Some(42));
+        let canvas = ArtModel::Elliptical
+            .generate_scene(30, 15, Some(42))
+            .density
+            .into_rows();
         let has_structure = canvas.iter().any(|row| row.iter().any(|&v| v > 0.1));
         assert!(has_structure);
     }
 
     #[test]
     fn test_generate_uses_double_vertical_resolution() {
-        let canvas = ArtModel::Spiral.generate(30, 15, Some(42));
+        let canvas = ArtModel::Spiral
+            .generate_scene(30, 15, Some(42))
+            .density
+            .into_rows();
         assert_eq!(canvas.len(), 30);
         assert_eq!(canvas[0].len(), 30);
     }
