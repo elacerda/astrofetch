@@ -28,7 +28,7 @@ seeded RNG
   -> normalization (exactly once)
   -> contrast stretch (exactly once)
   -> threshold / render policy
-  -> renderer (Shade or Starfield)
+  -> renderer (HalfBlock or Starfield)
   -> optional ANSI color
 ```
 
@@ -40,7 +40,7 @@ The `RenderProfile` is an explicit per-model configuration that determines:
 
 This separation makes post-processing decisions explicit and testable.
 
-For galaxy-like models, the intermediate representation is a scalar density field. Each cell stores a normalized luminosity-like value, not a physical flux. The renderer then maps this field into terminal glyphs.
+For galaxy-like models, the intermediate representation is a scalar density field. Each cell stores a normalized luminosity-like value, not a physical flux. The renderer then maps this field into terminal glyphs using true half-block characters.
 
 ## Density map representation
 
@@ -61,11 +61,19 @@ A terminal cell is not a square pixel. AstroFetch compensates partly by generati
 For galaxy models, one terminal row represents two internal density rows:
 
 ```text
-top density row    -> upper half of the glyph
-bottom density row -> lower half of the glyph
+top density row    -> upper half of the glyph (top visible)
+bottom density row -> lower half of the glyph (bottom visible)
 ```
 
 This gives a useful vertical resolution boost without increasing the number of printed terminal lines.
+
+The half-block renderer uses independent visibility for each half:
+- **Top only visible**: `▀` (upper half block)
+- **Bottom only visible**: `▄` (lower half block)
+- **Both visible**: `█` (full block)
+- **Neither visible**: ` ` (space)
+
+In color mode, the renderer uses foreground color for the top half and background color for the bottom half with the `▀` glyph to preserve both samples independently.
 
 ## Spiral galaxy model
 
@@ -237,29 +245,39 @@ The threshold is computed from vertical pair maxima:
 5. Sort deterministically with `f64::total_cmp`.
 6. Choose the threshold at quantile `(1.0 - target)` using the index `floor((n-1) * quantile)` where `n` is the number of pairs.
 
-## Shade glyph rendering
+**Note**: Occupancy is defined per terminal cell, where a cell is visible if **either** half is visible. This remains equivalent to the pair maximum meeting the threshold.
 
-Galaxy models are rendered with Unicode shading glyphs:
+## Half-block glyph rendering
+
+Galaxy models are rendered with Unicode half-block characters:
 
 ```text
-░  faint structure
-▒  low/intermediate structure
-▓  bright structure
-█  brightest structure
+▀  top half visible only
+▄  bottom half visible only
+█  both halves visible
+   (space)  neither half visible
 ```
 
 The renderer consumes pairs of density rows and converts them to one terminal row. For each terminal cell:
 
-- **Visibility threshold**: Uses the **maximum** of the top and bottom density values. If the pair maximum is below the threshold, the cell is not visible.
-- **Shade intensity**: Uses the greater of:
-  - The **average** of the pair: `(top + bottom) / 2`
-  - A smaller contribution from the pair **maximum**: `max(top, bottom) * 0.62`
+- **Independent visibility**: Each half (top and bottom) is evaluated separately against the threshold.
+  - Top is visible if `top.is_finite() && top > 0.0 && top >= threshold`
+  - Bottom is visible if `bottom.is_finite() && bottom > 0.0 && bottom >= threshold`
 
-This preserves thin structures (via the maximum) while still emphasizing diffuse light (via the average).
+- **No-color mode**: Uses the appropriate half-block glyph based on visibility combinations:
+  - Top only: `▀`
+  - Bottom only: `▄`
+  - Both: `█`
+  - Neither: ` `
 
-This is NOT a true half-block renderer. True ▀/▄ rendering belongs to Patch 3.
+- **Color mode**: Uses ANSI foreground/background colors with the `▀` glyph to preserve both samples:
+  - Top only: foreground color + `▀` + reset
+  - Bottom only: foreground color + `▄` + reset
+  - Both: foreground color + background color + `▀` + reset
 
-Background stars are added only where local galaxy density is low, so they do not overwrite visible galaxy structure.
+This preserves both vertical samples independently while maintaining a compact terminal representation.
+
+Background stars are added only where **neither** half is visible, so they do not overwrite visible galaxy structure.
 
 ## ANSI color
 

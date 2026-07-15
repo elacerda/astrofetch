@@ -30,8 +30,8 @@ pub enum ThresholdStrategy {
 /// Renderer family selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererKind {
-    /// Shade renderer with vertical supersampling for galaxy-like models.
-    Shade,
+    /// Half-block renderer with vertical supersampling for galaxy-like models.
+    HalfBlock,
     /// Sparse starfield renderer.
     Starfield,
 }
@@ -59,7 +59,7 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.85),
                 threshold: ThresholdStrategy::TargetOccupancy(0.26),
-                renderer: RendererKind::Shade,
+                renderer: RendererKind::HalfBlock,
             },
             ArtModel::Elliptical => RenderProfile {
                 normalization: Normalization::Robust {
@@ -68,7 +68,7 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.7),
                 threshold: ThresholdStrategy::TargetOccupancy(0.23),
-                renderer: RendererKind::Shade,
+                renderer: RendererKind::HalfBlock,
             },
             ArtModel::Cluster => RenderProfile {
                 normalization: Normalization::Robust {
@@ -77,7 +77,7 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.65),
                 threshold: ThresholdStrategy::TargetOccupancy(0.10),
-                renderer: RendererKind::Shade,
+                renderer: RendererKind::HalfBlock,
             },
             ArtModel::Starfield => RenderProfile {
                 normalization: Normalization::None,
@@ -96,32 +96,32 @@ impl RenderProfile {
 /// Prepared density result that encodes the processing path at the type level.
 ///
 /// This enum makes invalid states impossible by separating Starfield (no
-/// normalization/stretch/threshold) from Shade models (robust normalization,
+/// normalization/stretch/threshold) from HalfBlock models (robust normalization,
 /// stretch, and target-occupancy threshold).
 #[derive(Debug, Clone)]
 pub enum PreparedDensity {
     /// Starfield: raw density values, no processing.
     Starfield { density: DensityMap },
-    /// Shade models: normalized, stretched, with computed threshold.
-    Shade { density: DensityMap, threshold: f64 },
+    /// HalfBlock models: normalized, stretched, with computed threshold.
+    HalfBlock { density: DensityMap, threshold: f64 },
 }
 
 /// Prepares density for rendering based on the profile.
 ///
 /// * Starfield models: no normalization, no stretch, no threshold.
-/// * Shade models: robust normalization, stretch, and target-occupancy threshold.
+/// * HalfBlock models: robust normalization, stretch, and target-occupancy threshold.
 pub fn prepare_density(density: DensityMap, profile: RenderProfile) -> PreparedDensity {
     match profile.renderer {
         RendererKind::Starfield => {
             // Starfield: no processing, preserve raw values
             PreparedDensity::Starfield { density }
         }
-        RendererKind::Shade => {
-            // Shade models: apply robust normalization and stretch
+        RendererKind::HalfBlock => {
+            // HalfBlock models: apply robust normalization and stretch
             let normalized = normalize_robust_map(&density, profile.normalization);
             let stretched = apply_stretch_to_density(&normalized, profile.stretch);
             let threshold = compute_target_occupancy_threshold(&stretched, profile.threshold);
-            PreparedDensity::Shade {
+            PreparedDensity::HalfBlock {
                 density: stretched,
                 threshold,
             }
@@ -222,7 +222,7 @@ fn apply_stretch_to_density(density: &DensityMap, stretch: StretchType) -> Densi
 
 /// Computes the target-occupancy threshold from vertical pair maxima.
 ///
-/// Occupancy means terminal Shade cells before background-star injection.
+/// Occupancy means terminal HalfBlock cells before background-star injection.
 fn compute_target_occupancy_threshold(density: &DensityMap, strategy: ThresholdStrategy) -> f64 {
     match strategy {
         ThresholdStrategy::Dedicated => 0.0, // Not used for Starfield
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_profile_for_spiral() {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
-        assert_eq!(profile.renderer, RendererKind::Shade);
+        assert_eq!(profile.renderer, RendererKind::HalfBlock);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_profile_for_elliptical() {
         let profile = RenderProfile::for_model(ArtModel::Elliptical);
-        assert_eq!(profile.renderer, RendererKind::Shade);
+        assert_eq!(profile.renderer, RendererKind::HalfBlock);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_profile_for_cluster() {
         let profile = RenderProfile::for_model(ArtModel::Cluster);
-        assert_eq!(profile.renderer, RendererKind::Shade);
+        assert_eq!(profile.renderer, RendererKind::HalfBlock);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -338,12 +338,12 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_density_shade_applies_normalization() {
+    fn test_prepare_density_halfblock_applies_normalization() {
         let density = DensityMap::new(10, 5);
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, threshold } => {
+            PreparedDensity::HalfBlock { density, threshold } => {
                 assert_eq!(density.width, 10);
                 assert_eq!(density.height, 5);
                 // All zeros should remain zeros
@@ -351,7 +351,7 @@ mod tests {
                 // Threshold should be 0.0 for all-zero map
                 assert_eq!(threshold, 0.0);
             }
-            PreparedDensity::Starfield { .. } => panic!("Expected Shade variant"),
+            PreparedDensity::Starfield { .. } => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -361,10 +361,10 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -377,13 +377,13 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // Values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
                 // Some values should be non-zero
                 assert!(density.data.iter().any(|v| *v > 0.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -399,13 +399,13 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // NaN should map to 0.0
                 assert_eq!(density.data[12], 0.0);
                 // Other values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -421,11 +421,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // Infinity should map to 0.0
                 assert_eq!(density.data[12], 0.0);
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -438,11 +438,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // All negative values should map to 0.0
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -455,11 +455,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // Negative infinity should map to 0.0
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -475,7 +475,7 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // Values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
                 // The outlier should be mapped to 1.0
@@ -499,7 +499,7 @@ mod tests {
                 // All outputs should be finite
                 assert!(density.data.iter().all(|v| v.is_finite()));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -513,11 +513,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // All finite positive values should map to 1.0 when range is collapsed
                 assert!(density.data.iter().all(|v| *v == 1.0));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -534,7 +534,7 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 // Negative, zero, NaN, and infinities should map to exactly 0.0
                 assert_eq!(density.data[0], 0.0, "negative should map to 0.0");
                 assert_eq!(density.data[1], 0.0, "zero should remain 0.0");
@@ -549,7 +549,7 @@ mod tests {
                 // All outputs should be finite
                 assert!(density.data.iter().all(|v| v.is_finite()));
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -562,11 +562,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { density, .. } => {
+            PreparedDensity::HalfBlock { density, .. } => {
                 assert_eq!(density.width, 10);
                 assert_eq!(density.height, 8);
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -633,7 +633,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::Shade { threshold, .. } => {
+            PreparedDensity::HalfBlock { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -644,16 +644,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::Shade { threshold: t2, .. } => {
+                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected Shade variant"),
+                    _ => panic!("Expected HalfBlock variant"),
                 }
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -675,7 +675,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::Shade { threshold, .. } => {
+            PreparedDensity::HalfBlock { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -686,16 +686,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::Shade { threshold: t2, .. } => {
+                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected Shade variant"),
+                    _ => panic!("Expected HalfBlock variant"),
                 }
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -720,7 +720,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::Shade { threshold, .. } => {
+            PreparedDensity::HalfBlock { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -731,16 +731,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::Shade { threshold: t2, .. } => {
+                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected Shade variant"),
+                    _ => panic!("Expected HalfBlock variant"),
                 }
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -750,11 +750,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::Shade { threshold, .. } => {
+            PreparedDensity::HalfBlock { threshold, .. } => {
                 // All-zero map should not panic, threshold should be 0.0
                 assert_eq!(threshold, 0.0);
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -766,12 +766,12 @@ mod tests {
         let prepared2 = prepare_density(density, profile);
         match (prepared1, prepared2) {
             (
-                PreparedDensity::Shade { threshold: t1, .. },
-                PreparedDensity::Shade { threshold: t2, .. },
+                PreparedDensity::HalfBlock { threshold: t1, .. },
+                PreparedDensity::HalfBlock { threshold: t2, .. },
             ) => {
                 assert_eq!(t1, t2, "Repeated calculation should give same threshold");
             }
-            _ => panic!("Expected Shade variant"),
+            _ => panic!("Expected HalfBlock variant"),
         }
     }
 
@@ -960,6 +960,8 @@ mod tests {
             threshold: f64,
             visible_occupancy: f64,
             out_of_range: bool,
+            min_occ: f64,
+            max_occ: f64,
         }
 
         let mut measurements: Vec<Measurement> = Vec::new();
@@ -999,22 +1001,20 @@ mod tests {
 
                 // ===== Prepare density using production function =====
                 let prepared = prepare_density(scene.density.clone(), profile);
-
-                // Extract processed density and threshold
-                let (density, threshold) = match prepared {
-                    PreparedDensity::Shade { density, threshold } => (density, threshold),
-                    PreparedDensity::Starfield { .. } => continue, // Skip Starfield
+                let (processed_density, threshold) = match prepared {
+                    PreparedDensity::Starfield { density } => (density, 0.0),
+                    PreparedDensity::HalfBlock { density, threshold } => (density, threshold),
                 };
 
                 // ===== Calculate processed_positive_support =====
-                // Fraction of terminal cells whose post-normalization/post-stretch pair max is finite and > 0
+                // Fraction of terminal cells whose processed vertical-pair maximum is finite and > 0
                 let mut processed_positive_count = 0;
                 let mut processed_total_pairs = 0;
-                for y in (0..density.height).step_by(2) {
-                    for x in 0..density.width {
-                        let top = density.get(x, y);
-                        let bottom = if y + 1 < density.height {
-                            density.get(x, y + 1)
+                for y in (0..processed_density.height).step_by(2) {
+                    for x in 0..processed_density.width {
+                        let top = processed_density.get(x, y);
+                        let bottom = if y + 1 < processed_density.height {
+                            processed_density.get(x, y + 1)
                         } else {
                             0.0
                         };
@@ -1031,14 +1031,13 @@ mod tests {
                     (processed_positive_count as f64) / (processed_total_pairs as f64)
                 };
 
-                // ===== Calculate visible_occupancy =====
-                // Fraction satisfying: finite; > 0; >= threshold
-                let occupancy = calculate_occupancy(&density, threshold);
+                // ===== Calculate visible_occupancy using the shared helper =====
+                // Fraction of terminal cells whose processed vertical-pair maximum >= threshold
+                let visible_occupancy = calculate_occupancy(&processed_density, threshold);
 
-                // Determine if out of range
-                let out_of_range = occupancy < min_occ || occupancy > max_occ;
+                // ===== Record measurement =====
+                let out_of_range = visible_occupancy < min_occ || visible_occupancy > max_occ;
 
-                // Store measurement
                 measurements.push(Measurement {
                     model,
                     seed: *seed,
@@ -1046,114 +1045,41 @@ mod tests {
                     raw_positive_support,
                     processed_positive_support,
                     threshold,
-                    visible_occupancy: occupancy,
+                    visible_occupancy,
                     out_of_range,
+                    min_occ,
+                    max_occ,
                 });
             }
         }
 
-        // Print complete diagnostic table
-        println!("\n=== Canonical Occupancy Diagnostic Table ===");
-        println!(
-            "{:<10} {:<6} {:<10} {:<16} {:<20} {:<12} {:<16} {:<12} {}",
-            "Model",
-            "Seed",
-            "Target",
-            "Raw Support",
-            "Processed Support",
-            "Threshold",
-            "Visible",
-            "Status",
-            "Notes"
-        );
-        println!(
-            "{:<10} {:<6} {:<10} {:<16} {:<20} {:<12} {:<16} {:<12} {}",
-            "", "", "(%)", "(%)", "(%)", "", "(%)", "", ""
-        );
-        println!("{}", "-".repeat(110));
-
-        let mut out_of_range_count = 0;
-        let mut zero_threshold_count = 0;
-        let mut low_processed_support_count = 0;
-
+        // Print table
+        println!();
+        println!("| Model      | Seed  | Target | Raw+   | Proc+  | Thresh  | Visible | Range? |");
+        println!("|------------|-------|--------|--------|--------|---------|---------|--------|");
         for m in &measurements {
-            let status = if m.out_of_range {
-                out_of_range_count += 1;
-                "OUT_OF_RANGE"
-            } else {
-                "OK"
-            };
-
-            let mut notes = Vec::new();
-
-            // Check for zero threshold
-            if (m.threshold - 0.0).abs() < f64::EPSILON {
-                zero_threshold_count += 1;
-                notes.push("ZERO_THRESHOLD");
-            }
-
-            // Check if processed positive support is below approved minimum (20% for Spiral)
-            // The approved minimum is the minimum expected occupancy for each model
-            let approved_min = match m.model {
-                ArtModel::Spiral => 0.20,
-                ArtModel::Elliptical => 0.18,
-                ArtModel::Cluster => 0.05,
-                _ => 0.0,
-            };
-
-            if m.processed_positive_support < approved_min {
-                low_processed_support_count += 1;
-                notes.push("LOW_PROCESSED_SUPPORT");
-            }
-
-            // Check if robust normalization reduces positive support
-            if m.processed_positive_support < m.raw_positive_support {
-                notes.push("REDUCED_BY_NORMALIZATION");
-            }
-
-            let notes_str = if notes.is_empty() {
-                "-".to_string()
-            } else {
-                notes.join(", ")
-            };
-
+            let range_marker = if m.out_of_range { "FAIL" } else { "OK" };
             println!(
-                "{:<10} {:<6} {:<10.2} {:<16.4} {:<20.4} {:<12.6} {:<16.4} {:<12} {}",
+                "| {:<10} | {:>5} | {:>6.2} | {:>6.4} | {:>6.4} | {:>7.4} | {:>7.4} | {:>6} |",
                 format!("{:?}", m.model),
                 m.seed,
-                m.target_occupancy * 100.0,
-                m.raw_positive_support * 100.0,
-                m.processed_positive_support * 100.0,
+                m.target_occupancy,
+                m.raw_positive_support,
+                m.processed_positive_support,
                 m.threshold,
-                m.visible_occupancy * 100.0,
-                status,
-                notes_str
+                m.visible_occupancy,
+                range_marker
             );
         }
+        println!();
 
-        println!("{}", "-".repeat(110));
-        println!("\nSummary:");
-        println!("  Total measurements: {}", measurements.len());
-        println!("  Out of range: {}", out_of_range_count);
-        println!("  Zero threshold: {}", zero_threshold_count);
-        println!(
-            "  Processed support below approved minimum: {}",
-            low_processed_support_count
-        );
-
-        // Report models that can be tuned through threshold alone vs those requiring other changes
-        println!("\nAnalysis:");
-        println!("  Models that can be tuned through threshold alone:");
-        println!("    (These have processed_positive_support >= approved minimum)");
-
-        println!("  Models requiring generation-support, normalization, or requirements decision:");
-        println!("    (These have processed_positive_support < approved minimum)");
-
-        // Final aggregate assertion after all data is printed
-        assert!(
-            out_of_range_count == 0,
-            "{} model/seed combinations produced occupancy outside expected ranges. See table above for details.",
-            out_of_range_count
-        );
+        // Assert all in range
+        for m in &measurements {
+            assert!(
+                !m.out_of_range,
+                "{:?} with seed {} has visible_occupancy {:.4} outside range [{:.2}, {:.2}]",
+                m.model, m.seed, m.visible_occupancy, m.min_occ, m.max_occ
+            );
+        }
     }
 }

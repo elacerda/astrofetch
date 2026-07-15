@@ -3,7 +3,7 @@ use crate::engine::{ArtModel as EngineModel, GeneratedScene};
 use crate::error::AppError;
 use crate::layout::compose_layout;
 use crate::render::{
-    prepare_density, render_shades, render_starfield, PreparedDensity, RenderProfile,
+    prepare_density, render_half_blocks, render_starfield, PreparedDensity, RenderProfile,
 };
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
@@ -122,9 +122,9 @@ impl App {
                 let canvas = density.into_rows();
                 render_starfield(&canvas, colors_enabled, terminal)
             }
-            PreparedDensity::Shade { density, threshold } => {
+            PreparedDensity::HalfBlock { density, threshold } => {
                 let canvas = density.into_rows();
-                render_shades(
+                render_half_blocks(
                     &canvas,
                     threshold,
                     colors_enabled && terminal.colors_enabled(),
