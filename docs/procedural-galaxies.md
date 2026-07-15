@@ -18,17 +18,27 @@ The visual model therefore favors robust analytic approximations and terminal-fr
 
 ## Rendering pipeline
 
-The high-level pipeline is:
+The high-level pipeline is unified across all models:
 
 ```text
 seeded RNG
   -> procedural model parameters
-  -> 2D density map
-  -> normalization / contrast stretch
-  -> adaptive thresholding
-  -> Unicode/ASCII glyph rendering
+  -> 2D density map (DensityMap)
+  -> model-specific RenderProfile
+  -> normalization (exactly once)
+  -> contrast stretch (exactly once)
+  -> threshold / render policy
+  -> renderer (Shade or Starfield)
   -> optional ANSI color
 ```
+
+The `RenderProfile` is an explicit per-model configuration that determines:
+- whether normalization is applied;
+- which contrast stretch is used;
+- how the visibility threshold is determined;
+- which renderer family is used.
+
+This separation makes post-processing decisions explicit and testable.
 
 For galaxy-like models, the intermediate representation is a scalar density field. Each cell stores a normalized luminosity-like value, not a physical flux. The renderer then maps this field into terminal glyphs.
 
@@ -73,8 +83,7 @@ For each generated spiral, seeded random parameters define:
 - exponential disk scale;
 - arm width;
 - arm strength;
-- noise scale;
-- a faint-density threshold floor.
+- noise scale.
 
 These parameters vary the morphology while keeping the result deterministic for a fixed seed.
 
@@ -148,10 +157,10 @@ This produces a more organic appearance reminiscent of star-forming regions, wit
 The final spiral density is approximately:
 
 ```text
-I(r, theta) = bulge + disk + arms * clumpiness + stellar_knots - threshold_floor
+I(r, theta) = bulge + disk + arms * clumpiness + stellar_knots
 ```
 
-Values below zero are clipped.
+The model preserves its native positive density. Mathematically invalid negative values (from noise subtraction) are clamped to zero. Visibility sparsification is handled by the target-occupancy threshold in the post-processing pipeline, not by generation-time cutoffs.
 
 ## Elliptical galaxy model
 
@@ -186,20 +195,49 @@ The starfield renderer has its own glyph and color mapping so that sparse stars 
 
 ## Normalization and contrast stretching
 
-After density generation, galaxy-like models are normalized and stretched for terminal display. The spiral pipeline uses gamma stretching after downsampling. Other models can use normalization and stretch functions to increase contrast in the low dynamic range of terminal glyphs.
+After density generation, galaxy-like models are normalized and stretched according to their `RenderProfile`. The profile determines:
+
+- **Normalization**: Robust percentile normalization using only finite positive values. Starfield uses no normalization.
+- **Contrast stretch**: Model-specific gamma stretching (γ=0.65-0.85).
+- **Threshold**: Target occupancy percentiles or dedicated renderer behavior.
 
 This step is visual rather than physical. Its purpose is to make faint structure readable without filling the entire canvas.
 
-## Adaptive thresholding
+### Per-model normalization strategy
 
-The half-block renderer computes an adaptive threshold from non-zero density values. It uses a percentile-like value and clamps it to avoid two common failure modes:
+| Model      | Normalization | Stretch    | Target Occupancy |
+|------------|---------------|------------|------------------|
+| Spiral     | Robust        | Gamma 0.85 | 26%              |
+| Elliptical | Robust        | Gamma 0.70 | 23%              |
+| Cluster    | Robust        | Gamma 0.65 | 10%              |
+| Starfield  | None          | None       | Dedicated        |
 
-- threshold too low: the galaxy becomes a solid blob;
-- threshold too high: only the nucleus remains visible.
+The occupancy targets are measured before background star injection and may be adjusted based on visual inspection.
 
-The threshold controls which density pairs become visible block glyphs and which cells remain background.
+### Robust percentile normalization
 
-## Half-block glyph rendering
+Robust normalization uses only finite positive values for percentile estimation:
+
+1. Collect all finite positive values from the density map.
+2. Sort them deterministically using `f64::total_cmp`.
+3. Estimate low and high percentiles from the sorted values.
+4. Map values to `[0, 1]` using the estimated range.
+5. Non-finite, negative, and zero values map to 0.0.
+6. Empty or all-zero maps remain zero.
+7. Collapsed positive ranges (all equal values) map positive cells to 1.0.
+
+### Target-occupancy threshold
+
+The threshold is computed from vertical pair maxima:
+
+1. Iterate over density rows in vertical pairs.
+2. For each x coordinate, calculate `pair_value = top.max(bottom)`.
+3. Sanitize non-finite or negative values to zero.
+4. Include every terminal cell, including zero cells.
+5. Sort deterministically with `f64::total_cmp`.
+6. Choose the threshold at quantile `(1.0 - target)` using the index `floor((n-1) * quantile)` where `n` is the number of pairs.
+
+## Shade glyph rendering
 
 Galaxy models are rendered with Unicode shading glyphs:
 
@@ -210,7 +248,16 @@ Galaxy models are rendered with Unicode shading glyphs:
 █  brightest structure
 ```
 
-The renderer consumes pairs of density rows and converts them to one terminal row. It chooses a shaded block based on the average and maximum density in the pair. This preserves thin structures while still emphasizing diffuse light.
+The renderer consumes pairs of density rows and converts them to one terminal row. For each terminal cell:
+
+- **Visibility threshold**: Uses the **maximum** of the top and bottom density values. If the pair maximum is below the threshold, the cell is not visible.
+- **Shade intensity**: Uses the greater of:
+  - The **average** of the pair: `(top + bottom) / 2`
+  - A smaller contribution from the pair **maximum**: `max(top, bottom) * 0.62`
+
+This preserves thin structures (via the maximum) while still emphasizing diffuse light (via the average).
+
+This is NOT a true half-block renderer. True ▀/▄ rendering belongs to Patch 3.
 
 Background stars are added only where local galaxy density is low, so they do not overwrite visible galaxy structure.
 

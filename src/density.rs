@@ -57,37 +57,6 @@ impl DensityMap {
         self.data[idx] = value;
     }
 
-    /// Normalizes the map linearly to [0, 1].
-    pub fn normalize(&self) -> Self {
-        let min = self.data.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = self.data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        let range = max - min;
-
-        if range.abs() < f64::EPSILON {
-            return Self::new(self.width, self.height);
-        }
-
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self.data.iter().map(|v| (v - min) / range).collect(),
-        }
-    }
-
-    /// Applies a gamma stretch to normalized values.
-    #[allow(dead_code)]
-    pub fn gamma_stretch(&self, gamma: f64) -> Self {
-        Self {
-            width: self.width,
-            height: self.height,
-            data: self
-                .data
-                .iter()
-                .map(|v| v.clamp(0.0, 1.0).powf(gamma))
-                .collect(),
-        }
-    }
-
     /// Downsamples this map by averaging rectangular bins.
     pub fn downsample_average(&self, out_width: usize, out_height: usize) -> Self {
         let mut out = Self::new(out_width, out_height);
@@ -124,6 +93,32 @@ impl DensityMap {
             .map(|row| row.to_vec())
             .collect()
     }
+
+    /// Creates a DensityMap from a row-major matrix.
+    ///
+    /// All rows must have the same length. Returns None if rows are empty or
+    /// inconsistent in width.
+    pub fn from_rows(rows: Vec<Vec<f64>>) -> Option<Self> {
+        if rows.is_empty() {
+            return None;
+        }
+        let width = rows[0].len();
+        if width == 0 {
+            return None;
+        }
+        for row in &rows {
+            if row.len() != width {
+                return None;
+            }
+        }
+        let height = rows.len();
+        let data: Vec<f64> = rows.into_iter().flatten().collect();
+        Some(Self {
+            width,
+            height,
+            data,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -152,5 +147,42 @@ mod tests {
         assert_eq!(out.width, 2);
         assert_eq!(out.height, 1);
         assert_eq!(out.data, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn test_density_map_from_rows() {
+        let rows = vec![vec![1.0, 2.0], vec![3.0, 4.0]];
+        let map = DensityMap::from_rows(rows).unwrap();
+        assert_eq!(map.width, 2);
+        assert_eq!(map.height, 2);
+        assert_eq!(map.get(0, 0), 1.0);
+        assert_eq!(map.get(1, 0), 2.0);
+        assert_eq!(map.get(0, 1), 3.0);
+        assert_eq!(map.get(1, 1), 4.0);
+    }
+
+    #[test]
+    fn test_density_map_from_rows_empty() {
+        assert!(DensityMap::from_rows(vec![]).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_ragged() {
+        let rows = vec![vec![1.0, 2.0], vec![3.0]];
+        assert!(DensityMap::from_rows(rows).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_zero_width() {
+        let rows = vec![vec![]];
+        assert!(DensityMap::from_rows(rows).is_none());
+    }
+
+    #[test]
+    fn test_density_map_from_rows_roundtrip() {
+        let original = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];
+        let map = DensityMap::from_rows(original.clone()).unwrap();
+        let rows = map.into_rows();
+        assert_eq!(original, rows);
     }
 }

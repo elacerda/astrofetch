@@ -1,8 +1,10 @@
 use crate::cli::{Args, ArtModel, Command};
-use crate::engine::ArtModel as EngineModel;
+use crate::engine::{ArtModel as EngineModel, GeneratedScene};
 use crate::error::AppError;
 use crate::layout::compose_layout;
-use crate::render::{normalize_with_stretch, render_galaxy, render_starfield, StretchType};
+use crate::render::{
+    prepare_density, render_shades, render_starfield, PreparedDensity, RenderProfile,
+};
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal};
 use clap::Parser;
@@ -70,17 +72,18 @@ impl App {
             ArtModel::Starfield => EngineModel::Starfield,
         };
 
-        // Gera a arte terminal.
-        //
-        // Starfield is intentionally rendered from raw sparse values. Normalizing
-        // it would turn every faint star into a bright glyph. Density-based
-        // galaxy models still benefit from contrast stretching.
-        let generated_canvas =
-            engine_model.generate(self.args.width, self.args.height, self.args.seed);
-        let canvas = match engine_model {
-            EngineModel::Starfield => generated_canvas,
-            _ => normalize_with_stretch(&generated_canvas, StretchType::default()),
-        };
+        // Gera a cena com metadados preservados
+        let GeneratedScene {
+            resolved_model,
+            density,
+            ..
+        } = engine_model.generate_scene(self.args.width, self.args.height, self.args.seed);
+
+        // Obtém o perfil de renderização para este modelo
+        let profile: RenderProfile = RenderProfile::for_model(resolved_model);
+
+        // Prepara a densidade para renderização
+        let prepared = prepare_density(density, profile);
 
         // Imprime na saída
         if self.args.info_only {
@@ -89,13 +92,11 @@ impl App {
             terminal.print_lines(&info_lines)?;
         } else if self.args.logo_only {
             // Modo logo-only: apenas arte ASCII
-            let art_lines =
-                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
+            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
             terminal.print_lines(&art_lines)?;
         } else {
             // Modo normal: arte + informações (side-by-side)
-            let art_lines =
-                Self::render_art_lines(engine_model, &canvas, colors_enabled, &terminal);
+            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
 
             let system = SystemSnapshot::collect();
             let info_lines = self.build_info_lines(&system);
@@ -107,15 +108,28 @@ impl App {
     }
 
     /// Renderiza a arte usando o renderer adequado para cada modelo.
+    ///
+    /// Usa o PreparedDensity para selecionar o renderer correto,
+    /// garantindo que tanto Starfield explícito quanto Random que resolve
+    /// para Starfield usem o renderer de campo de estrelas.
     fn render_art_lines(
-        engine_model: EngineModel,
-        canvas: &[Vec<f64>],
+        prepared: PreparedDensity,
         colors_enabled: bool,
         terminal: &Terminal,
     ) -> Vec<String> {
-        match engine_model {
-            EngineModel::Starfield => render_starfield(canvas, colors_enabled, terminal),
-            _ => render_galaxy(canvas, colors_enabled, terminal),
+        match prepared {
+            PreparedDensity::Starfield { density } => {
+                let canvas = density.into_rows();
+                render_starfield(&canvas, colors_enabled, terminal)
+            }
+            PreparedDensity::Shade { density, threshold } => {
+                let canvas = density.into_rows();
+                render_shades(
+                    &canvas,
+                    threshold,
+                    colors_enabled && terminal.colors_enabled(),
+                )
+            }
         }
     }
 

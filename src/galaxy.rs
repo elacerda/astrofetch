@@ -17,7 +17,6 @@ pub struct SpiralGalaxyConfig {
     pub arm_width: f64,
     pub arm_strength: f64,
     pub noise_scale: f64,
-    pub threshold_floor: f64,
 }
 
 impl SpiralGalaxyConfig {
@@ -33,7 +32,6 @@ impl SpiralGalaxyConfig {
             arm_width: rng.gen_range(0.018..0.034),
             arm_strength: rng.gen_range(2.0..3.4),
             noise_scale: rng.gen_range(3.5..6.0),
-            threshold_floor: 0.026,
         }
     }
 }
@@ -71,8 +69,6 @@ pub fn generate_spiral_galaxy(
     });
 
     high.downsample_average(out_width, out_height)
-        .normalize()
-        .gamma_stretch(0.85)
 }
 
 fn normalized_coord(i: usize, n: usize) -> f64 {
@@ -121,8 +117,9 @@ fn spiral_density(
     let clumpiness = 0.45 + 1.35 * coarse.powf(1.4);
     let stellar_knots = fine.powf(8.0) * arms * 0.85;
 
-    let value = (bulge + disk + arms * clumpiness + stellar_knots) - config.threshold_floor;
-    value.max(0.0)
+    // Return the non-negative model-native density assembled from bulge, disk, arms, clumpiness, and stellar knots.
+    // Mathematically invalid negative values are clamped to zero.
+    (bulge + disk + arms * clumpiness + stellar_knots).max(0.0)
 }
 
 fn spiral_arm_density(r: f64, theta: f64, config: &SpiralGalaxyConfig) -> f64 {

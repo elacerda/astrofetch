@@ -1,5 +1,14 @@
 use crate::terminal::Terminal;
 
+mod color;
+mod hash;
+mod profile;
+mod starfield;
+mod stretch;
+
+pub use profile::{prepare_density, PreparedDensity, RenderProfile};
+pub use starfield::render_starfield;
+
 use color::{intensity_to_ansi, RESET};
 use hash::{hash_cell, hash_to_unit};
 
@@ -74,27 +83,19 @@ pub fn render_colored_ascii(
         .collect()
 }
 
-/// Renderiza o mapa de densidade usando half-block Unicode.
+/// Renderiza o mapa de densidade usando sombreamento Unicode.
 ///
-/// The input canvas is expected to have twice the requested terminal height.
-/// Two density rows are collapsed into one terminal glyph row using:
-/// - top only:    ▀
-/// - bottom only: ▄
-/// - both:        █
-/// - none:        space
-pub fn render_galaxy(
-    canvas: &[Vec<f64>],
-    colors_enabled: bool,
-    terminal: &Terminal,
-) -> Vec<String> {
-    render_half_blocks(canvas, colors_enabled && terminal.colors_enabled())
-}
-
-fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> {
-    let adaptive = adaptive_threshold(canvas);
-
-    // Shade-first renderer: favor diffuse luminosity over hard spiral strokes.
-    let threshold = (adaptive * 0.42).clamp(0.035, 0.18);
+/// This is the main renderer for galaxy-like models. It consumes pairs of density
+/// rows and converts them to one terminal row using shaded block characters.
+///
+/// The renderer:
+/// - Takes two vertical density samples per terminal row
+/// - Uses their maximum for visibility threshold
+/// - Uses their average for intensity
+/// - Emits ░▒▓█ glyphs based on intensity
+///
+/// This is NOT a true half-block renderer. True ▀/▄ rendering belongs to Patch 3.
+pub fn render_shades(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
 
     let width = canvas.first().map_or(0, Vec::len);
@@ -142,7 +143,7 @@ fn render_half_blocks(canvas: &[Vec<f64>], colors_enabled: bool) -> Vec<String> 
 
 fn glyph_for_density_pair(top: f64, bottom: f64, threshold: f64) -> char {
     let maxv = top.max(bottom);
-    if maxv < threshold {
+    if !maxv.is_finite() || maxv <= 0.0 || maxv < threshold {
         return ' ';
     }
 
@@ -213,44 +214,6 @@ fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
     hash
 }
 
-fn adaptive_threshold(canvas: &[Vec<f64>]) -> f64 {
-    let mut values: Vec<f64> = canvas
-        .iter()
-        .flat_map(|row| row.iter().copied())
-        .filter(|value| *value > 1.0e-6)
-        .collect();
-
-    if values.is_empty() {
-        return 1.0;
-    }
-
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Keep only the brighter structure instead of filling the whole disk.
-    // The clamp avoids the two bad extremes we observed:
-    // - too low: solid ellipse
-    // - too high: only the nucleus
-    let percentile = 0.58;
-    let idx = ((values.len().saturating_sub(1)) as f64 * percentile).round() as usize;
-
-    values[idx].clamp(0.06, 0.28)
-}
-
-mod color;
-mod hash;
-mod starfield;
-
-pub use starfield::render_starfield;
-
-/// Aplica stretch (contraste) no valor usando gamma.
-/// Gamma < 1 aumenta contraste em valores baixos.
-mod stretch;
-
-pub use stretch::{normalize_with_stretch, StretchType};
-
-#[cfg(test)]
-pub use stretch::{apply_asinh_stretch, apply_gamma_stretch, apply_log_stretch, normalize_canvas};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,55 +242,12 @@ mod tests {
     }
 
     #[test]
-    fn test_render_galaxy_shade_only_blocks() {
-        let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
-
-        let result = render_galaxy(&canvas, false, &terminal);
-
-        assert_eq!(result, vec!["███"]);
-    }
-
-    #[test]
     fn test_deterministic_render() {
         let model = crate::engine::ArtModel::Starfield;
-        let canvas1 = model.generate(10, 5, Some(42));
-        let canvas2 = model.generate(10, 5, Some(42));
+        let canvas1 = model.generate_scene(10, 5, Some(42)).density.into_rows();
+        let canvas2 = model.generate_scene(10, 5, Some(42)).density.into_rows();
 
         assert_eq!(canvas1, canvas2);
-    }
-
-    #[test]
-    fn test_gamma_stretch() {
-        assert!(apply_gamma_stretch(0.5, 0.6) > 0.5);
-        assert_eq!(apply_gamma_stretch(0.0, 0.6), 0.0);
-        assert_eq!(apply_gamma_stretch(1.0, 0.6), 1.0);
-    }
-
-    #[test]
-    fn test_log_stretch() {
-        assert!(apply_log_stretch(0.5, 10.0) > 0.5);
-        assert_eq!(apply_log_stretch(0.0, 10.0), 0.0);
-        assert_eq!(apply_log_stretch(1.0, 10.0), 1.0);
-    }
-
-    #[test]
-    fn test_asinh_stretch() {
-        assert!(apply_asinh_stretch(0.5, 2.0) > 0.5);
-        assert_eq!(apply_asinh_stretch(0.0, 2.0), 0.0);
-        assert_eq!(apply_asinh_stretch(1.0, 2.0), 1.0);
-    }
-
-    #[test]
-    fn test_normalize_canvas() {
-        let canvas = vec![vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.0]];
-        let normalized = normalize_canvas(&canvas);
-
-        for row in &normalized {
-            for &val in row {
-                assert!((0.0..=1.0).contains(&val));
-            }
-        }
     }
 
     #[test]
@@ -390,5 +310,28 @@ mod tests {
         let line = &result[0];
 
         assert!(line.contains('\x1b'));
+    }
+
+    #[test]
+    fn test_render_shades_with_precomputed_threshold() {
+        let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
+
+        // Use a low threshold so all cells are visible
+        let result = render_shades(&canvas, 0.0, false);
+
+        assert_eq!(result, vec!["███"]);
+    }
+
+    #[test]
+    fn test_render_shades_zero_map_is_empty() {
+        // Create a canvas with at least two density rows, all zeros
+        let canvas = vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 0.0]];
+
+        // With any threshold, zero-density cells should render as spaces
+        let result = render_shades(&canvas, 0.0, false);
+
+        // Each terminal row should contain only spaces (no galaxy glyphs)
+        assert_eq!(result.len(), 1);
+        assert!(result[0].chars().all(|c| c == ' '));
     }
 }
