@@ -212,7 +212,7 @@ impl App {
                 let canvas = density.into_rows();
                 render_starfield(&canvas, colors_enabled, terminal)
             }
-            PreparedDensity::HalfBlock { density, threshold } => {
+            PreparedDensity::Galaxy { density, threshold } => {
                 let canvas = density.into_rows();
                 render_half_blocks(
                     &canvas,
