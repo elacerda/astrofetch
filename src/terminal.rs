@@ -1,3 +1,4 @@
+use crossterm::terminal;
 use crossterm::{queue, style::Print};
 use is_terminal::IsTerminal;
 use std::env;
@@ -67,6 +68,46 @@ impl Terminal {
             text.as_ref().to_string()
         }
     }
+
+    /// Returns the terminal dimensions if available.
+    ///
+    /// * Returns `None` when `self.is_tty` is false;
+    /// * Calls `crossterm::terminal::size()` when TTY;
+    /// * Returns `None` for zero dimensions;
+    /// * Returns `None` for dimensions greater than 10,000;
+    /// * Otherwise returns validated dimensions.
+    pub fn dimensions(&self) -> Option<TerminalDimensions> {
+        if !self.is_tty {
+            return None;
+        }
+
+        match terminal::size() {
+            Ok((width, height)) => validate_dimensions(width as usize, height as usize),
+            Err(_) => None,
+        }
+    }
+}
+
+/// Represents validated terminal dimensions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalDimensions {
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Validates terminal dimensions.
+///
+/// * Returns `None` for zero dimensions;
+/// * Returns `None` for dimensions greater than 10,000;
+/// * Otherwise returns validated dimensions.
+pub fn validate_dimensions(width: usize, height: usize) -> Option<TerminalDimensions> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width > 10_000 || height > 10_000 {
+        return None;
+    }
+    Some(TerminalDimensions { width, height })
 }
 
 /// Calcula a largura visual de uma string, ignorando códigos ANSI.
@@ -146,5 +187,43 @@ mod tests {
     fn test_visible_width_empty() {
         assert_eq!(visible_width(""), 0);
         assert_eq!(visible_width("\x1b[0m"), 0);
+    }
+
+    #[test]
+    fn test_validate_dimensions_valid() {
+        assert_eq!(
+            validate_dimensions(80, 24),
+            Some(TerminalDimensions {
+                width: 80,
+                height: 24
+            })
+        );
+    }
+
+    #[test]
+    fn test_validate_dimensions_zero_width() {
+        assert_eq!(validate_dimensions(0, 24), None);
+    }
+
+    #[test]
+    fn test_validate_dimensions_zero_height() {
+        assert_eq!(validate_dimensions(80, 0), None);
+    }
+
+    #[test]
+    fn test_validate_dimensions_too_large() {
+        assert_eq!(validate_dimensions(10_001, 100), None);
+        assert_eq!(validate_dimensions(100, 10_001), None);
+    }
+
+    #[test]
+    fn test_validate_dimensions_exactly_at_limit() {
+        assert_eq!(
+            validate_dimensions(10_000, 10_000),
+            Some(TerminalDimensions {
+                width: 10_000,
+                height: 10_000
+            })
+        );
     }
 }

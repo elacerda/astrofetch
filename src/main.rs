@@ -1,6 +1,7 @@
 mod app;
 mod cli;
 mod density;
+mod display_plan;
 mod engine;
 mod error;
 mod galaxy;

@@ -1,7 +1,13 @@
+use crate::display_plan::LayoutKind;
 use crate::terminal::visible_width;
 
-/// Composição da arte ASCII com informações do sistema.
-pub fn compose_layout(
+/// Composição lado a lado (side-by-side).
+///
+/// Preserves current behavior:
+/// * ANSI-aware width;
+/// * Unicode-aware width;
+/// * Deterministic padding.
+pub fn compose_side_by_side(
     art_lines: &[String],
     info_lines: &[String],
     art_width: usize,
@@ -33,13 +39,48 @@ pub fn compose_layout(
     result
 }
 
-/// Adiciona bordas ou padding à arte.
-#[allow(dead_code)]
-pub fn pad_art(art_lines: &[String], padding: usize) -> Vec<String> {
-    art_lines
-        .iter()
-        .map(|line| format!("{:width$}{}{:width$}", "", line, "", width = padding))
-        .collect()
+/// Composição empilhada (stacked).
+///
+/// Behavior:
+/// ```text
+/// art lines
+/// one empty separator line
+/// info lines
+/// ```
+///
+/// Add the separator only when both blocks are non-empty.
+pub fn compose_stacked(art_lines: &[String], info_lines: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+
+    // Add art lines
+    for line in art_lines {
+        result.push(line.clone());
+    }
+
+    // Add separator only when both blocks are non-empty
+    if !art_lines.is_empty() && !info_lines.is_empty() {
+        result.push(String::new());
+    }
+
+    // Add info lines
+    for line in info_lines {
+        result.push(line.clone());
+    }
+
+    result
+}
+
+/// Composição de layout escolhido.
+pub fn compose_layout(
+    art_lines: &[String],
+    info_lines: &[String],
+    art_width: usize,
+    layout: LayoutKind,
+) -> Vec<String> {
+    match layout {
+        LayoutKind::SideBySide => compose_side_by_side(art_lines, info_lines, art_width, 2),
+        LayoutKind::Stacked => compose_stacked(art_lines, info_lines),
+    }
 }
 
 #[cfg(test)]
@@ -47,55 +88,121 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compose_layout_basic() {
-        let art = vec!["*".to_string(), "**".to_string(), "***".to_string()];
-        let info = vec!["user@host".to_string(), "OS: Linux".to_string()];
+    fn test_compose_side_by_side_basic() {
+        let art = vec!["*".to_string(), "**".to_string()];
+        let info = vec!["info1".to_string(), "info2".to_string()];
 
-        let result = compose_layout(&art, &info, 10, 2);
+        let result = compose_side_by_side(&art, &info, 10, 2);
 
-        assert_eq!(result.len(), 3);
-        // Verifica que a linha tem arte e info
+        assert_eq!(result.len(), 2);
         assert!(result[0].contains("*"));
-        assert!(result[0].contains("user@host"));
+        assert!(result[0].contains("info1"));
     }
 
     #[test]
-    fn test_compose_layout_different_lengths() {
-        let art = vec!["*".to_string()];
-        let info = vec![
-            "line1".to_string(),
-            "line2".to_string(),
-            "line3".to_string(),
-        ];
-
-        let result = compose_layout(&art, &info, 10, 2);
-
-        assert_eq!(result.len(), 3);
-        // Primeira linha tem arte
-        assert!(result[0].contains("*"));
-        // Linhas 2 e 3 são apenas info
-        assert!(result[1].contains("line2"));
-        assert!(result[2].contains("line3"));
-    }
-
-    #[test]
-    fn test_compose_layout_with_ansi() {
+    fn test_compose_side_by_side_ansi_aware() {
         let art = vec!["\x1b[31m*\x1b[0m".to_string()];
         let info = vec!["info".to_string()];
 
-        let result = compose_layout(&art, &info, 10, 2);
+        let result = compose_side_by_side(&art, &info, 10, 2);
 
         assert!(result[0].contains("*"));
         assert!(result[0].contains("info"));
     }
 
     #[test]
-    fn test_compose_layout_no_panic() {
-        // Deve funcionar mesmo com listas vazias
+    fn test_compose_side_by_side_unicode_aware() {
+        let art = vec!["▀▄█".to_string()];
+        let info = vec!["info".to_string()];
+
+        let result = compose_side_by_side(&art, &info, 10, 2);
+
+        assert!(result[0].contains("▀▄█"));
+        assert!(result[0].contains("info"));
+    }
+
+    #[test]
+    fn test_compose_side_by_side_deterministic_padding() {
+        let art = vec!["*".to_string()];
+        let info = vec!["info".to_string()];
+
+        let result = compose_side_by_side(&art, &info, 10, 2);
+
+        // Art is 1 char, so padding = 2 + (10 - 1) = 11
+        // Total: 1 (art) + 11 (padding) + 4 (info) = 16
+        assert_eq!(result[0].len(), 16);
+    }
+
+    #[test]
+    fn test_compose_stacked_ordering() {
+        let art = vec!["art1".to_string(), "art2".to_string()];
+        let info = vec!["info1".to_string(), "info2".to_string()];
+
+        let result = compose_stacked(&art, &info);
+
+        assert_eq!(result.len(), 5); // 2 art + 1 separator + 2 info
+        assert_eq!(result[0], "art1");
+        assert_eq!(result[1], "art2");
+        assert_eq!(result[2], "");
+        assert_eq!(result[3], "info1");
+        assert_eq!(result[4], "info2");
+    }
+
+    #[test]
+    fn test_compose_stacked_conditional_separator() {
+        // Both non-empty: separator should be added
+        let art = vec!["art".to_string()];
+        let info = vec!["info".to_string()];
+
+        let result = compose_stacked(&art, &info);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[1], "");
+
+        // Empty art: no separator
+        let art: Vec<String> = vec![];
+        let info = vec!["info".to_string()];
+
+        let result = compose_stacked(&art, &info);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "info");
+
+        // Empty info: no separator
+        let art = vec!["art".to_string()];
+        let info: Vec<String> = vec![];
+
+        let result = compose_stacked(&art, &info);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "art");
+
+        // Both empty: no separator
         let art: Vec<String> = vec![];
         let info: Vec<String> = vec![];
 
-        let result = compose_layout(&art, &info, 10, 2);
+        let result = compose_stacked(&art, &info);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_compose_layout_side_by_side() {
+        let art = vec!["*".to_string()];
+        let info = vec!["info".to_string()];
+
+        let result = compose_layout(&art, &info, 10, LayoutKind::SideBySide);
+
+        assert!(result[0].contains("*"));
+        assert!(result[0].contains("info"));
+    }
+
+    #[test]
+    fn test_compose_layout_stacked() {
+        let art = vec!["*".to_string()];
+        let info = vec!["info".to_string()];
+
+        let result = compose_layout(&art, &info, 10, LayoutKind::Stacked);
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "*");
+        assert_eq!(result[1], "");
+        assert_eq!(result[2], "info");
     }
 }

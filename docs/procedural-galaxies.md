@@ -67,6 +67,60 @@ bottom density row -> lower half of the glyph (bottom visible)
 
 This gives a useful vertical resolution boost without increasing the number of printed terminal lines.
 
+## Art dimensions
+
+Art dimensions are determined by the planner based on terminal capabilities and explicit overrides:
+
+### Automatic dimensions
+
+When `--width` and `--height` are omitted, dimensions adapt to the terminal:
+
+- **Preferred automatic art size**: 40 × 20 cells
+- **Available side-by-side art width**: terminal width - layout gap (2) - measured information width
+- **Side-by-side selection**: used when preferred art fits within available width
+- **Width shrinking**: automatic art width may shrink to at least the side-by-side minimum (20 columns)
+- **Stacked fallback**: layout becomes stacked when available art width is below the side-by-side minimum
+
+### Explicit overrides
+
+When `--width` and/or `--height` are specified:
+
+- Width must be between 1 and 200
+- Height must be between 1 and 100
+- Explicit dimensions are never shrunk by the planner
+- Missing explicit dimension is derived from the other (width:height ≈ 2:1)
+
+### Fallback behavior
+
+When no terminal dimensions are available (non-TTY):
+
+- Default art dimensions are 40×20
+- Layout defaults to side-by-side
+
+### Layout selection
+
+The planner automatically chooses between side-by-side and stacked:
+
+- **Side-by-side**: preferred when art fits alongside info
+- **Stacked**: used when art doesn't fit alongside info, or when explicitly requested
+
+### Stacked vertical space
+
+For stacked layout, vertical space is calculated as:
+
+- **Reserved space**: information lines + 1 separator line (when information is non-empty)
+- **Available art height**: terminal height - reserved space
+- **Automatic height**: derived from final width (2:1 ratio), capped at available height
+- **Minimum height**: 1 line even when space is insufficient
+
+### Information never truncated
+
+Information lines are never truncated regardless of terminal size. The planner preserves all information lines without truncation.
+
+### Explicit layout always honored
+
+When `--layout` is explicitly set, the planner respects the choice regardless of available space.
+
 The half-block renderer uses independent visibility for each half:
 - **Top only visible**: `▀` (upper half block)
 - **Bottom only visible**: `▄` (lower half block)

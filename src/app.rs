@@ -1,4 +1,5 @@
 use crate::cli::{Args, ArtModel, Command};
+use crate::display_plan::{DisplayPlanner, OutputMode, PlannerRequest};
 use crate::engine::{ArtModel as EngineModel, GeneratedScene};
 use crate::error::AppError;
 use crate::layout::compose_layout;
@@ -6,7 +7,7 @@ use crate::render::{
     prepare_density, render_half_blocks, render_starfield, PreparedDensity, RenderProfile,
 };
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
-use crate::terminal::{visible_width, Terminal};
+use crate::terminal::{visible_width, Terminal, TerminalDimensions};
 use clap::Parser;
 
 const HEADER_COLOR: &str = "\x1b[93m";
@@ -72,36 +73,125 @@ impl App {
             ArtModel::Starfield => EngineModel::Starfield,
         };
 
-        // Gera a cena com metadados preservados
+        // Detect terminal capabilities
+        let terminal_dims = self.terminal.dimensions();
+
+        // Branch by output mode
+        if self.args.info_only {
+            self.execute_info_only(&terminal)
+        } else if self.args.logo_only {
+            self.execute_logo_only(&terminal, colors_enabled, engine_model, terminal_dims)
+        } else {
+            self.execute_combined(&terminal, colors_enabled, engine_model, terminal_dims)
+        }
+    }
+
+    /// Executa em modo InfoOnly: apenas informações do sistema.
+    fn execute_info_only(&self, terminal: &Terminal) -> Result<(), AppError> {
+        // Build formatted information lines
+        let system = SystemSnapshot::collect();
+        let info_lines = self.build_info_lines(&system);
+
+        terminal.print_lines(&info_lines)?;
+        Ok(())
+    }
+
+    /// Executa em modo LogoOnly: apenas arte ASCII.
+    fn execute_logo_only(
+        &self,
+        terminal: &Terminal,
+        colors_enabled: bool,
+        engine_model: EngineModel,
+        terminal_dims: Option<TerminalDimensions>,
+    ) -> Result<(), AppError> {
+        // Detect terminal dimensions for art planning
+        let planner = DisplayPlanner::new();
+        let request = PlannerRequest {
+            terminal_dimensions: terminal_dims,
+            requested_width: self.args.width,
+            requested_height: self.args.height,
+            requested_layout: self.args.layout,
+            output_mode: OutputMode::LogoOnly,
+            info_visible_width: 0,
+            info_line_count: 0,
+        };
+
+        let display_plan = planner.plan(request);
+
+        let (art_width, art_height) = match display_plan {
+            crate::display_plan::DisplayPlan::LogoOnly { art } => (art.width, art.height),
+            _ => unreachable!(),
+        };
+
         let GeneratedScene {
             resolved_model,
             density,
             ..
-        } = engine_model.generate_scene(self.args.width, self.args.height, self.args.seed);
+        } = engine_model.generate_scene(art_width, art_height, self.args.seed);
 
-        // Obtém o perfil de renderização para este modelo
         let profile: RenderProfile = RenderProfile::for_model(resolved_model);
-
-        // Prepara a densidade para renderização
         let prepared = prepare_density(density, profile);
 
-        // Imprime na saída
-        if self.args.info_only {
-            // Modo info-only: apenas informações, sem arte ASCII
-            let info_lines = self.build_info_lines(&SystemSnapshot::collect());
-            terminal.print_lines(&info_lines)?;
-        } else if self.args.logo_only {
-            // Modo logo-only: apenas arte ASCII
-            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
-            terminal.print_lines(&art_lines)?;
-        } else {
-            // Modo normal: arte + informações (side-by-side)
-            let art_lines = Self::render_art_lines(prepared, colors_enabled, &terminal);
+        let art_lines = Self::render_art_lines(prepared, colors_enabled, terminal);
 
-            let system = SystemSnapshot::collect();
-            let info_lines = self.build_info_lines(&system);
-            let output_lines = compose_layout(&art_lines, &info_lines, self.args.width, 2);
-            terminal.print_lines(&output_lines)?;
+        terminal.print_lines(&art_lines)?;
+        Ok(())
+    }
+
+    /// Executa em modo Combined: arte ASCII + informações do sistema.
+    fn execute_combined(
+        &self,
+        terminal: &Terminal,
+        colors_enabled: bool,
+        engine_model: EngineModel,
+        terminal_dims: Option<TerminalDimensions>,
+    ) -> Result<(), AppError> {
+        // Build formatted information lines and measure dimensions
+        let system = SystemSnapshot::collect();
+        let info_lines = self.build_info_lines(&system);
+        let info_visible_width = info_lines
+            .iter()
+            .map(|s| visible_width(s))
+            .max()
+            .unwrap_or(0);
+        let info_line_count = info_lines.len();
+
+        // Resolve art dimensions from terminal capabilities and explicit overrides
+        let planner = DisplayPlanner::new();
+        let request = PlannerRequest {
+            terminal_dimensions: terminal_dims,
+            requested_width: self.args.width,
+            requested_height: self.args.height,
+            requested_layout: self.args.layout,
+            output_mode: OutputMode::Combined,
+            info_visible_width,
+            info_line_count,
+        };
+
+        let display_plan = planner.plan(request);
+
+        let (art_width, art_height) = match display_plan {
+            crate::display_plan::DisplayPlan::Combined { art, .. } => (art.width, art.height),
+            _ => unreachable!(),
+        };
+
+        let GeneratedScene {
+            resolved_model,
+            density,
+            ..
+        } = engine_model.generate_scene(art_width, art_height, self.args.seed);
+
+        let profile: RenderProfile = RenderProfile::for_model(resolved_model);
+        let prepared = prepare_density(density, profile);
+
+        let art_lines = Self::render_art_lines(prepared, colors_enabled, terminal);
+
+        match display_plan {
+            crate::display_plan::DisplayPlan::Combined { art, layout } => {
+                let output_lines = compose_layout(&art_lines, &info_lines, art.width, layout);
+                terminal.print_lines(&output_lines)?;
+            }
+            _ => unreachable!(),
         }
 
         Ok(())
@@ -212,7 +302,7 @@ fn format_info_line(line: &InfoLine, label_width: usize, colors_enabled: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ArtModel;
+    use crate::cli::{ArtModel, LayoutChoice};
     use crate::terminal::Terminal;
     use std::collections::BTreeMap;
 
@@ -221,14 +311,15 @@ mod tests {
             args: Args {
                 command: None,
                 model: ArtModel::Random,
-                width: 40,
-                height: 20,
+                width: None,
+                height: None,
                 seed: None,
                 no_color,
                 logo_only: false,
                 info_only: false,
                 compact,
                 disk_details: false,
+                layout: LayoutChoice::Auto,
             },
             terminal: Terminal {
                 is_tty: colors_enabled,
@@ -439,7 +530,7 @@ mod tests {
         let info = app.build_info_lines(&base_snapshot());
         let art = vec!["**".to_string()];
 
-        let result = compose_layout(&art, &info, 6, 2);
+        let result = crate::layout::compose_side_by_side(&art, &info, 6, 2);
 
         assert!(result[0].starts_with("**      \x1b[93mastro@station\x1b[0m"));
     }
