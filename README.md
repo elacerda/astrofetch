@@ -100,6 +100,28 @@ astrofetch --model cluster
 astrofetch --model starfield
 ```
 
+Specify art dimensions (optional):
+
+```bash
+astrofetch --width 60 --height 30
+```
+
+When `--width` and `--height` are omitted, art dimensions adapt to the terminal size. The default fallback is 40×20 when no terminal dimensions are available.
+
+Choose layout:
+
+```bash
+astrofetch --layout auto      # Automatically choose side-by-side or stacked
+astrofetch --layout side-by-side
+astrofetch --layout stacked
+```
+
+Stacked example:
+
+```bash
+astrofetch --layout stacked --width 40 --height 20
+```
+
 Available models:
 
 - `random`: randomly selects one of the available models.
