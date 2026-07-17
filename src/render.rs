@@ -6,15 +6,26 @@ mod shade;
 mod starfield;
 mod stretch;
 
-#[allow(unused_imports)]
 pub use ascii::render_ascii;
 pub use profile::{prepare_density, PreparedDensity, RenderProfile};
-#[allow(unused_imports)]
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
 use color::{intensity_to_ansi, intensity_to_background_ansi, RESET};
 use hash::{hash_cell, hash_to_unit};
+
+/// Renderer effectively used after model and renderer choice resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveRenderer {
+    /// Starfield dedicated renderer.
+    Starfield,
+    /// Half-block renderer (half-block characters ▄▀█).
+    HalfBlock,
+    /// Shade renderer (shade characters ░▒▓█).
+    Shade,
+    /// ASCII renderer (ASCII characters .:-=+*#%@).
+    Ascii,
+}
 
 /// Renderiza o mapa de densidade usando caracteres de bloco Unicode meio a meio.
 ///
