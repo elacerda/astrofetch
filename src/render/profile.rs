@@ -27,12 +27,12 @@ pub enum ThresholdStrategy {
     Dedicated,
 }
 
-/// Renderer family selection.
+/// Preparation family selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererKind {
-    /// Half-block renderer with vertical supersampling for galaxy-like models.
-    HalfBlock,
-    /// Sparse starfield renderer.
+pub enum PreparationKind {
+    /// Galaxy preparation with normalization, stretch, and threshold.
+    Galaxy,
+    /// Sparse starfield preparation - raw density values preserved.
     Starfield,
 }
 
@@ -42,7 +42,7 @@ pub struct RenderProfile {
     pub normalization: Normalization,
     pub stretch: StretchType,
     pub threshold: ThresholdStrategy,
-    pub renderer: RendererKind,
+    pub preparation: PreparationKind,
 }
 
 impl RenderProfile {
@@ -59,7 +59,7 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.85),
                 threshold: ThresholdStrategy::TargetOccupancy(0.26),
-                renderer: RendererKind::HalfBlock,
+                preparation: PreparationKind::Galaxy,
             },
             ArtModel::Elliptical => RenderProfile {
                 normalization: Normalization::Robust {
@@ -68,7 +68,7 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.7),
                 threshold: ThresholdStrategy::TargetOccupancy(0.23),
-                renderer: RendererKind::HalfBlock,
+                preparation: PreparationKind::Galaxy,
             },
             ArtModel::Cluster => RenderProfile {
                 normalization: Normalization::Robust {
@@ -77,13 +77,13 @@ impl RenderProfile {
                 },
                 stretch: StretchType::Gamma(0.65),
                 threshold: ThresholdStrategy::TargetOccupancy(0.10),
-                renderer: RendererKind::HalfBlock,
+                preparation: PreparationKind::Galaxy,
             },
             ArtModel::Starfield => RenderProfile {
                 normalization: Normalization::None,
                 stretch: StretchType::None,
                 threshold: ThresholdStrategy::Dedicated,
-                renderer: RendererKind::Starfield,
+                preparation: PreparationKind::Starfield,
             },
             ArtModel::Random => {
                 // This should never happen - Random is resolved before this is called
@@ -96,32 +96,32 @@ impl RenderProfile {
 /// Prepared density result that encodes the processing path at the type level.
 ///
 /// This enum makes invalid states impossible by separating Starfield (no
-/// normalization/stretch/threshold) from HalfBlock models (robust normalization,
+/// normalization/stretch/threshold) from Galaxy models (robust normalization,
 /// stretch, and target-occupancy threshold).
 #[derive(Debug, Clone)]
 pub enum PreparedDensity {
     /// Starfield: raw density values, no processing.
     Starfield { density: DensityMap },
-    /// HalfBlock models: normalized, stretched, with computed threshold.
-    HalfBlock { density: DensityMap, threshold: f64 },
+    /// Galaxy models: normalized, stretched, with computed threshold.
+    Galaxy { density: DensityMap, threshold: f64 },
 }
 
 /// Prepares density for rendering based on the profile.
 ///
 /// * Starfield models: no normalization, no stretch, no threshold.
-/// * HalfBlock models: robust normalization, stretch, and target-occupancy threshold.
+/// * Galaxy models: robust normalization, stretch, and target-occupancy threshold.
 pub fn prepare_density(density: DensityMap, profile: RenderProfile) -> PreparedDensity {
-    match profile.renderer {
-        RendererKind::Starfield => {
+    match profile.preparation {
+        PreparationKind::Starfield => {
             // Starfield: no processing, preserve raw values
             PreparedDensity::Starfield { density }
         }
-        RendererKind::HalfBlock => {
-            // HalfBlock models: apply robust normalization and stretch
+        PreparationKind::Galaxy => {
+            // Galaxy models: apply robust normalization and stretch
             let normalized = normalize_robust_map(&density, profile.normalization);
             let stretched = apply_stretch_to_density(&normalized, profile.stretch);
             let threshold = compute_target_occupancy_threshold(&stretched, profile.threshold);
-            PreparedDensity::HalfBlock {
+            PreparedDensity::Galaxy {
                 density: stretched,
                 threshold,
             }
@@ -277,7 +277,7 @@ mod tests {
     #[test]
     fn test_profile_for_spiral() {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
-        assert_eq!(profile.renderer, RendererKind::HalfBlock);
+        assert_eq!(profile.preparation, PreparationKind::Galaxy);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_profile_for_elliptical() {
         let profile = RenderProfile::for_model(ArtModel::Elliptical);
-        assert_eq!(profile.renderer, RendererKind::HalfBlock);
+        assert_eq!(profile.preparation, PreparationKind::Galaxy);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn test_profile_for_cluster() {
         let profile = RenderProfile::for_model(ArtModel::Cluster);
-        assert_eq!(profile.renderer, RendererKind::HalfBlock);
+        assert_eq!(profile.preparation, PreparationKind::Galaxy);
         assert!(matches!(
             profile.normalization,
             Normalization::Robust {
@@ -331,19 +331,19 @@ mod tests {
     #[test]
     fn test_profile_for_starfield() {
         let profile = RenderProfile::for_model(ArtModel::Starfield);
-        assert_eq!(profile.renderer, RendererKind::Starfield);
+        assert_eq!(profile.preparation, PreparationKind::Starfield);
         assert_eq!(profile.normalization, Normalization::None);
         assert_eq!(profile.stretch, StretchType::None);
         assert!(matches!(profile.threshold, ThresholdStrategy::Dedicated));
     }
 
     #[test]
-    fn test_prepare_density_halfblock_applies_normalization() {
+    fn test_prepare_density_galaxy_applies_normalization() {
         let density = DensityMap::new(10, 5);
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, threshold } => {
+            PreparedDensity::Galaxy { density, threshold } => {
                 assert_eq!(density.width, 10);
                 assert_eq!(density.height, 5);
                 // All zeros should remain zeros
@@ -351,7 +351,7 @@ mod tests {
                 // Threshold should be 0.0 for all-zero map
                 assert_eq!(threshold, 0.0);
             }
-            PreparedDensity::Starfield { .. } => panic!("Expected HalfBlock variant"),
+            PreparedDensity::Starfield { .. } => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -361,10 +361,10 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -377,13 +377,13 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // Values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
                 // Some values should be non-zero
                 assert!(density.data.iter().any(|v| *v > 0.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -399,13 +399,13 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // NaN should map to 0.0
                 assert_eq!(density.data[12], 0.0);
                 // Other values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -421,11 +421,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // Infinity should map to 0.0
                 assert_eq!(density.data[12], 0.0);
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -438,11 +438,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // All negative values should map to 0.0
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -455,11 +455,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // Negative infinity should map to 0.0
                 assert!(density.data.iter().all(|v| *v == 0.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -475,7 +475,7 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // Values should be in [0, 1]
                 assert!(density.data.iter().all(|v| *v >= 0.0 && *v <= 1.0));
                 // The outlier should be mapped to 1.0
@@ -499,7 +499,7 @@ mod tests {
                 // All outputs should be finite
                 assert!(density.data.iter().all(|v| v.is_finite()));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -513,11 +513,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // All finite positive values should map to 1.0 when range is collapsed
                 assert!(density.data.iter().all(|v| *v == 1.0));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -534,7 +534,7 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 // Negative, zero, NaN, and infinities should map to exactly 0.0
                 assert_eq!(density.data[0], 0.0, "negative should map to 0.0");
                 assert_eq!(density.data[1], 0.0, "zero should remain 0.0");
@@ -549,7 +549,7 @@ mod tests {
                 // All outputs should be finite
                 assert!(density.data.iter().all(|v| v.is_finite()));
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -562,11 +562,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { density, .. } => {
+            PreparedDensity::Galaxy { density, .. } => {
                 assert_eq!(density.width, 10);
                 assert_eq!(density.height, 8);
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -633,7 +633,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::HalfBlock { threshold, .. } => {
+            PreparedDensity::Galaxy { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -644,16 +644,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
+                    PreparedDensity::Galaxy { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected HalfBlock variant"),
+                    _ => panic!("Expected Galaxy variant"),
                 }
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -675,7 +675,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::HalfBlock { threshold, .. } => {
+            PreparedDensity::Galaxy { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -686,16 +686,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
+                    PreparedDensity::Galaxy { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected HalfBlock variant"),
+                    _ => panic!("Expected Galaxy variant"),
                 }
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -720,7 +720,7 @@ mod tests {
         let expected_threshold = compute_expected_threshold(&density, profile);
         let prepared = prepare_density(density.clone(), profile);
         match prepared {
-            PreparedDensity::HalfBlock { threshold, .. } => {
+            PreparedDensity::Galaxy { threshold, .. } => {
                 // Exact threshold value expected
                 assert!(
                     (threshold - expected_threshold).abs() < f64::EPSILON,
@@ -731,16 +731,16 @@ mod tests {
                 // Verify threshold is deterministic
                 let prepared2 = prepare_density(density, profile);
                 match prepared2 {
-                    PreparedDensity::HalfBlock { threshold: t2, .. } => {
+                    PreparedDensity::Galaxy { threshold: t2, .. } => {
                         assert!(
                             (threshold - t2).abs() < f64::EPSILON,
                             "Threshold should be deterministic"
                         );
                     }
-                    _ => panic!("Expected HalfBlock variant"),
+                    _ => panic!("Expected Galaxy variant"),
                 }
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -750,11 +750,11 @@ mod tests {
         let profile = RenderProfile::for_model(ArtModel::Spiral);
         let prepared = prepare_density(density, profile);
         match prepared {
-            PreparedDensity::HalfBlock { threshold, .. } => {
+            PreparedDensity::Galaxy { threshold, .. } => {
                 // All-zero map should not panic, threshold should be 0.0
                 assert_eq!(threshold, 0.0);
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -766,12 +766,12 @@ mod tests {
         let prepared2 = prepare_density(density, profile);
         match (prepared1, prepared2) {
             (
-                PreparedDensity::HalfBlock { threshold: t1, .. },
-                PreparedDensity::HalfBlock { threshold: t2, .. },
+                PreparedDensity::Galaxy { threshold: t1, .. },
+                PreparedDensity::Galaxy { threshold: t2, .. },
             ) => {
                 assert_eq!(t1, t2, "Repeated calculation should give same threshold");
             }
-            _ => panic!("Expected HalfBlock variant"),
+            _ => panic!("Expected Galaxy variant"),
         }
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
                 let prepared = prepare_density(scene.density.clone(), profile);
                 let (processed_density, threshold) = match prepared {
                     PreparedDensity::Starfield { density } => (density, 0.0),
-                    PreparedDensity::HalfBlock { density, threshold } => (density, threshold),
+                    PreparedDensity::Galaxy { density, threshold } => (density, threshold),
                 };
 
                 // ===== Calculate processed_positive_support =====

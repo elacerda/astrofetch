@@ -40,7 +40,61 @@ The `RenderProfile` is an explicit per-model configuration that determines:
 
 This separation makes post-processing decisions explicit and testable.
 
-For galaxy-like models, the intermediate representation is a scalar density field. Each cell stores a normalized luminosity-like value, not a physical flux. The renderer then maps this field into terminal glyphs using true half-block characters.
+For galaxy-like models, the intermediate representation is a scalar density field. Each cell stores a normalized luminosity-like value, not a physical flux. The selected galaxy renderer then maps this field into terminal glyphs.
+
+## Density preparation
+
+Galaxy models share a common density preparation path:
+
+1. **Density generation**: Procedural models (Spiral, Elliptical, Cluster) generate a 2D density map.
+2. **Normalization**: Robust percentile normalization using only finite positive values.
+3. **Contrast stretch**: Model-specific gamma stretching (γ=0.65-0.85).
+4. **Threshold**: Target-occupancy threshold computed from vertical pair maxima.
+
+This preparation is **renderer-neutral**: the same prepared density is consumed by all three renderers (HalfBlock, Shade, ASCII). The choice of renderer happens after density preparation.
+
+### Starfield bypass
+
+The Starfield model uses its dedicated rendering path. It does not undergo normalization or contrast stretch. Starfield density is rendered directly with its point-like glyphs.
+
+## Renderer selection
+
+After the requested model is resolved to a concrete model, the effective renderer is determined from that model and the requested renderer choice. Galaxy density preparation remains independent of the selected galaxy renderer.
+
+### Resolved model renderer matrix
+
+| Resolved model | Auto      | HalfBlock    | Shade        | ASCII     |
+| -------------- | --------- | ------------ | ------------ | --------- |
+| Spiral         | HalfBlock | HalfBlock    | Shade        | ASCII     |
+| Elliptical     | HalfBlock | HalfBlock    | Shade        | ASCII     |
+| Cluster        | HalfBlock | HalfBlock    | Shade        | ASCII     |
+| Starfield      | Starfield | incompatible | incompatible | Starfield |
+
+### Compatibility rules
+
+- **Galaxy models** (Spiral, Elliptical, Cluster) accept all renderer choices:
+  - `auto` → HalfBlock
+  - `half-block` → HalfBlock
+  - `shade` → Shade
+  - `ascii` → ASCII
+
+- **Starfield model**:
+  - `auto` → Starfield (dedicated renderer)
+  - `ascii` → Starfield (dedicated renderer)
+  - `half-block` → CLI error
+  - `shade` → CLI error
+
+### Random model resolution
+
+The `random` model is resolved to a concrete model (Spiral, Elliptical, Cluster, or Starfield) **before** renderer selection. The matrix applies to the resolved model, not the unresolved `random` choice.
+
+### No silent fallback
+
+When an incompatible renderer is selected for Starfield, the CLI returns an explicit error. There is no silent fallback to a compatible renderer.
+
+### Implementation
+
+Renderer resolution is implemented in `App::resolve_effective_renderer` in `src/app.rs`. Invalid combinations return `AppError::Cli` with a descriptive message.
 
 ## Density map representation
 
@@ -303,7 +357,11 @@ The threshold is computed from vertical pair maxima:
 
 ## Half-block glyph rendering
 
-Galaxy models are rendered with Unicode half-block characters:
+Galaxy models can be rendered with three families of characters:
+
+### Half-block renderer (default for galaxy models)
+
+Uses Unicode half-block characters:
 
 ```text
 ▀  top half visible only
@@ -312,26 +370,31 @@ Galaxy models are rendered with Unicode half-block characters:
    (space)  neither half visible
 ```
 
-The renderer consumes pairs of density rows and converts them to one terminal row. For each terminal cell:
+### Shade renderer
 
-- **Independent visibility**: Each half (top and bottom) is evaluated separately against the threshold.
-  - Top is visible if `top.is_finite() && top > 0.0 && top >= threshold`
-  - Bottom is visible if `bottom.is_finite() && bottom > 0.0 && bottom >= threshold`
+Uses Unicode density characters:
 
-- **No-color mode**: Uses the appropriate half-block glyph based on visibility combinations:
-  - Top only: `▀`
-  - Bottom only: `▄`
-  - Both: `█`
-  - Neither: ` `
+```text
+░  lowest intensity
+▒  low intensity
+▓  high intensity
+█  highest intensity
+```
 
-- **Color mode**: Uses ANSI foreground/background colors with the `▀` glyph to preserve both samples:
-  - Top only: foreground color + `▀` + reset
-  - Bottom only: foreground color + `▄` + reset
-  - Both: foreground color + background color + `▀` + reset
+### ASCII renderer
 
-This preserves both vertical samples independently while maintaining a compact terminal representation.
+Uses ASCII characters ordered by intensity:
 
-Background stars are added only where **neither** half is visible, so they do not overwrite visible galaxy structure.
+```text
+. : - = + * # % @
+```
+
+All three galaxy renderers consume the same prepared density and reuse the same deterministic background-star policy, but they sample each vertical pair differently:
+
+- **HalfBlock** evaluates the top and bottom samples independently and renders `▀`, `▄`, `█`, or a space.
+- **Shade** collapses the pair with `max(top, bottom)` and maps the threshold-relative intensity to `░`, `▒`, `▓`, or `█`.
+- **ASCII** also collapses the pair with `max(top, bottom)` and maps the threshold-relative intensity to its ASCII palette.
+- **Background stars** are considered only when no visible galaxy glyph occupies the terminal cell and the shared local-density guard permits them.
 
 ## ANSI color
 

@@ -1,86 +1,30 @@
-use crate::terminal::Terminal;
-
+mod ascii;
 mod color;
 mod hash;
 mod profile;
+mod shade;
 mod starfield;
 mod stretch;
 
+pub use ascii::render_ascii;
 pub use profile::{prepare_density, PreparedDensity, RenderProfile};
+pub use shade::render_shades;
 pub use starfield::render_starfield;
 
 use color::{intensity_to_ansi, intensity_to_background_ansi, RESET};
 use hash::{hash_cell, hash_to_unit};
 
-/// Paleta de caracteres ASCII para renderização.
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    pub chars: &'static [char],
-}
-
-impl Palette {
-    /// Paleta padrão (do mais claro para mais escuro).
-    /// O espaço ' ' é o nível mais baixo de intensidade para reduzir ruído visual.
-    #[allow(dead_code)]
-    pub const DEFAULT: Palette = Palette {
-        chars: &[' ', '.', ':', '-', '=', '+', '*', '#', '%', '@'],
-    };
-
-    /// Paleta alternativa mais detalhada.
-    #[allow(dead_code)]
-    pub const DETAILED: Palette = Palette {
-        chars: &[
-            ' ', '.', ',', ':', ';', 'i', 'r', 's', 'X', 'A', '2', '5', '3', 'h', 'M', 'H', 'G',
-            'S', '#', '9', 'B', '&', '@',
-        ],
-    };
-
-    /// Retorna o caractere correspondente ao nível de brilho (0.0 a 1.0).
-    pub fn get_char(&self, value: f64) -> char {
-        if value <= 0.0 {
-            return self.chars[0];
-        }
-        if value >= 1.0 {
-            return self.chars[self.chars.len() - 1];
-        }
-
-        let idx = (value * (self.chars.len() - 1) as f64).floor() as usize;
-        self.chars[idx]
-    }
-}
-
-/// Renderiza uma matriz de luminosidade em ASCII.
-#[allow(dead_code)]
-pub fn render_ascii(canvas: &[Vec<f64>], palette: &Palette) -> Vec<String> {
-    canvas
-        .iter()
-        .map(|row| row.iter().map(|&v| palette.get_char(v)).collect::<String>())
-        .collect()
-}
-
-/// Renderiza ASCII com cores ANSI.
-#[allow(dead_code)]
-pub fn render_colored_ascii(
-    canvas: &[Vec<f64>],
-    palette: &Palette,
-    terminal: &Terminal,
-) -> Vec<String> {
-    canvas
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|&v| {
-                    let c = palette.get_char(v);
-                    if terminal.colors_enabled() {
-                        let color = intensity_to_ansi(v);
-                        format!("{}{}{}", color, c, RESET)
-                    } else {
-                        c.to_string()
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect()
+/// Renderer effectively used after model and renderer choice resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveRenderer {
+    /// Starfield dedicated renderer.
+    Starfield,
+    /// Half-block renderer (half-block characters ▄▀█).
+    HalfBlock,
+    /// Shade renderer (shade characters ░▒▓█).
+    Shade,
+    /// ASCII renderer (ASCII characters .:-=+*#%@).
+    Ascii,
 }
 
 /// Renderiza o mapa de densidade usando caracteres de bloco Unicode meio a meio.
@@ -181,7 +125,41 @@ fn glyph_for_half_block(top_visible: bool, bottom_visible: bool) -> char {
     }
 }
 
-fn star_glyph_for_cell(
+/// Returns the visibility scale for a density value above threshold.
+///
+/// Returns None for:
+/// - Non-finite values (NaN, infinity, negative infinity)
+/// - Zero or negative values
+/// - Values below threshold
+///
+/// Returns Some(scaled) for visible values, where scaled is a monotonic
+/// mapping from [threshold, 1.0] to [0.0, 1.0].
+pub(super) fn scale_visible(value: f64, threshold: f64) -> Option<f64> {
+    // Reject non-finite values
+    if !value.is_finite() {
+        return None;
+    }
+
+    // Reject zero and negative
+    if value <= 0.0 {
+        return None;
+    }
+
+    // Reject below threshold (value exactly equal to threshold is visible)
+    if value < threshold {
+        return None;
+    }
+
+    // Map to [0.0, 1.0] where threshold -> 0.0 and 1.0 -> 1.0
+    if threshold >= 1.0 {
+        Some(1.0)
+    } else {
+        let scaled = ((value - threshold) / (1.0 - threshold)).clamp(0.0, 1.0);
+        Some(scaled)
+    }
+}
+
+pub(super) fn star_glyph_for_cell(
     x: usize,
     y: usize,
     top: f64,
@@ -214,7 +192,7 @@ fn star_glyph_for_cell(
     }
 }
 
-fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
+pub(super) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
 
     for (i, value) in canvas.iter().flatten().enumerate() {
@@ -234,48 +212,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_palette_get_char() {
-        let palette = Palette::DEFAULT;
-        assert_eq!(palette.get_char(0.0), ' ');
-        assert_eq!(palette.get_char(1.0), '@');
-    }
-
-    #[test]
-    fn test_palette_maps_low_to_space() {
-        let palette = Palette::DEFAULT;
-        assert_eq!(palette.chars[0], ' ');
-    }
-
-    #[test]
-    fn test_render_ascii() {
-        let canvas = vec![vec![0.0, 0.5, 1.0], vec![1.0, 0.5, 0.0]];
-        let palette = Palette::DEFAULT;
-        let result = render_ascii(&canvas, &palette);
-
-        assert_eq!(result[0], " =@");
-        assert_eq!(result[1], "@= ");
-    }
-
-    #[test]
     fn test_deterministic_render() {
         let model = crate::engine::ArtModel::Starfield;
         let canvas1 = model.generate_scene(10, 5, Some(42)).density.into_rows();
         let canvas2 = model.generate_scene(10, 5, Some(42)).density.into_rows();
 
         assert_eq!(canvas1, canvas2);
-    }
-
-    #[test]
-    fn test_no_color_ansi_free() {
-        let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let canvas = vec![vec![0.5]];
-        let palette = Palette::DEFAULT;
-
-        let result = render_colored_ascii(&canvas, &palette, &terminal);
-        let line = &result[0];
-
-        assert!(!line.contains('\x1b'));
-        assert_eq!(line, "=");
     }
 
     #[test]
@@ -313,18 +255,6 @@ mod tests {
 
         assert!(result[0].contains('\x1b'));
         assert!(result[0].contains('+'));
-    }
-
-    #[test]
-    fn test_colored_contains_ansi() {
-        let terminal = crate::terminal::Terminal::with_colors(true, true);
-        let canvas = vec![vec![0.5]];
-        let palette = Palette::DEFAULT;
-
-        let result = render_colored_ascii(&canvas, &palette, &terminal);
-        let line = &result[0];
-
-        assert!(line.contains('\x1b'));
     }
 
     #[test]

@@ -39,6 +39,19 @@ pub enum ArtModel {
     Starfield,
 }
 
+/// Seleção de renderizador para arte ASCII.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RendererChoice {
+    /// Automatically select renderer based on model (default).
+    Auto,
+    /// Use shade characters (░▒▓█) for galaxy models.
+    Shade,
+    /// Use half-block characters (▄▀█) for galaxy models.
+    HalfBlock,
+    /// Use ASCII characters (.:-=+*#%@) for any model.
+    Ascii,
+}
+
 /// Layout choice for combining art and information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum LayoutChoice {
@@ -101,6 +114,10 @@ pub struct Args {
     /// Layout for combining art and information
     #[arg(long, default_value = "auto", value_enum)]
     pub layout: LayoutChoice,
+
+    /// Renderer to use for ASCII art
+    #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
+    pub renderer: RendererChoice,
 }
 
 /// Subcomandos explícitos do AstroFetch.
@@ -216,6 +233,42 @@ mod tests {
     #[test]
     fn test_args_logo_only_and_info_only_conflict() {
         let result = Args::try_parse_from(["astrofetch", "--logo-only", "--info-only"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_renderer_choice_default_is_auto() {
+        let args = Args::try_parse_from(["astrofetch"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::Auto);
+    }
+
+    #[test]
+    fn test_renderer_choice_auto() {
+        let args = Args::try_parse_from(["astrofetch", "--renderer", "auto"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::Auto);
+    }
+
+    #[test]
+    fn test_renderer_choice_shade() {
+        let args = Args::try_parse_from(["astrofetch", "--renderer", "shade"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::Shade);
+    }
+
+    #[test]
+    fn test_renderer_choice_half_block() {
+        let args = Args::try_parse_from(["astrofetch", "--renderer", "half-block"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::HalfBlock);
+    }
+
+    #[test]
+    fn test_renderer_choice_ascii() {
+        let args = Args::try_parse_from(["astrofetch", "--renderer", "ascii"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::Ascii);
+    }
+
+    #[test]
+    fn test_renderer_choice_unknown_rejected() {
+        let result = Args::try_parse_from(["astrofetch", "--renderer", "invalid"]);
         assert!(result.is_err());
     }
 }

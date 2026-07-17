@@ -1,10 +1,11 @@
-use crate::cli::{Args, ArtModel, Command};
+use crate::cli::{Args, ArtModel, Command, RendererChoice};
 use crate::display_plan::{DisplayPlanner, OutputMode, PlannerRequest};
 use crate::engine::{ArtModel as EngineModel, GeneratedScene};
 use crate::error::AppError;
 use crate::layout::compose_layout;
 use crate::render::{
-    prepare_density, render_half_blocks, render_starfield, PreparedDensity, RenderProfile,
+    prepare_density, render_ascii, render_half_blocks, render_shades, render_starfield,
+    EffectiveRenderer, PreparedDensity, RenderProfile,
 };
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal, TerminalDimensions};
@@ -64,25 +65,26 @@ impl App {
             colors_enabled,
         };
 
-        // Determina o modelo de arte
-        let engine_model = match self.args.model {
-            ArtModel::Random => EngineModel::Random,
-            ArtModel::Elliptical => EngineModel::Elliptical,
-            ArtModel::Spiral => EngineModel::Spiral,
-            ArtModel::Cluster => EngineModel::Cluster,
-            ArtModel::Starfield => EngineModel::Starfield,
-        };
-
         // Detect terminal capabilities
         let terminal_dims = self.terminal.dimensions();
 
         // Branch by output mode
         if self.args.info_only {
             self.execute_info_only(&terminal)
-        } else if self.args.logo_only {
-            self.execute_logo_only(&terminal, colors_enabled, engine_model, terminal_dims)
         } else {
-            self.execute_combined(&terminal, colors_enabled, engine_model, terminal_dims)
+            let engine_model = match self.args.model {
+                ArtModel::Random => EngineModel::Random,
+                ArtModel::Elliptical => EngineModel::Elliptical,
+                ArtModel::Spiral => EngineModel::Spiral,
+                ArtModel::Cluster => EngineModel::Cluster,
+                ArtModel::Starfield => EngineModel::Starfield,
+            };
+
+            if self.args.logo_only {
+                self.execute_logo_only(&terminal, colors_enabled, engine_model, terminal_dims)
+            } else {
+                self.execute_combined(&terminal, colors_enabled, engine_model, terminal_dims)
+            }
         }
     }
 
@@ -124,15 +126,19 @@ impl App {
         };
 
         let GeneratedScene {
-            resolved_model,
+            resolved_model: engine_resolved,
             density,
             ..
         } = engine_model.generate_scene(art_width, art_height, self.args.seed);
 
-        let profile: RenderProfile = RenderProfile::for_model(resolved_model);
+        let effective_renderer =
+            Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
+
+        let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
-        let art_lines = Self::render_art_lines(prepared, colors_enabled, terminal);
+        let art_lines =
+            Self::render_prepared_density(prepared, effective_renderer, colors_enabled, terminal)?;
 
         terminal.print_lines(&art_lines)?;
         Ok(())
@@ -176,15 +182,19 @@ impl App {
         };
 
         let GeneratedScene {
-            resolved_model,
+            resolved_model: engine_resolved,
             density,
             ..
         } = engine_model.generate_scene(art_width, art_height, self.args.seed);
 
-        let profile: RenderProfile = RenderProfile::for_model(resolved_model);
+        let effective_renderer =
+            Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
+
+        let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
-        let art_lines = Self::render_art_lines(prepared, colors_enabled, terminal);
+        let art_lines =
+            Self::render_prepared_density(prepared, effective_renderer, colors_enabled, terminal)?;
 
         match display_plan {
             crate::display_plan::DisplayPlan::Combined { art, layout } => {
@@ -197,28 +207,102 @@ impl App {
         Ok(())
     }
 
-    /// Renderiza a arte usando o renderer adequado para cada modelo.
+    /// Resolves the effective renderer based on the requested renderer choice and resolved model.
     ///
-    /// Usa o PreparedDensity para selecionar o renderer correto,
-    /// garantindo que tanto Starfield explícito quanto Random que resolve
-    /// para Starfield usem o renderer de campo de estrelas.
-    fn render_art_lines(
+    /// Implements the compatibility matrix:
+    /// - Galaxy models (Spiral, Elliptical, Cluster) with Auto → HalfBlock
+    /// - Galaxy models with HalfBlock → HalfBlock
+    /// - Galaxy models with Shade → Shade
+    /// - Galaxy models with Ascii → Ascii
+    /// - Starfield with Auto → Starfield
+    /// - Starfield with Ascii → Starfield
+    /// - Starfield with HalfBlock → CLI error
+    /// - Starfield with Shade → CLI error
+    /// - Random model (unresolved) → Render error (should never happen)
+    fn resolve_effective_renderer(
+        requested: RendererChoice,
+        resolved_model: EngineModel,
+    ) -> Result<EffectiveRenderer, AppError> {
+        match (resolved_model, requested) {
+            // Galaxy models
+            (EngineModel::Spiral, RendererChoice::Auto) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Spiral, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Spiral, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
+            (EngineModel::Spiral, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Elliptical, RendererChoice::Auto) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Elliptical, RendererChoice::HalfBlock) => {
+                Ok(EffectiveRenderer::HalfBlock)
+            }
+            (EngineModel::Elliptical, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
+            (EngineModel::Elliptical, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Cluster, RendererChoice::Auto) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Cluster, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Cluster, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
+            (EngineModel::Cluster, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+
+            // Starfield model
+            (EngineModel::Starfield, RendererChoice::Auto) => Ok(EffectiveRenderer::Starfield),
+            (EngineModel::Starfield, RendererChoice::HalfBlock) => Err(AppError::Cli(
+                "model starfield is incompatible with --renderer half-block".to_string(),
+            )),
+            (EngineModel::Starfield, RendererChoice::Shade) => Err(AppError::Cli(
+                "model starfield is incompatible with --renderer shade".to_string(),
+            )),
+            (EngineModel::Starfield, RendererChoice::Ascii) => Ok(EffectiveRenderer::Starfield),
+
+            // Random model should be resolved before this function is called
+            (EngineModel::Random, _) => Err(AppError::Render(
+                "unresolved Random model reached renderer selection (internal error)".to_string(),
+            )),
+        }
+    }
+
+    /// Renders prepared density using the effective renderer.
+    ///
+    /// Validates that the prepared density and effective renderer are compatible.
+    fn render_prepared_density(
         prepared: PreparedDensity,
+        effective_renderer: EffectiveRenderer,
         colors_enabled: bool,
         terminal: &Terminal,
-    ) -> Vec<String> {
-        match prepared {
-            PreparedDensity::Starfield { density } => {
+    ) -> Result<Vec<String>, AppError> {
+        match (prepared, effective_renderer) {
+            (PreparedDensity::Starfield { density }, EffectiveRenderer::Starfield) => {
                 let canvas = density.into_rows();
-                render_starfield(&canvas, colors_enabled, terminal)
+                Ok(render_starfield(&canvas, colors_enabled, terminal))
             }
-            PreparedDensity::HalfBlock { density, threshold } => {
+            (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::HalfBlock) => {
                 let canvas = density.into_rows();
-                render_half_blocks(
+                Ok(render_half_blocks(
                     &canvas,
                     threshold,
                     colors_enabled && terminal.colors_enabled(),
-                )
+                ))
+            }
+            (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Shade) => {
+                let canvas = density.into_rows();
+                Ok(render_shades(
+                    &canvas,
+                    threshold,
+                    colors_enabled && terminal.colors_enabled(),
+                ))
+            }
+            (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Ascii) => {
+                let canvas = density.into_rows();
+                Ok(render_ascii(
+                    &canvas,
+                    threshold,
+                    colors_enabled && terminal.colors_enabled(),
+                ))
+            }
+            // Internal mismatch - should never happen if resolve_effective_renderer is correct
+            (PreparedDensity::Starfield { .. }, _) => Err(AppError::Render(
+                "Starfield density cannot be rendered with galaxy renderers".to_string(),
+            )),
+            (PreparedDensity::Galaxy { .. }, EffectiveRenderer::Starfield) => {
+                Err(AppError::Render(
+                    "Galaxy density cannot be rendered with starfield renderer".to_string(),
+                ))
             }
         }
     }
@@ -302,9 +386,12 @@ fn format_info_line(line: &InfoLine, label_width: usize, colors_enabled: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{ArtModel, LayoutChoice};
+    use crate::cli::{ArtModel, LayoutChoice, RendererChoice};
+    use crate::engine::ArtModel as EngineModel;
     use crate::terminal::Terminal;
     use std::collections::BTreeMap;
+
+    use crate::density::DensityMap;
 
     fn build_test_app(compact: bool, no_color: bool, colors_enabled: bool) -> App {
         App {
@@ -320,6 +407,7 @@ mod tests {
                 compact,
                 disk_details: false,
                 layout: LayoutChoice::Auto,
+                renderer: RendererChoice::Auto,
             },
             terminal: Terminal {
                 is_tty: colors_enabled,
@@ -533,5 +621,211 @@ mod tests {
         let result = crate::layout::compose_side_by_side(&art, &info, 6, 2);
 
         assert!(result[0].starts_with("**      \x1b[93mastro@station\x1b[0m"));
+    }
+
+    // ===== resolve_effective_renderer tests =====
+
+    #[test]
+    fn test_resolve_effective_renderer_galaxy_auto_halfblock() {
+        for model in [
+            EngineModel::Spiral,
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::Auto, model);
+            assert_eq!(result.unwrap(), EffectiveRenderer::HalfBlock);
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_galaxy_halfblock() {
+        for model in [
+            EngineModel::Spiral,
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::HalfBlock, model);
+            assert_eq!(result.unwrap(), EffectiveRenderer::HalfBlock);
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_galaxy_shade() {
+        for model in [
+            EngineModel::Spiral,
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::Shade, model);
+            assert_eq!(result.unwrap(), EffectiveRenderer::Shade);
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_galaxy_ascii() {
+        for model in [
+            EngineModel::Spiral,
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::Ascii, model);
+            assert_eq!(result.unwrap(), EffectiveRenderer::Ascii);
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_starfield_auto_starfield() {
+        let result = App::resolve_effective_renderer(RendererChoice::Auto, EngineModel::Starfield);
+        assert_eq!(result.unwrap(), EffectiveRenderer::Starfield);
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_starfield_halfblock_error() {
+        let result =
+            App::resolve_effective_renderer(RendererChoice::HalfBlock, EngineModel::Starfield);
+        assert!(matches!(result, Err(AppError::Cli(_))));
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_starfield_shade_error() {
+        let result = App::resolve_effective_renderer(RendererChoice::Shade, EngineModel::Starfield);
+        assert!(matches!(result, Err(AppError::Cli(_))));
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_starfield_ascii_starfield() {
+        let result = App::resolve_effective_renderer(RendererChoice::Ascii, EngineModel::Starfield);
+        assert_eq!(result.unwrap(), EffectiveRenderer::Starfield);
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_random_error() {
+        let result = App::resolve_effective_renderer(RendererChoice::Auto, EngineModel::Random);
+        assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_incompatible_errors_contain_model_and_renderer() {
+        let result1 =
+            App::resolve_effective_renderer(RendererChoice::HalfBlock, EngineModel::Starfield);
+        match result1 {
+            Err(AppError::Cli(ref message)) => {
+                assert!(message.contains("starfield"));
+                assert!(message.contains("half-block"));
+            }
+            other => panic!("expected CLI error, got {other:?}"),
+        }
+
+        let result2 =
+            App::resolve_effective_renderer(RendererChoice::Shade, EngineModel::Starfield);
+        match result2 {
+            Err(AppError::Cli(ref message)) => {
+                assert!(message.contains("starfield"));
+                assert!(message.contains("shade"));
+            }
+            other => panic!("expected CLI error, got {other:?}"),
+        }
+    }
+
+    // ===== render_prepared_density tests =====
+
+    #[test]
+    fn test_render_prepared_density_galaxy_halfblock_succeeds() {
+        let canvas = vec![vec![0.5], vec![0.5]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::HalfBlock, false, &terminal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_prepared_density_galaxy_shade_succeeds() {
+        let canvas = vec![vec![0.5], vec![0.5]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Shade, false, &terminal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_prepared_density_galaxy_ascii_succeeds() {
+        let canvas = vec![vec![0.5], vec![0.5]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Ascii, false, &terminal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_prepared_density_starfield_starfield_succeeds() {
+        let canvas = vec![vec![0.0, 0.04, 0.10, 0.20]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Starfield, false, &terminal);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_render_prepared_density_starfield_halfblock_error() {
+        let canvas = vec![vec![0.5]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::HalfBlock, false, &terminal);
+        assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    #[test]
+    fn test_render_prepared_density_starfield_shade_error() {
+        let canvas = vec![vec![0.5]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Shade, false, &terminal);
+        assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    #[test]
+    fn test_render_prepared_density_galaxy_starfield_error() {
+        let canvas = vec![vec![0.5], vec![0.5]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Starfield, false, &terminal);
+        assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    #[test]
+    fn test_render_prepared_density_starfield_ascii_error() {
+        let canvas = vec![vec![0.0, 0.04, 0.10, 0.20]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let result =
+            App::render_prepared_density(prepared, EffectiveRenderer::Ascii, false, &terminal);
+        assert!(matches!(result, Err(AppError::Render(_))));
     }
 }
