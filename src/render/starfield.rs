@@ -1,5 +1,5 @@
 use super::{
-    color::RESET,
+    color::{starfield_foreground_ansi, ColorPalette, RESET},
     hash::{hash_cell, hash_to_unit},
 };
 use crate::terminal::Terminal;
@@ -8,6 +8,7 @@ pub fn render_starfield(
     canvas: &[Vec<f64>],
     colors_enabled: bool,
     terminal: &Terminal,
+    palette: ColorPalette,
 ) -> Vec<String> {
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -27,7 +28,8 @@ pub fn render_starfield(
             let ch = starfield_glyph(value);
 
             if colors_enabled && terminal.colors_enabled() && ch != ' ' {
-                let color = starfield_to_ansi(value, x, y / 2);
+                let hue = hash_to_unit(hash_cell(x, y / 2, 0x51a7_f17e_d00d_cafe));
+                let color = starfield_foreground_ansi(palette, value, hue);
                 line.push_str(color);
                 line.push(ch);
                 line.push_str(RESET);
@@ -40,26 +42,6 @@ pub fn render_starfield(
     }
 
     lines
-}
-
-fn starfield_to_ansi(value: f64, x: usize, y: usize) -> &'static str {
-    let hue = hash_to_unit(hash_cell(x, y, 0x51a7_f17e_d00d_cafe));
-
-    if value < 0.085 {
-        "\x1b[2;37m" // faint gray
-    } else if value < 0.150 {
-        if hue < 0.50 {
-            "\x1b[38;5;67m" // muted pale blue
-        } else {
-            "\x1b[38;5;109m" // muted pale cyan
-        }
-    } else if hue < 0.58 {
-        "\x1b[38;5;250m" // soft white
-    } else if hue < 0.84 {
-        "\x1b[38;5;180m" // soft warm star
-    } else {
-        "\x1b[38;5;167m" // rare muted red star
-    }
 }
 
 fn starfield_glyph(value: f64) -> char {

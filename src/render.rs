@@ -7,11 +7,12 @@ mod starfield;
 mod stretch;
 
 pub use ascii::render_ascii;
+pub use color::ColorPalette;
 pub use profile::{prepare_density, PreparedDensity, RenderProfile};
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
-use color::{intensity_to_ansi, intensity_to_background_ansi, RESET};
+use color::{galaxy_background_ansi, galaxy_foreground_ansi, RESET};
 use hash::{hash_cell, hash_to_unit};
 
 /// Renderer effectively used after model and renderer choice resolution.
@@ -47,6 +48,7 @@ pub fn render_half_blocks(
     canvas: &[Vec<f64>],
     threshold: f64,
     colors_enabled: bool,
+    palette: ColorPalette,
 ) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
 
@@ -88,18 +90,18 @@ pub fn render_half_blocks(
                 // with the ▀ glyph to preserve both samples independently
                 if top_visible && bottom_visible {
                     // Both visible: foreground for top, background for bottom, ▀ glyph
-                    line.push_str(intensity_to_ansi(top));
-                    line.push_str(intensity_to_background_ansi(bottom));
+                    line.push_str(galaxy_foreground_ansi(palette, top));
+                    line.push_str(galaxy_background_ansi(palette, bottom));
                     line.push('▀');
                     line.push_str(RESET);
                 } else if top_visible {
                     // Top only: foreground for top, ▀ glyph
-                    line.push_str(intensity_to_ansi(top));
+                    line.push_str(galaxy_foreground_ansi(palette, top));
                     line.push('▀');
                     line.push_str(RESET);
                 } else {
                     // Bottom only: foreground for bottom, ▄ glyph
-                    line.push_str(intensity_to_ansi(bottom));
+                    line.push_str(galaxy_foreground_ansi(palette, bottom));
                     line.push('▄');
                     line.push_str(RESET);
                 }
@@ -211,6 +213,9 @@ pub(super) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
 mod tests {
     use super::*;
 
+    // Constant for default palette (Nebula) in tests
+    const DEFAULT_PALETTE: ColorPalette = ColorPalette::Nebula;
+
     #[test]
     fn test_deterministic_render() {
         let model = crate::engine::ArtModel::Starfield;
@@ -230,7 +235,7 @@ mod tests {
             vec![0.0, 0.0, 0.0, 0.0],
         ];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec![" .*+", " .++"]);
     }
@@ -240,7 +245,7 @@ mod tests {
         let terminal = crate::terminal::Terminal::with_colors(true, false);
         let canvas = vec![vec![0.20]];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec!["+"]);
         assert!(!result[0].contains('\x1b'));
@@ -251,7 +256,7 @@ mod tests {
         let terminal = crate::terminal::Terminal::with_colors(true, true);
         let canvas = vec![vec![0.20]];
 
-        let result = render_starfield(&canvas, true, &terminal);
+        let result = render_starfield(&canvas, true, &terminal, ColorPalette::Nebula);
 
         assert!(result[0].contains('\x1b'));
         assert!(result[0].contains('+'));
@@ -262,7 +267,7 @@ mod tests {
         let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
 
         // Use a low threshold so all cells are visible
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
 
         // Cell 0: top=1.0 (visible), bottom=0.0 (not visible) → '▀'
         // Cell 1: top=0.0 (not visible), bottom=1.0 (visible) → '▄'
@@ -276,7 +281,7 @@ mod tests {
         let canvas = vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 0.0]];
 
         // With any threshold, zero-density cells should render as spaces
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
 
         // Each terminal row should contain only spaces (no galaxy glyphs)
         assert_eq!(result.len(), 1);
@@ -289,7 +294,7 @@ mod tests {
     fn test_half_blocks_top_only() {
         // Top visible, bottom invisible → '▀'
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▀"]);
     }
 
@@ -297,7 +302,7 @@ mod tests {
     fn test_half_blocks_bottom_only() {
         // Top invisible, bottom visible → '▄'
         let canvas = vec![vec![0.0], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▄"]);
     }
 
@@ -305,7 +310,7 @@ mod tests {
     fn test_half_blocks_both_visible() {
         // Both visible → '█'
         let canvas = vec![vec![0.5], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["█"]);
     }
 
@@ -313,7 +318,7 @@ mod tests {
     fn test_half_blocks_neither_visible() {
         // Neither visible → ' '
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -321,7 +326,7 @@ mod tests {
     fn test_half_blocks_zero_values_are_invisible() {
         // Zero values should be invisible regardless of threshold
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -329,7 +334,7 @@ mod tests {
     fn test_half_blocks_negative_values_are_invisible() {
         // Negative values should be invisible
         let canvas = vec![vec![-0.5], vec![-0.5]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -337,7 +342,7 @@ mod tests {
     fn test_half_blocks_non_finite_values_are_invisible() {
         // Non-finite values should be invisible
         let canvas = vec![vec![f64::NAN], vec![f64::INFINITY]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -346,7 +351,7 @@ mod tests {
         // Test with odd number of rows (last row has no bottom)
         // 3 rows → ceil(3/2) = 2 terminal rows
         let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.5], vec![0.5, 0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         // Terminal row 0 (canvas rows 0-1):
         //   Cell 0: top=0.5 (visible), bottom=0.0 (not visible) → '▀'
         //   Cell 1: top=0.0 (not visible), bottom=0.5 (visible) → '▄'
@@ -364,7 +369,7 @@ mod tests {
     fn test_half_blocks_preserve_terminal_width() {
         // Width should be preserved
         let canvas = vec![vec![0.5, 0.0, 0.5, 0.0], vec![0.0, 0.5, 0.0, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         // 2 rows → 1 terminal row with 4 characters
         // Note: Unicode half-block characters are 3 bytes each in UTF-8
         assert_eq!(result.len(), 1);
@@ -377,7 +382,7 @@ mod tests {
     fn test_half_blocks_no_color_is_ansi_free() {
         // No-color mode should not contain ANSI sequences
         let canvas = vec![vec![0.5], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert!(!result[0].contains('\x1b'));
         assert_eq!(result, vec!["█"]);
     }
@@ -386,8 +391,8 @@ mod tests {
     fn test_half_blocks_deterministic() {
         // Same input should produce same output
         let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.5]];
-        let result1 = render_half_blocks(&canvas, 0.1, false);
-        let result2 = render_half_blocks(&canvas, 0.1, false);
+        let result1 = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
+        let result2 = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result1, result2);
     }
 
@@ -397,7 +402,7 @@ mod tests {
     fn test_half_blocks_colored_top_only() {
         // Top only: foreground sequence + ▀ + reset
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Top intensity 0.5 maps to index 65 (muted green) with sequence \x1b[38;5;65m
@@ -409,7 +414,7 @@ mod tests {
     fn test_half_blocks_colored_bottom_only() {
         // Bottom only: foreground sequence + ▄ + reset
         let canvas = vec![vec![0.0], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Bottom intensity 0.5 maps to index 65 (muted green) with sequence \x1b[38;5;65m
@@ -424,7 +429,7 @@ mod tests {
         // top = 0.50 -> index 65 (muted green) -> \x1b[38;5;65m
         // bottom = 0.80 -> index 130 (muted orange/red) -> \x1b[48;5;130m
         let canvas = vec![vec![0.50], vec![0.80]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Expected: \x1b[38;5;65m\x1b[48;5;130m▀\x1b[0m
@@ -436,7 +441,7 @@ mod tests {
     fn test_half_blocks_colored_ends_with_reset() {
         // Every visible cell should end with reset
         let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         for line in &result {
             assert!(
@@ -456,7 +461,7 @@ mod tests {
         // Cell 2: both visible (fg + bg) + reset
         // The key is that RESET occurs immediately after each colored glyph
         let canvas = vec![vec![0.5, 0.0, 0.5], vec![0.0, 0.5, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Cell 0: top visible -> \x1b[38;5;65m + ▀ + \x1b[0m
@@ -472,7 +477,7 @@ mod tests {
     fn test_half_blocks_background_star_never_overwrites_visible() {
         // Background stars should never overwrite visible galaxy halves
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
 
         // Top is visible, so no star should appear
         assert_eq!(result, vec!["▀"]);
@@ -546,8 +551,8 @@ mod tests {
     fn test_half_blocks_deterministic_star_repeated_calls() {
         // Repeated calls with same canvas should produce same star result
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result1 = render_half_blocks(&canvas, 0.5, false);
-        let result2 = render_half_blocks(&canvas, 0.5, false);
+        let result1 = render_half_blocks(&canvas, 0.5, false, DEFAULT_PALETTE);
+        let result2 = render_half_blocks(&canvas, 0.5, false, DEFAULT_PALETTE);
         assert_eq!(result1, result2, "Star field should be deterministic");
     }
 
@@ -556,7 +561,7 @@ mod tests {
         // A visible galaxy half should prevent star replacement
         // Top visible (0.5 > 0.1 threshold), so no star should appear
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▀"]);
     }
 
@@ -571,7 +576,7 @@ mod tests {
             vec![0.0, 0.0, 0.0, 0.0],
         ];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec![" .*+", " .++"]);
     }

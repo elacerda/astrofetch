@@ -5,7 +5,7 @@ use crate::error::AppError;
 use crate::layout::compose_layout;
 use crate::render::{
     prepare_density, render_ascii, render_half_blocks, render_shades, render_starfield,
-    EffectiveRenderer, PreparedDensity, RenderProfile,
+    ColorPalette, EffectiveRenderer, PreparedDensity, RenderProfile,
 };
 use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
 use crate::terminal::{visible_width, Terminal, TerminalDimensions};
@@ -137,8 +137,13 @@ impl App {
         let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
-        let art_lines =
-            Self::render_prepared_density(prepared, effective_renderer, colors_enabled, terminal)?;
+        let art_lines = Self::render_prepared_density(
+            prepared,
+            effective_renderer,
+            colors_enabled,
+            terminal,
+            ColorPalette::Nebula,
+        )?;
 
         terminal.print_lines(&art_lines)?;
         Ok(())
@@ -193,8 +198,13 @@ impl App {
         let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
-        let art_lines =
-            Self::render_prepared_density(prepared, effective_renderer, colors_enabled, terminal)?;
+        let art_lines = Self::render_prepared_density(
+            prepared,
+            effective_renderer,
+            colors_enabled,
+            terminal,
+            ColorPalette::Nebula,
+        )?;
 
         match display_plan {
             crate::display_plan::DisplayPlan::Combined { art, layout } => {
@@ -265,11 +275,12 @@ impl App {
         effective_renderer: EffectiveRenderer,
         colors_enabled: bool,
         terminal: &Terminal,
+        palette: ColorPalette,
     ) -> Result<Vec<String>, AppError> {
         match (prepared, effective_renderer) {
             (PreparedDensity::Starfield { density }, EffectiveRenderer::Starfield) => {
                 let canvas = density.into_rows();
-                Ok(render_starfield(&canvas, colors_enabled, terminal))
+                Ok(render_starfield(&canvas, colors_enabled, terminal, palette))
             }
             (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::HalfBlock) => {
                 let canvas = density.into_rows();
@@ -277,6 +288,7 @@ impl App {
                     &canvas,
                     threshold,
                     colors_enabled && terminal.colors_enabled(),
+                    palette,
                 ))
             }
             (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Shade) => {
@@ -285,6 +297,7 @@ impl App {
                     &canvas,
                     threshold,
                     colors_enabled && terminal.colors_enabled(),
+                    palette,
                 ))
             }
             (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Ascii) => {
@@ -293,6 +306,7 @@ impl App {
                     &canvas,
                     threshold,
                     colors_enabled && terminal.colors_enabled(),
+                    palette,
                 ))
             }
             // Internal mismatch - should never happen if resolve_effective_renderer is correct
@@ -737,8 +751,13 @@ mod tests {
             threshold: 0.1,
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::HalfBlock, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::HalfBlock,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(result.is_ok());
     }
 
@@ -750,8 +769,13 @@ mod tests {
             threshold: 0.1,
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Shade, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Shade,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(result.is_ok());
     }
 
@@ -763,8 +787,13 @@ mod tests {
             threshold: 0.1,
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Ascii, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Ascii,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(result.is_ok());
     }
 
@@ -775,8 +804,13 @@ mod tests {
             density: DensityMap::from_rows(canvas).unwrap(),
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Starfield, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Starfield,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(result.is_ok());
     }
 
@@ -787,8 +821,13 @@ mod tests {
             density: DensityMap::from_rows(canvas).unwrap(),
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::HalfBlock, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::HalfBlock,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(matches!(result, Err(AppError::Render(_))));
     }
 
@@ -799,8 +838,13 @@ mod tests {
             density: DensityMap::from_rows(canvas).unwrap(),
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Shade, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Shade,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(matches!(result, Err(AppError::Render(_))));
     }
 
@@ -812,8 +856,13 @@ mod tests {
             threshold: 0.1,
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Starfield, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Starfield,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(matches!(result, Err(AppError::Render(_))));
     }
 
@@ -824,8 +873,13 @@ mod tests {
             density: DensityMap::from_rows(canvas).unwrap(),
         };
         let terminal = crate::terminal::Terminal::with_colors(true, false);
-        let result =
-            App::render_prepared_density(prepared, EffectiveRenderer::Ascii, false, &terminal);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Ascii,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
         assert!(matches!(result, Err(AppError::Render(_))));
     }
 }

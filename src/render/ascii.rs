@@ -1,4 +1,4 @@
-use super::color::{intensity_to_ansi, RESET};
+use super::color::{galaxy_foreground_ansi, ColorPalette, RESET};
 use super::{scale_visible, star_field_seed, star_glyph_for_cell};
 
 /// ASCII glyphs ordered from lowest to highest intensity.
@@ -14,7 +14,12 @@ const ASCII_GLYPHS: &[char] = &['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 /// top density row    -> upper half ( contributes to cell value )
 /// bottom density row -> lower half ( contributes to cell value )
 /// ```
-pub fn render_ascii(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -> Vec<String> {
+pub fn render_ascii(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
@@ -44,7 +49,7 @@ pub fn render_ascii(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -
                 if colors_enabled {
                     // Color mode: use the original maximum value for color mapping
                     // and append RESET after the glyph
-                    let color = intensity_to_ansi(value);
+                    let color = galaxy_foreground_ansi(palette, value);
                     line.push_str(color);
                     line.push(ch);
                     line.push_str(RESET);
@@ -93,7 +98,7 @@ mod tests {
     #[test]
     fn test_empty_canvas() {
         let canvas: Vec<Vec<f64>> = vec![];
-        let result: Vec<String> = render_ascii(&canvas, 0.1, false);
+        let result: Vec<String> = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         let expected: Vec<String> = vec![];
         assert_eq!(result, expected);
     }
@@ -101,7 +106,7 @@ mod tests {
     #[test]
     fn test_two_rows_become_one_line() {
         let canvas = vec![vec![0.5], vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         // value 0.5, threshold 0.1:
         // scaled = (0.5-0.1)/(1-0.1) = 0.444...
         // idx = floor(0.444... * 8) = 3
@@ -116,7 +121,7 @@ mod tests {
         // All values are 0.5, threshold is 0.1
         // scaled = (0.5-0.1)/(1-0.1) = 0.444..., idx = 3, glyph = '='
         let canvas = vec![vec![0.5], vec![0.5], vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], "=");
         assert_eq!(result[1], "=");
@@ -126,7 +131,7 @@ mod tests {
     fn test_one_row() {
         // value 0.5, threshold 0.1: scaled = 0.444..., idx = 3, glyph = '='
         let canvas = vec![vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "=");
     }
@@ -137,7 +142,7 @@ mod tests {
         // Row 0: max(0.1, 0.2) = 0.2, scaled = (0.2-0.1)/0.9 = 0.111..., idx = 0.888..., glyph = '.'
         // Row 1: 0.3, scaled = (0.3-0.1)/0.9 = 0.222..., idx = 1.777..., glyph = ':'
         let canvas = vec![vec![0.1], vec![0.2], vec![0.3]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], ".");
         assert_eq!(result[1], ":");
@@ -146,7 +151,7 @@ mod tests {
     #[test]
     fn test_one_by_one() {
         let canvas = vec![vec![1.0]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec!["@"]);
     }
 
@@ -155,13 +160,13 @@ mod tests {
         // First row shorter than second
         // value 0.5 with threshold 0.1 gives '='
         let canvas = vec![vec![0.5], vec![0.5, 0.5, 0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "===");
 
         // Second row shorter than first
         let canvas = vec![vec![0.5, 0.5, 0.5], vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], "===");
     }
@@ -169,7 +174,7 @@ mod tests {
     #[test]
     fn test_below_threshold_invisible() {
         let canvas = vec![vec![0.05]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         // Below threshold - should be space (no star at x=0, y=0 with threshold 0.1)
         assert_eq!(result, vec![" "]);
     }
@@ -177,7 +182,7 @@ mod tests {
     #[test]
     fn test_exactly_threshold_visible_as_dot() {
         let canvas = vec![vec![0.1]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         // Exactly at threshold - should be visible as '.'
         assert_eq!(result, vec!["."]);
     }
@@ -185,7 +190,7 @@ mod tests {
     #[test]
     fn test_maximum_visible_as_at() {
         let canvas = vec![vec![1.0]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec!["@"]);
     }
 
@@ -205,7 +210,7 @@ mod tests {
             vec![0.9], // row 8
             vec![1.0], // row 9
         ];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
 
         // With threshold 0.1, paired values (max) produce:
         // result[0]: max(0.1, 0.2) = 0.2, scaled = 0.111..., idx = 0.888... -> '.'
@@ -224,35 +229,35 @@ mod tests {
     #[test]
     fn test_nan_invisible() {
         let canvas = vec![vec![f64::NAN]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec![" "]);
     }
 
     #[test]
     fn test_infinity_invisible() {
         let canvas = vec![vec![f64::INFINITY]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec![" "]);
     }
 
     #[test]
     fn test_negative_invisible() {
         let canvas = vec![vec![-0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec![" "]);
     }
 
     #[test]
     fn test_zero_invisible() {
         let canvas = vec![vec![0.0]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result, vec![" "]);
     }
 
     #[test]
     fn test_no_color_output_only_ascii() {
         let canvas = vec![vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         // Should only contain ASCII bytes
         assert!(result[0].is_ascii());
         // Should be '=' for value 0.5 (scaled = 0.444..., idx = 3)
@@ -262,7 +267,7 @@ mod tests {
     #[test]
     fn test_no_color_no_ansi() {
         let canvas = vec![vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert!(!result[0].contains('\x1b'));
         assert_eq!(result[0], "=");
     }
@@ -270,7 +275,7 @@ mod tests {
     #[test]
     fn test_colored_contains_ansi() {
         let canvas = vec![vec![0.5]];
-        let result = render_ascii(&canvas, 0.1, true);
+        let result = render_ascii(&canvas, 0.1, true, ColorPalette::Nebula);
         // Should contain ANSI escape sequence and end with RESET
         assert!(result[0].contains('\x1b'));
         // The glyph for 0.5 is '=' (not '+')
@@ -281,8 +286,8 @@ mod tests {
     #[test]
     fn test_deterministic_output() {
         let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.5]];
-        let result1 = render_ascii(&canvas, 0.1, false);
-        let result2 = render_ascii(&canvas, 0.1, false);
+        let result1 = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
+        let result2 = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result1, result2);
     }
 
@@ -290,7 +295,7 @@ mod tests {
     fn test_background_stars_do_not_overwrite_visible_cells() {
         // A visible cell should never be replaced by a star
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         // The top is visible (0.5 >= 0.1), so no star should appear
         // value 0.5 with threshold 0.1 gives '=' (not '+')
         assert_eq!(result, vec!["="]);
@@ -300,7 +305,7 @@ mod tests {
     fn test_expected_output_dimensions() {
         // 10 rows -> 5 terminal rows
         let canvas = vec![vec![0.5; 20]; 10];
-        let result = render_ascii(&canvas, 0.1, false);
+        let result = render_ascii(&canvas, 0.1, false, ColorPalette::Nebula);
         assert_eq!(result.len(), 5);
         for line in &result {
             assert_eq!(line.len(), 20);
@@ -387,7 +392,7 @@ mod tests {
     fn test_empty_background_uses_only_star_or_space_glyphs() {
         // Create a mostly-empty canvas to test star injection
         let canvas = vec![vec![0.0; 10]; 2];
-        let result = render_ascii(&canvas, 0.5, false);
+        let result = render_ascii(&canvas, 0.5, false, ColorPalette::Nebula);
 
         assert_eq!(result.len(), 1);
         // With no visible galaxy, stars should appear occasionally
