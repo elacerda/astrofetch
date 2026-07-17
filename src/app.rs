@@ -11,10 +11,29 @@ use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnaps
 use crate::terminal::{visible_width, Terminal, TerminalDimensions};
 use clap::Parser;
 
+use crate::cli::PaletteChoice;
+
 const HEADER_COLOR: &str = "\x1b[93m";
 const LABEL_COLOR: &str = "\x1b[94m";
 const VALUE_COLOR: &str = "\x1b[97m";
 const RESET: &str = "\x1b[0m";
+
+/// Resolve the effective color palette from the CLI palette choice.
+///
+/// The resolution matrix is infallible:
+/// - Auto -> Nebula
+/// - Nebula -> Nebula
+/// - Cividis -> Cividis
+/// - Amber -> Amber
+/// - Mono -> Mono
+pub(super) fn resolve_color_palette(requested: PaletteChoice) -> ColorPalette {
+    match requested {
+        PaletteChoice::Auto | PaletteChoice::Nebula => ColorPalette::Nebula,
+        PaletteChoice::Cividis => ColorPalette::Cividis,
+        PaletteChoice::Amber => ColorPalette::Amber,
+        PaletteChoice::Mono => ColorPalette::Mono,
+    }
+}
 
 #[derive(Debug)]
 struct InfoLine {
@@ -137,12 +156,14 @@ impl App {
         let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
+        let effective_palette = resolve_color_palette(self.args.palette);
+
         let art_lines = Self::render_prepared_density(
             prepared,
             effective_renderer,
             colors_enabled,
             terminal,
-            ColorPalette::Nebula,
+            effective_palette,
         )?;
 
         terminal.print_lines(&art_lines)?;
@@ -198,12 +219,14 @@ impl App {
         let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
         let prepared = prepare_density(density, profile);
 
+        let effective_palette = resolve_color_palette(self.args.palette);
+
         let art_lines = Self::render_prepared_density(
             prepared,
             effective_renderer,
             colors_enabled,
             terminal,
-            ColorPalette::Nebula,
+            effective_palette,
         )?;
 
         match display_plan {
@@ -422,6 +445,7 @@ mod tests {
                 disk_details: false,
                 layout: LayoutChoice::Auto,
                 renderer: RendererChoice::Auto,
+                palette: crate::cli::PaletteChoice::Auto,
             },
             terminal: Terminal {
                 is_tty: colors_enabled,
@@ -744,6 +768,65 @@ mod tests {
     // ===== render_prepared_density tests =====
 
     #[test]
+    fn test_render_prepared_density_accepts_all_effective_palettes_galaxy() {
+        let canvas = vec![vec![0.5]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+
+        for palette in [
+            ColorPalette::Nebula,
+            ColorPalette::Cividis,
+            ColorPalette::Amber,
+            ColorPalette::Mono,
+        ] {
+            let result = App::render_prepared_density(
+                prepared.clone(),
+                EffectiveRenderer::HalfBlock,
+                false,
+                &terminal,
+                palette,
+            );
+            assert!(
+                result.is_ok(),
+                "render_prepared_density should accept palette {:?}",
+                palette
+            );
+        }
+    }
+
+    #[test]
+    fn test_render_prepared_density_accepts_all_effective_palettes_starfield() {
+        let canvas = vec![vec![0.20]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+
+        for palette in [
+            ColorPalette::Nebula,
+            ColorPalette::Cividis,
+            ColorPalette::Amber,
+            ColorPalette::Mono,
+        ] {
+            let result = App::render_prepared_density(
+                prepared.clone(),
+                EffectiveRenderer::Starfield,
+                false,
+                &terminal,
+                palette,
+            );
+            assert!(
+                result.is_ok(),
+                "render_prepared_density should accept palette {:?}",
+                palette
+            );
+        }
+    }
+
+    #[test]
     fn test_render_prepared_density_galaxy_halfblock_succeeds() {
         let canvas = vec![vec![0.5], vec![0.5]];
         let prepared = PreparedDensity::Galaxy {
@@ -881,5 +964,37 @@ mod tests {
             ColorPalette::Nebula,
         );
         assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    // ===== resolve_color_palette tests =====
+
+    #[test]
+    fn test_resolve_color_palette_auto_to_nebula() {
+        let palette = resolve_color_palette(crate::cli::PaletteChoice::Auto);
+        assert_eq!(palette, ColorPalette::Nebula);
+    }
+
+    #[test]
+    fn test_resolve_color_palette_nebula_to_nebula() {
+        let palette = resolve_color_palette(crate::cli::PaletteChoice::Nebula);
+        assert_eq!(palette, ColorPalette::Nebula);
+    }
+
+    #[test]
+    fn test_resolve_color_palette_cividis_to_cividis() {
+        let palette = resolve_color_palette(crate::cli::PaletteChoice::Cividis);
+        assert_eq!(palette, ColorPalette::Cividis);
+    }
+
+    #[test]
+    fn test_resolve_color_palette_amber_to_amber() {
+        let palette = resolve_color_palette(crate::cli::PaletteChoice::Amber);
+        assert_eq!(palette, ColorPalette::Amber);
+    }
+
+    #[test]
+    fn test_resolve_color_palette_mono_to_mono() {
+        let palette = resolve_color_palette(crate::cli::PaletteChoice::Mono);
+        assert_eq!(palette, ColorPalette::Mono);
     }
 }

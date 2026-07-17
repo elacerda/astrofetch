@@ -121,13 +121,39 @@ Starfield renderer compatibility:
 - Starfield accepts `auto` and `ascii` (both map to the dedicated Starfield renderer).
 - Starfield rejects `half-block` and `shade` (returns a CLI error).
 
+Choose a color palette (affects procedural art only):
+
+```bash
+astrofetch --palette auto      # Default: resolves to nebula
+astrofetch --palette nebula    # The standard AstroFetch color scheme
+astrofetch --palette cividis   # Color-vision-friendly xterm-256 approximation
+astrofetch --palette amber     # Warm monochromatic-style ramp
+astrofetch --palette mono      # xterm-256 grayscale ramp
+```
+
+Palette behavior:
+
+- `auto` (default): Resolves to `nebula` (the original AstroFetch colors).
+- `nebula`: Preserves the current AstroFetch ANSI color sequences byte-for-byte.
+- `cividis`: A color-vision-friendly xterm-256 approximation inspired by the Cividis colormap.
+- `amber`: A warm monochromatic-style ramp using orange-yellow colors.
+- `mono`: Uses xterm-256 grayscale levels for accessibility and portability.
+- `--no-color` takes precedence: regardless of palette choice, no ANSI sequences are emitted when `--no-color` is set.
+
+Palette and renderer:
+
+- Palette controls ANSI color selection.
+- Renderer controls glyph selection (half-block, shade, ASCII, starfield).
+- They work independently and compose together.
+
 Examples:
 
 ```bash
-astrofetch --model spiral --renderer half-block
-astrofetch --model elliptical --renderer shade
-astrofetch --model cluster --renderer ascii
-astrofetch --model starfield --renderer ascii
+astrofetch --model spiral --renderer half-block --palette nebula
+astrofetch --model elliptical --renderer shade --palette cividis
+astrofetch --model cluster --renderer ascii --palette amber
+astrofetch --model starfield --palette mono
+astrofetch --logo-only --model spiral --renderer half-block --palette auto --seed 42
 ```
 
 Specify art dimensions (optional):
