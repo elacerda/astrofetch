@@ -1,3 +1,4 @@
+mod ansi;
 mod ascii;
 mod color;
 mod hash;

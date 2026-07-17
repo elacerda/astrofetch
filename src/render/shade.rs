@@ -1,4 +1,5 @@
-use super::color::{galaxy_foreground_ansi, ColorPalette, RESET};
+use super::ansi::AnsiForegroundLine;
+use super::color::{galaxy_foreground_ansi, ColorPalette};
 use super::{scale_visible, star_field_seed, star_glyph_for_cell};
 
 /// Shade glyphs ordered from lowest to highest intensity.
@@ -24,7 +25,7 @@ pub fn render_shades(
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
     for y in (0..canvas.len()).step_by(2) {
-        let mut line = String::with_capacity(64);
+        let mut line = AnsiForegroundLine::with_capacity(64);
 
         // Determina a largura máxima desta linha terminal (par de linhas de canvas)
         let top_row_width = canvas.get(y).map_or(0, |r| r.len());
@@ -41,34 +42,31 @@ pub fn render_shades(
                 .unwrap_or(0.0);
             let value = top.max(bottom);
 
-            // Verifica se a célula da galáxia évisível
+            // Verifica se a célula da galáxia é visível
             if let Some(scaled) = scale_visible(value, threshold) {
                 let ch = glyph_for_value(scaled);
 
                 if colors_enabled {
                     // Modo colorido: usa o valor original do máximo para mapeamento de cor
-                    // e anexa RESET após o glifo
-                    let color = galaxy_foreground_ansi(palette, value);
-                    line.push_str(color);
-                    line.push(ch);
-                    line.push_str(RESET);
+                    // O builder gerencia agrupamento de estilo e RESET final
+                    line.push_styled(ch, galaxy_foreground_ansi(palette, value));
                 } else {
                     // Modo sem cor: apenas caracteres Shade
-                    line.push(ch);
+                    line.push_plain(ch);
                 }
             } else {
                 // Nenhuma galáxia visível - usa estrela de fundo ou espaço
                 if let Some(star_ch) =
                     star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
                 {
-                    line.push(star_ch);
+                    line.push_plain(star_ch);
                 } else {
-                    line.push(' ');
+                    line.push_plain(' ');
                 }
             }
         }
 
-        lines.push(line);
+        lines.push(line.finish());
     }
 
     lines
@@ -93,6 +91,7 @@ fn glyph_for_value(value: f64) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::color::RESET;
 
     #[test]
     fn test_empty_canvas() {
@@ -414,5 +413,94 @@ mod tests {
                 result.len()
             );
         }
+    }
+
+    // ===== ANSI grouping regression tests =====
+
+    #[test]
+    fn test_same_color_run_uses_single_ansi_sequence() {
+        let threshold = 0.1;
+        let value_a = 0.31;
+        let value_b = 0.43;
+
+        let scaled_a = scale_visible(value_a, threshold).unwrap();
+        let scaled_b = scale_visible(value_b, threshold).unwrap();
+
+        let glyph_a = glyph_for_value(scaled_a);
+        let glyph_b = glyph_for_value(scaled_b);
+
+        assert_ne!(glyph_a, glyph_b);
+
+        let style_a = galaxy_foreground_ansi(ColorPalette::Nebula, value_a);
+        let style_b = galaxy_foreground_ansi(ColorPalette::Nebula, value_b);
+
+        assert_eq!(style_a, style_b);
+
+        let canvas = vec![vec![value_a, value_b, value_a, value_b], vec![0.0; 4]];
+
+        let result = render_shades(&canvas, 0.1, true, ColorPalette::Nebula);
+
+        assert_eq!(
+            result[0],
+            format!("{style_a}{glyph_a}{glyph_b}{glyph_a}{glyph_b}{RESET}")
+        );
+
+        let style_count = result[0].matches(style_a).count();
+        let reset_count = result[0].matches(RESET).count();
+
+        assert_eq!(
+            style_count, 1,
+            "Same-style run should use single style sequence"
+        );
+        assert_eq!(reset_count, 1, "Same-style run should use single reset");
+    }
+
+    #[test]
+    fn test_style_transition_pushes_reset_before_new_style() {
+        let threshold = 0.1;
+        let value_a = 0.15;
+        let value_b = 0.30;
+
+        let scaled_a = scale_visible(value_a, threshold).unwrap();
+        let scaled_b = scale_visible(value_b, threshold).unwrap();
+
+        let glyph_a = glyph_for_value(scaled_a);
+        let glyph_b = glyph_for_value(scaled_b);
+
+        let style_a = galaxy_foreground_ansi(ColorPalette::Nebula, value_a);
+        let style_b = galaxy_foreground_ansi(ColorPalette::Nebula, value_b);
+
+        assert_ne!(style_a, style_b);
+
+        let canvas = vec![vec![value_a, value_b], vec![0.0; 2]];
+
+        let result = render_shades(&canvas, 0.1, true, ColorPalette::Nebula);
+
+        assert_eq!(
+            result[0],
+            format!("{style_a}{glyph_a}{RESET}{style_b}{glyph_b}{RESET}")
+        );
+    }
+
+    #[test]
+    fn test_colored_to_plain_transition() {
+        let threshold = 0.1;
+        let value = 0.5;
+        let glyph = glyph_for_value(scale_visible(value, threshold).unwrap());
+        let style = galaxy_foreground_ansi(ColorPalette::Nebula, value);
+
+        let canvas = vec![vec![value, 0.0], vec![0.0; 2]];
+
+        let result = render_shades(&canvas, 0.1, true, ColorPalette::Nebula);
+
+        assert_eq!(result[0], format!("{}{}{} ", style, glyph, RESET));
+    }
+
+    #[test]
+    fn test_no_color_regression_unchanged() {
+        // No-color mode should produce identical output to original
+        let canvas = vec![vec![0.5, 0.5, 0.5], vec![0.0; 3]];
+        let result = render_shades(&canvas, 0.1, false, ColorPalette::Nebula);
+        assert_eq!(result, vec!["▒▒▒"]);
     }
 }
