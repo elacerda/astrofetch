@@ -2,12 +2,15 @@ mod ascii;
 mod color;
 mod hash;
 mod profile;
+mod shade;
 mod starfield;
 mod stretch;
 
 #[allow(unused_imports)]
 pub use ascii::render_ascii;
 pub use profile::{prepare_density, PreparedDensity, RenderProfile};
+#[allow(unused_imports)]
+pub use shade::render_shades;
 pub use starfield::render_starfield;
 
 use color::{intensity_to_ansi, intensity_to_background_ansi, RESET};
@@ -120,7 +123,6 @@ fn glyph_for_half_block(top_visible: bool, bottom_visible: bool) -> char {
 ///
 /// Returns Some(scaled) for visible values, where scaled is a monotonic
 /// mapping from [threshold, 1.0] to [0.0, 1.0].
-#[allow(dead_code)]
 pub(super) fn scale_visible(value: f64, threshold: f64) -> Option<f64> {
     // Reject non-finite values
     if !value.is_finite() {
