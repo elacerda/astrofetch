@@ -28,7 +28,8 @@ seeded RNG
   -> normalization (exactly once)
   -> contrast stretch (exactly once)
   -> threshold / render policy
-  -> renderer (HalfBlock or Starfield)
+  -> renderer (HalfBlock, Shade, ASCII, or Starfield)
+  -> palette selection
   -> optional ANSI color
 ```
 
@@ -401,6 +402,30 @@ All three galaxy renderers consume the same prepared density and reuse the same 
 When color is enabled and supported by the terminal, AstroFetch maps brightness to ANSI color sequences. Color is disabled when `--no-color` is used, when `NO_COLOR` is set, or when stdout is not a suitable TTY.
 
 The design avoids making the background too colorful because excessive ANSI output can make terminal art noisy or less portable.
+
+### Palette selection
+
+After the renderer is selected, the color palette is resolved. The palette controls the ANSI xterm-256 colors used for each intensity level while preserving the same intensity thresholds:
+
+- **galaxy models**: all effective palettes use the same 7 intensity bands (0.16, 0.30, 0.44, 0.58, 0.72, 0.88), but with different xterm-256 color indices.
+- **starfield model**: all palettes share the same faint, medium, and bright thresholds; the palettes differ only in the ANSI colors selected within those categories.
+
+The shared Starfield thresholds are:
+
+```text
+faint:  value < 0.085
+medium: 0.085 <= value < 0.150
+bright: value >= 0.150
+```
+
+Available palettes:
+- `nebula`: The original AstroFetch color scheme (byte-compatible ANSI sequences).
+- `cividis`: A color-vision-friendly xterm-256 approximation inspired by the Cividis colormap.
+- `amber`: A warm monochromatic-style ramp using orange-yellow gradients.
+- `mono`: An xterm-256 grayscale ramp for accessibility and portability.
+- `auto`: Resolves to `nebula` at runtime (CLI-only choice).
+
+The palette is selected after density preparation and renderer selection. It affects procedural art only; system information headers, labels, and values use separate, hardcoded ANSI sequences.
 
 ## Reproducibility
 

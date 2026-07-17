@@ -1,3 +1,4 @@
+mod ansi;
 mod ascii;
 mod color;
 mod hash;
@@ -7,12 +8,27 @@ mod starfield;
 mod stretch;
 
 pub use ascii::render_ascii;
+pub use color::ColorPalette;
 pub use profile::{prepare_density, PreparedDensity, RenderProfile};
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
-use color::{intensity_to_ansi, intensity_to_background_ansi, RESET};
+use crate::render::ansi::AnsiHalfBlockLine;
+use color::{galaxy_background_ansi, galaxy_foreground_ansi};
 use hash::{hash_cell, hash_to_unit};
+
+/// Returns the appropriate glyph for half-block rendering based on visibility.
+///
+/// Never returns a glyph with ANSI styling. This function is for no-color mode
+/// and for determining which character to use before applying color in color mode.
+pub(super) fn glyph_for_half_block(top_visible: bool, bottom_visible: bool) -> char {
+    match (top_visible, bottom_visible) {
+        (true, true) => '█',
+        (true, false) => '▀',
+        (false, true) => '▄',
+        (false, false) => ' ',
+    }
+}
 
 /// Renderer effectively used after model and renderer choice resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +63,7 @@ pub fn render_half_blocks(
     canvas: &[Vec<f64>],
     threshold: f64,
     colors_enabled: bool,
+    palette: ColorPalette,
 ) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
 
@@ -54,7 +71,7 @@ pub fn render_half_blocks(
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
     for y in (0..canvas.len()).step_by(2) {
-        let mut line = String::with_capacity(width);
+        let mut line = AnsiHalfBlockLine::with_capacity(width * 8); // Estimate: 8 bytes per cell
 
         for x in 0..width {
             let top = canvas[y].get(x).copied().unwrap_or(0.0);
@@ -68,61 +85,55 @@ pub fn render_half_blocks(
             let top_visible = top.is_finite() && top > 0.0 && top >= threshold;
             let bottom_visible = bottom.is_finite() && bottom > 0.0 && bottom >= threshold;
 
-            // Determine the glyph based on visibility
-            let galaxy_ch = glyph_for_half_block(top_visible, bottom_visible);
-
-            if galaxy_ch == ' ' {
-                // Only inject background star if neither half is visible
-                if let Some(star_ch) =
-                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
-                {
-                    // Keep stars uncolored for portability and to avoid turning the
-                    // background into ANSI pixel-art noise.
-                    line.push(star_ch);
-                    continue;
+            // For no-color mode, check for background stars first
+            if !colors_enabled {
+                let galaxy_ch = glyph_for_half_block(top_visible, bottom_visible);
+                if galaxy_ch == ' ' {
+                    // Only inject background star if neither half is visible
+                    if let Some(star_ch) =
+                        star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
+                    {
+                        // Keep stars uncolored for portability
+                        line.push_cell(star_ch, None, None);
+                        continue;
+                    }
                 }
+                // No-color mode: plain glyphs
+                line.push_cell(galaxy_ch, None, None);
+                continue;
             }
 
-            if colors_enabled && galaxy_ch != ' ' {
-                // In color mode, we use foreground for top and background for bottom
-                // with the ▀ glyph to preserve both samples independently
-                if top_visible && bottom_visible {
-                    // Both visible: foreground for top, background for bottom, ▀ glyph
-                    line.push_str(intensity_to_ansi(top));
-                    line.push_str(intensity_to_background_ansi(bottom));
-                    line.push('▀');
-                    line.push_str(RESET);
-                } else if top_visible {
-                    // Top only: foreground for top, ▀ glyph
-                    line.push_str(intensity_to_ansi(top));
-                    line.push('▀');
-                    line.push_str(RESET);
-                } else {
-                    // Bottom only: foreground for bottom, ▄ glyph
-                    line.push_str(intensity_to_ansi(bottom));
-                    line.push('▄');
-                    line.push_str(RESET);
-                }
+            // Color mode: apply foreground and background colors
+            // Note: colored both-visible uses '▀' (top half block) with:
+            // - foreground color for the top half
+            // - background color for the lower half
+            // This is different from no-color mode which uses '█'
+            if top_visible && bottom_visible {
+                // Both visible: foreground for top, background for bottom, ▀ glyph
+                let fg = galaxy_foreground_ansi(palette, top);
+                let bg = galaxy_background_ansi(palette, bottom);
+                line.push_cell('▀', Some(fg), Some(bg));
+            } else if top_visible {
+                // Top only: foreground for top, ▀ glyph
+                let fg = galaxy_foreground_ansi(palette, top);
+                line.push_cell('▀', Some(fg), None);
+            } else if bottom_visible {
+                // Bottom only: foreground for bottom, ▄ glyph
+                let fg = galaxy_foreground_ansi(palette, bottom);
+                line.push_cell('▄', Some(fg), None);
             } else {
-                // No-color mode: use the appropriate half-block glyph
-                line.push(galaxy_ch);
+                // Neither visible: plain space or background star
+                // Always emit a cell to preserve terminal width
+                let ch =
+                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed).unwrap_or(' ');
+                line.push_cell(ch, None, None);
             }
         }
 
-        lines.push(line);
+        lines.push(line.finish());
     }
 
     lines
-}
-
-/// Returns the appropriate glyph for half-block rendering based on visibility.
-fn glyph_for_half_block(top_visible: bool, bottom_visible: bool) -> char {
-    match (top_visible, bottom_visible) {
-        (true, true) => '█',
-        (true, false) => '▀',
-        (false, true) => '▄',
-        (false, false) => ' ',
-    }
 }
 
 /// Returns the visibility scale for a density value above threshold.
@@ -211,6 +222,11 @@ pub(super) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
 mod tests {
     use super::*;
 
+    use color::RESET;
+
+    // Constant for default palette (Nebula) in tests
+    const DEFAULT_PALETTE: ColorPalette = ColorPalette::Nebula;
+
     #[test]
     fn test_deterministic_render() {
         let model = crate::engine::ArtModel::Starfield;
@@ -230,7 +246,7 @@ mod tests {
             vec![0.0, 0.0, 0.0, 0.0],
         ];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec![" .*+", " .++"]);
     }
@@ -240,7 +256,7 @@ mod tests {
         let terminal = crate::terminal::Terminal::with_colors(true, false);
         let canvas = vec![vec![0.20]];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec!["+"]);
         assert!(!result[0].contains('\x1b'));
@@ -251,7 +267,7 @@ mod tests {
         let terminal = crate::terminal::Terminal::with_colors(true, true);
         let canvas = vec![vec![0.20]];
 
-        let result = render_starfield(&canvas, true, &terminal);
+        let result = render_starfield(&canvas, true, &terminal, ColorPalette::Nebula);
 
         assert!(result[0].contains('\x1b'));
         assert!(result[0].contains('+'));
@@ -262,7 +278,7 @@ mod tests {
         let canvas = vec![vec![1.0, 0.0, 1.0], vec![0.0, 1.0, 1.0]];
 
         // Use a low threshold so all cells are visible
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
 
         // Cell 0: top=1.0 (visible), bottom=0.0 (not visible) → '▀'
         // Cell 1: top=0.0 (not visible), bottom=1.0 (visible) → '▄'
@@ -276,7 +292,7 @@ mod tests {
         let canvas = vec![vec![0.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 0.0]];
 
         // With any threshold, zero-density cells should render as spaces
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
 
         // Each terminal row should contain only spaces (no galaxy glyphs)
         assert_eq!(result.len(), 1);
@@ -289,7 +305,7 @@ mod tests {
     fn test_half_blocks_top_only() {
         // Top visible, bottom invisible → '▀'
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▀"]);
     }
 
@@ -297,7 +313,7 @@ mod tests {
     fn test_half_blocks_bottom_only() {
         // Top invisible, bottom visible → '▄'
         let canvas = vec![vec![0.0], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▄"]);
     }
 
@@ -305,7 +321,7 @@ mod tests {
     fn test_half_blocks_both_visible() {
         // Both visible → '█'
         let canvas = vec![vec![0.5], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["█"]);
     }
 
@@ -313,7 +329,7 @@ mod tests {
     fn test_half_blocks_neither_visible() {
         // Neither visible → ' '
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -321,7 +337,7 @@ mod tests {
     fn test_half_blocks_zero_values_are_invisible() {
         // Zero values should be invisible regardless of threshold
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -329,7 +345,7 @@ mod tests {
     fn test_half_blocks_negative_values_are_invisible() {
         // Negative values should be invisible
         let canvas = vec![vec![-0.5], vec![-0.5]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -337,7 +353,7 @@ mod tests {
     fn test_half_blocks_non_finite_values_are_invisible() {
         // Non-finite values should be invisible
         let canvas = vec![vec![f64::NAN], vec![f64::INFINITY]];
-        let result = render_half_blocks(&canvas, 0.0, false);
+        let result = render_half_blocks(&canvas, 0.0, false, DEFAULT_PALETTE);
         assert_eq!(result, vec![" "]);
     }
 
@@ -346,7 +362,7 @@ mod tests {
         // Test with odd number of rows (last row has no bottom)
         // 3 rows → ceil(3/2) = 2 terminal rows
         let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.5], vec![0.5, 0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         // Terminal row 0 (canvas rows 0-1):
         //   Cell 0: top=0.5 (visible), bottom=0.0 (not visible) → '▀'
         //   Cell 1: top=0.0 (not visible), bottom=0.5 (visible) → '▄'
@@ -364,7 +380,7 @@ mod tests {
     fn test_half_blocks_preserve_terminal_width() {
         // Width should be preserved
         let canvas = vec![vec![0.5, 0.0, 0.5, 0.0], vec![0.0, 0.5, 0.0, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         // 2 rows → 1 terminal row with 4 characters
         // Note: Unicode half-block characters are 3 bytes each in UTF-8
         assert_eq!(result.len(), 1);
@@ -377,7 +393,7 @@ mod tests {
     fn test_half_blocks_no_color_is_ansi_free() {
         // No-color mode should not contain ANSI sequences
         let canvas = vec![vec![0.5], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert!(!result[0].contains('\x1b'));
         assert_eq!(result, vec!["█"]);
     }
@@ -386,8 +402,8 @@ mod tests {
     fn test_half_blocks_deterministic() {
         // Same input should produce same output
         let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.5]];
-        let result1 = render_half_blocks(&canvas, 0.1, false);
-        let result2 = render_half_blocks(&canvas, 0.1, false);
+        let result1 = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
+        let result2 = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result1, result2);
     }
 
@@ -397,7 +413,7 @@ mod tests {
     fn test_half_blocks_colored_top_only() {
         // Top only: foreground sequence + ▀ + reset
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Top intensity 0.5 maps to index 65 (muted green) with sequence \x1b[38;5;65m
@@ -409,7 +425,7 @@ mod tests {
     fn test_half_blocks_colored_bottom_only() {
         // Bottom only: foreground sequence + ▄ + reset
         let canvas = vec![vec![0.0], vec![0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Bottom intensity 0.5 maps to index 65 (muted green) with sequence \x1b[38;5;65m
@@ -423,12 +439,14 @@ mod tests {
         // Use different intensities so palette indexes differ
         // top = 0.50 -> index 65 (muted green) -> \x1b[38;5;65m
         // bottom = 0.80 -> index 130 (muted orange/red) -> \x1b[48;5;130m
+        // Colored both-visible uses '▀' (top half block), not '█' (full block)
         let canvas = vec![vec![0.50], vec![0.80]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
         // Expected: \x1b[38;5;65m\x1b[48;5;130m▀\x1b[0m
         // 38;5;65 for foreground (top), 48;5;130 for background (bottom)
+        // Colored both-visible uses '▀' glyph (top half block)
         assert_eq!(line, "\x1b[38;5;65m\x1b[48;5;130m▀\x1b[0m");
     }
 
@@ -436,7 +454,7 @@ mod tests {
     fn test_half_blocks_colored_ends_with_reset() {
         // Every visible cell should end with reset
         let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         for line in &result {
             assert!(
@@ -450,21 +468,23 @@ mod tests {
     #[test]
     fn test_half_blocks_no_ansi_leakage() {
         // ANSI state should not leak into later cells
-        // Each visible cell should have its own color sequences followed by RESET
-        // Cell 0: top visible (fg) + reset
-        // Cell 1: bottom visible (fg) + reset
-        // Cell 2: both visible (fg + bg) + reset
-        // The key is that RESET occurs immediately after each colored glyph
+        // With the new grouping: cells 0 and 1 have the same fg (index 65) so they are grouped
+        // Cell 2 has different complete style (fg+bg vs fg-only) so it gets RESET before its style
+        // Cell 0: top visible -> \x1b[38;5;65m
+        // Cell 1: bottom visible -> same fg, no RESET, continues with \x1b[38;5;65m
+        // Cell 2: both visible -> different complete style, RESET, then \x1b[38;5;65m\x1b[48;5;65m
+        // The key is that RESET occurs between different complete styles
         let canvas = vec![vec![0.5, 0.0, 0.5], vec![0.0, 0.5, 0.5]];
-        let result = render_half_blocks(&canvas, 0.1, true);
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
 
         let line = &result[0];
-        // Cell 0: top visible -> \x1b[38;5;65m + ▀ + \x1b[0m
-        // Cell 1: bottom visible -> \x1b[38;5;65m + ▄ + \x1b[0m
-        // Cell 2: both visible -> \x1b[38;5;65m + \x1b[48;5;65m + ▀ + \x1b[0m
-        // Expected: \x1b[38;5;65m▀\x1b[0m\x1b[38;5;65m▄\x1b[0m\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m
-        let expected =
-            "\x1b[38;5;65m▀\x1b[0m\x1b[38;5;65m▄\x1b[0m\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m";
+        // With grouping:
+        // Cell 0: top visible (fg) -> \x1b[38;5;65m, glyph '▀'
+        // Cell 1: bottom visible (fg) -> same fg, no reset, continues with '▄'
+        // Cell 2: both visible (fg+bg) -> different complete style, RESET, new fg, new bg, glyph '▀'
+        // Result: \x1b[38;5;65m▀▄\x1b[0m\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m
+        // Note: cells 0 and 1 share the same fg, so they're grouped without RESET between them
+        let expected = "\x1b[38;5;65m▀▄\x1b[0m\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m";
         assert_eq!(line, expected);
     }
 
@@ -472,7 +492,7 @@ mod tests {
     fn test_half_blocks_background_star_never_overwrites_visible() {
         // Background stars should never overwrite visible galaxy halves
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
 
         // Top is visible, so no star should appear
         assert_eq!(result, vec!["▀"]);
@@ -546,8 +566,8 @@ mod tests {
     fn test_half_blocks_deterministic_star_repeated_calls() {
         // Repeated calls with same canvas should produce same star result
         let canvas = vec![vec![0.0], vec![0.0]];
-        let result1 = render_half_blocks(&canvas, 0.5, false);
-        let result2 = render_half_blocks(&canvas, 0.5, false);
+        let result1 = render_half_blocks(&canvas, 0.5, false, DEFAULT_PALETTE);
+        let result2 = render_half_blocks(&canvas, 0.5, false, DEFAULT_PALETTE);
         assert_eq!(result1, result2, "Star field should be deterministic");
     }
 
@@ -556,7 +576,7 @@ mod tests {
         // A visible galaxy half should prevent star replacement
         // Top visible (0.5 > 0.1 threshold), so no star should appear
         let canvas = vec![vec![0.5], vec![0.0]];
-        let result = render_half_blocks(&canvas, 0.1, false);
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
         assert_eq!(result, vec!["▀"]);
     }
 
@@ -571,8 +591,114 @@ mod tests {
             vec![0.0, 0.0, 0.0, 0.0],
         ];
 
-        let result = render_starfield(&canvas, false, &terminal);
+        let result = render_starfield(&canvas, false, &terminal, ColorPalette::Nebula);
 
         assert_eq!(result, vec![" .*+", " .++"]);
+    }
+
+    // ===== New tests for ANSI grouping with AnsiHalfBlockLine =====
+
+    #[test]
+    fn test_half_blocks_grouped_foreground_only() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.0, 0.0]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert_eq!(line, "\x1b[38;5;65m▀▀\x1b[0m");
+    }
+
+    #[test]
+    fn test_half_blocks_grouped_foreground_plus_background() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert_eq!(line, "\x1b[38;5;65m\x1b[48;5;65m▀▀\x1b[0m");
+    }
+
+    #[test]
+    fn test_half_blocks_top_only_to_both_visible() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.0, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        // fg-only -> fg+bg: RESET between, both use '▀'
+        assert_eq!(
+            line,
+            "\x1b[38;5;65m▀\x1b[0m\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn test_half_blocks_both_visible_to_top_only() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.0]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        // fg+bg -> fg-only: RESET removes background, both use '▀'
+        assert_eq!(
+            line,
+            "\x1b[38;5;65m\x1b[48;5;65m▀\x1b[0m\x1b[38;5;65m▀\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn test_half_blocks_styled_to_star_resets() {
+        let canvas = vec![vec![0.5, 0.0], vec![0.0, 0.0]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        // After RESET: exactly one plain star or space
+        let last_reset = line.rfind("\x1b[0m").unwrap();
+        let after = &line[last_reset + 4..];
+        assert!(after.len() == 1 && " .+*".contains(after));
+    }
+
+    #[test]
+    fn test_half_blocks_dim_to_non_dim_resets() {
+        let canvas = vec![vec![0.1, 0.3], vec![0.0, 0.0]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert_eq!(line, "\x1b[2;38;5;17m▀\x1b[0m\x1b[38;5;30m▀\x1b[0m");
+    }
+
+    #[test]
+    fn test_half_blocks_colored_width_preserved_for_invisible_cells() {
+        let canvas = vec![vec![0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        // Invisible cells produce plain spaces without ANSI
+        assert_eq!(line, "   ");
+    }
+
+    #[test]
+    fn test_half_blocks_no_color_no_ansi_sequences() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert!(!line.contains('\x1b'));
+        assert_eq!(line, "██");
+    }
+
+    #[test]
+    fn test_half_blocks_colored_both_visible_uses_wiggle_glyph() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert_eq!(line, "\x1b[38;5;65m\x1b[48;5;65m▀▀\x1b[0m");
+    }
+
+    #[test]
+    fn test_half_blocks_no_color_both_visible_uses_full_block() {
+        let canvas = vec![vec![0.5, 0.5], vec![0.5, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, false, DEFAULT_PALETTE);
+        let line = &result[0];
+        assert_eq!(line, "██");
+    }
+
+    #[test]
+    fn test_half_blocks_colored_glyphs_preserved() {
+        let canvas = vec![vec![0.5, 0.0, 0.5], vec![0.0, 0.5, 0.5]];
+        let result = render_half_blocks(&canvas, 0.1, true, DEFAULT_PALETTE);
+        let line = &result[0];
+        // top-only '▀', bottom-only '▄', both '▀'
+        assert!(line.contains('▀') && line.contains('▄'));
+        assert_eq!(line.matches('▀').count(), 2);
+        assert_eq!(line.matches('▄').count(), 1);
     }
 }

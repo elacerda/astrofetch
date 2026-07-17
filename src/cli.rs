@@ -52,6 +52,21 @@ pub enum RendererChoice {
     Ascii,
 }
 
+/// Seleção de paleta de cores para arte ASCII.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PaletteChoice {
+    /// Automatically select palette (default: Nebula).
+    Auto,
+    /// The standard AstroFetch color scheme.
+    Nebula,
+    /// Color-vision-friendly xterm-256 ramp.
+    Cividis,
+    /// Warm monochromatic-style ramp.
+    Amber,
+    /// xterm-256 grayscale ramp.
+    Mono,
+}
+
 /// Layout choice for combining art and information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum LayoutChoice {
@@ -118,6 +133,10 @@ pub struct Args {
     /// Renderer to use for ASCII art
     #[arg(long, value_enum, default_value_t = RendererChoice::Auto)]
     pub renderer: RendererChoice,
+
+    /// Color palette used for procedural art
+    #[arg(long, value_enum, default_value_t = PaletteChoice::Auto)]
+    pub palette: PaletteChoice,
 }
 
 /// Subcomandos explícitos do AstroFetch.
@@ -270,5 +289,66 @@ mod tests {
     fn test_renderer_choice_unknown_rejected() {
         let result = Args::try_parse_from(["astrofetch", "--renderer", "invalid"]);
         assert!(result.is_err());
+    }
+
+    // ===== PaletteChoice tests =====
+
+    #[test]
+    fn test_palette_choice_default_is_auto() {
+        let args = Args::try_parse_from(["astrofetch"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Auto);
+    }
+
+    #[test]
+    fn test_palette_choice_auto() {
+        let args = Args::try_parse_from(["astrofetch", "--palette", "auto"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Auto);
+    }
+
+    #[test]
+    fn test_palette_choice_nebula() {
+        let args = Args::try_parse_from(["astrofetch", "--palette", "nebula"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Nebula);
+    }
+
+    #[test]
+    fn test_palette_choice_cividis() {
+        let args = Args::try_parse_from(["astrofetch", "--palette", "cividis"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Cividis);
+    }
+
+    #[test]
+    fn test_palette_choice_amber() {
+        let args = Args::try_parse_from(["astrofetch", "--palette", "amber"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Amber);
+    }
+
+    #[test]
+    fn test_palette_choice_mono() {
+        let args = Args::try_parse_from(["astrofetch", "--palette", "mono"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Mono);
+    }
+
+    #[test]
+    fn test_palette_choice_unknown_rejected() {
+        let result = Args::try_parse_from(["astrofetch", "--palette", "invalid"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_palette_composes_with_renderer() {
+        let args =
+            Args::try_parse_from(["astrofetch", "--palette", "cividis", "--renderer", "shade"])
+                .unwrap();
+        assert_eq!(args.palette, PaletteChoice::Cividis);
+        assert_eq!(args.renderer, RendererChoice::Shade);
+    }
+
+    #[test]
+    fn test_palette_composes_with_no_color() {
+        let args =
+            Args::try_parse_from(["astrofetch", "--palette", "nebula", "--no-color"]).unwrap();
+        assert_eq!(args.palette, PaletteChoice::Nebula);
+        assert!(args.no_color);
     }
 }
