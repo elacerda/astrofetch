@@ -100,6 +100,36 @@ astrofetch --model cluster
 astrofetch --model starfield
 ```
 
+Choose a renderer (for galaxy models):
+
+```bash
+astrofetch --renderer auto      # Default: HalfBlock for galaxies
+astrofetch --renderer half-block
+astrofetch --renderer shade
+astrofetch --renderer ascii
+```
+
+Renderer behavior:
+
+- `auto` (default): Galaxy models use HalfBlock; Starfield uses its dedicated renderer.
+- `half-block`: Use Unicode upper/lower half-block characters (▄▀█) for galaxy models.
+- `shade`: Use Unicode density characters (░▒▓█) for galaxy models.
+- `ascii`: Use ASCII characters (.:-=+*#%@) for any model. Maximum portability.
+
+Starfield renderer compatibility:
+
+- Starfield accepts `auto` and `ascii` (both map to the dedicated Starfield renderer).
+- Starfield rejects `half-block` and `shade` (returns a CLI error).
+
+Examples:
+
+```bash
+astrofetch --model spiral --renderer half-block
+astrofetch --model elliptical --renderer shade
+astrofetch --model cluster --renderer ascii
+astrofetch --model starfield --renderer ascii
+```
+
 Specify art dimensions (optional):
 
 ```bash

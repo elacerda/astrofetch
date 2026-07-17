@@ -2,7 +2,6 @@ use super::color::{intensity_to_ansi, RESET};
 use super::{scale_visible, star_field_seed, star_glyph_for_cell};
 
 /// ASCII glyphs ordered from lowest to highest intensity.
-#[allow(dead_code)]
 const ASCII_GLYPHS: &[char] = &['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
 /// Renders a density canvas as ASCII art.
@@ -15,7 +14,6 @@ const ASCII_GLYPHS: &[char] = &['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 /// top density row    -> upper half ( contributes to cell value )
 /// bottom density row -> lower half ( contributes to cell value )
 /// ```
-#[allow(dead_code)]
 pub fn render_ascii(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -76,7 +74,6 @@ pub fn render_ascii(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -
 ///
 /// 0.0 → '.'
 /// 1.0 → '@'
-#[allow(dead_code)]
 fn glyph_for_value(value: f64) -> char {
     if value <= 0.0 {
         return ASCII_GLYPHS[0];

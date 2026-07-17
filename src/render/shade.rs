@@ -14,7 +14,6 @@ const SHADE_GLYPHS: &[char] = &['░', '▒', '▓', '█'];
 /// linha superior de densidade    -> metade superior (contribui para o valor da célula)
 /// linha inferior de densidade   -> metade inferior (contribui para o valor da célula)
 /// ```
-#[allow(dead_code)]
 pub fn render_shades(canvas: &[Vec<f64>], threshold: f64, colors_enabled: bool) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
