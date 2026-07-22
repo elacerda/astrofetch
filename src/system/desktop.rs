@@ -1,5 +1,7 @@
+#[cfg(target_os = "linux")]
 use super::command::run_command_best_effort;
 use super::format::normalize_desktop_string;
+#[cfg(target_os = "linux")]
 use super::parsers::{parse_gsettings_value, parse_xrandr_resolution};
 
 /// Temas e fonte de desktop coletados de forma best-effort.

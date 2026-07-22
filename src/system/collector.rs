@@ -1,16 +1,18 @@
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
 use super::command::run_command_best_effort_with_limit;
 use super::desktop::{
     get_desktop_cosmetics, get_desktop_environment, get_resolution, get_window_manager_or_session,
 };
 use super::disk::get_disk_info;
 use super::fields::SystemSnapshot;
+#[cfg(target_os = "linux")]
 use super::format::format_uptime;
-use super::parsers::{
-    parse_dpkg_get_selections_installed_count, parse_dpkg_query_installed_count,
-    parse_lspci_gpu_info,
-};
+#[cfg(any(target_os = "linux", test))]
+use super::parsers::parse_dpkg_get_selections_installed_count;
+#[cfg(target_os = "linux")]
+use super::parsers::{parse_dpkg_query_installed_count, parse_lspci_gpu_info};
 use sysinfo::{CpuRefreshKind, System};
 
 /// Retorna uma variável de ambiente ou um fallback.

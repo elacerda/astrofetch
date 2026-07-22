@@ -1,9 +1,11 @@
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 
 #[cfg(any(target_os = "linux", test))]
 use std::collections::BTreeSet;
 
 use super::fields::SystemField;
+#[cfg(any(target_os = "linux", test))]
 use super::format;
 
 /// Representação de uso de disco para um storage device específico.
