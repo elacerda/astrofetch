@@ -20,6 +20,7 @@ mod parsers;
 #[allow(unused_imports)]
 pub use command::run_command_best_effort;
 pub use disk::get_disk_detail_fields;
+pub(crate) use fields::CollectionProfile;
 #[allow(unused_imports)]
 pub use fields::{
     get_compact_field_order, get_display_field_order, get_field_order, SystemField, SystemSnapshot,

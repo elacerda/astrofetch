@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use super::command::run_command_best_effort_with_limit;
 use super::desktop::{
     get_desktop_cosmetics, get_desktop_environment, get_resolution, get_window_manager_or_session,
+    DesktopCosmetics,
 };
 use super::disk::get_disk_info;
-use super::fields::SystemSnapshot;
+use super::fields::{CollectionProfile, SystemSnapshot};
 #[cfg(target_os = "linux")]
 use super::format::format_uptime;
 #[cfg(any(target_os = "linux", test))]
@@ -225,9 +226,52 @@ fn get_ram_info(system: &System) -> String {
     format!("{:.1}GB / {:.1}GB", used_gb, total_gb)
 }
 
+/// Private: function pointers for the seven full-only collectors.
+/// Carried per-call; allows deterministic test injection without global state.
+#[derive(Clone, Copy)]
+struct FullCollectors {
+    get_packages: fn() -> Option<String>,
+    get_shell: fn() -> String,
+    get_resolution: fn() -> Option<String>,
+    get_gpu_info: fn() -> Option<String>,
+    get_desktop_environment: fn() -> Option<String>,
+    get_window_manager_or_session: fn() -> Option<String>,
+    get_desktop_cosmetics: fn() -> DesktopCosmetics,
+}
+
+impl FullCollectors {
+    fn real() -> Self {
+        Self {
+            get_packages,
+            get_shell,
+            get_resolution,
+            get_gpu_info,
+            get_desktop_environment,
+            get_window_manager_or_session,
+            get_desktop_cosmetics,
+        }
+    }
+}
+
 impl SystemSnapshot {
-    /// Coleta informações do sistema com fallbacks gracefulls.
+    /// Coleta informações do sistema com fallbacks gracefuls.
+    /// Backward-compatible entry point using the Full profile.
+    #[allow(dead_code)]
     pub fn collect() -> Self {
+        Self::collect_with(CollectionProfile::Full)
+    }
+
+    /// Collect system information using the given profile.
+    /// Compact skips seven collectors whose output is never rendered in compact mode.
+    pub(crate) fn collect_with(profile: CollectionProfile) -> Self {
+        Self::collect_with_collectors(profile, FullCollectors::real())
+    }
+
+    /// Private: core collection with optional collector injection.
+    /// Preserves the exact invocation order of the original `collect()`:
+    ///   user, host, OS, Kernel, Uptime, Packages, Shell, Resolution,
+    ///   CPU, GPU, RAM, Disk, DE, WM, DesktopCosmetics.
+    fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
 
         system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
@@ -238,16 +282,60 @@ impl SystemSnapshot {
         let os = get_os();
         let kernel = get_kernel();
         let uptime = get_uptime();
-        let packages = get_packages();
-        let shell = get_shell();
-        let resolution = get_resolution();
+
+        // Full-only: Packages
+        let packages: Option<String> = if profile == CollectionProfile::Full {
+            (collectors.get_packages)()
+        } else {
+            None
+        };
+
+        // Full-only: Shell
+        let shell: Option<String> = if profile == CollectionProfile::Full {
+            Some((collectors.get_shell)())
+        } else {
+            None
+        };
+
+        // Full-only: Resolution
+        let resolution: Option<String> = if profile == CollectionProfile::Full {
+            (collectors.get_resolution)()
+        } else {
+            None
+        };
+
         let cpu = get_cpu_info(&system);
-        let gpu = get_gpu_info();
+
+        // Full-only: GPU
+        let gpu: Option<String> = if profile == CollectionProfile::Full {
+            (collectors.get_gpu_info)()
+        } else {
+            None
+        };
+
         let ram = get_ram_info(&system);
         let disk = get_disk_info();
-        let de = get_desktop_environment();
-        let wm = get_window_manager_or_session();
-        let desktop_cosmetics = get_desktop_cosmetics();
+
+        // Full-only: DE
+        let de: Option<String> = if profile == CollectionProfile::Full {
+            (collectors.get_desktop_environment)()
+        } else {
+            None
+        };
+
+        // Full-only: WM
+        let wm: Option<String> = if profile == CollectionProfile::Full {
+            (collectors.get_window_manager_or_session)()
+        } else {
+            None
+        };
+
+        // Full-only: DesktopCosmetics
+        let desktop_cosmetics: DesktopCosmetics = if profile == CollectionProfile::Full {
+            (collectors.get_desktop_cosmetics)()
+        } else {
+            DesktopCosmetics::default()
+        };
 
         let mut fields = BTreeMap::new();
         fields.insert("OS".to_string(), os.clone());
@@ -256,7 +344,9 @@ impl SystemSnapshot {
         if let Some(packages_val) = packages {
             fields.insert("Packages".to_string(), packages_val);
         }
-        fields.insert("Shell".to_string(), shell.clone());
+        if let Some(shell_val) = shell {
+            fields.insert("Shell".to_string(), shell_val);
+        }
         if let Some(resolution_val) = resolution {
             fields.insert("Resolution".to_string(), resolution_val);
         }
@@ -646,5 +736,70 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
 
         // Não deve encontrar pacotes
         assert_eq!(count, 0);
+    }
+    #[test]
+    fn test_compact_skips_full_only_collectors() {
+        let fakes = FullCollectors {
+            get_packages: || panic!("get_packages invoked in compact"),
+            get_shell: || panic!("get_shell invoked in compact"),
+            get_resolution: || panic!("get_resolution invoked in compact"),
+            get_gpu_info: || panic!("get_gpu_info invoked in compact"),
+            get_desktop_environment: || panic!("get_desktop_environment invoked in compact"),
+            get_window_manager_or_session: || panic!("get_wm invoked in compact"),
+            get_desktop_cosmetics: || panic!("get_desktop_cosmetics invoked in compact"),
+        };
+
+        // If any panic collector is called, this line is never reached.
+        let snapshot = SystemSnapshot::collect_with_collectors(CollectionProfile::Compact, fakes);
+
+        assert!(!snapshot.user_host.is_empty());
+        assert!(snapshot.has_field("OS"));
+        assert!(snapshot.has_field("Kernel"));
+        assert!(snapshot.has_field("Uptime"));
+        assert!(snapshot.has_field("CPU"));
+        assert!(snapshot.has_field("RAM"));
+        assert!(snapshot.has_field("Disk"));
+        // Ten full-only fields must be absent
+        assert!(!snapshot.has_field("Packages"));
+        assert!(!snapshot.has_field("Shell"));
+        assert!(!snapshot.has_field("Resolution"));
+        assert!(!snapshot.has_field("GPU"));
+        assert!(!snapshot.has_field("DE"));
+        assert!(!snapshot.has_field("WM"));
+        assert!(!snapshot.has_field("WM Theme"));
+        assert!(!snapshot.has_field("GTK Theme"));
+        assert!(!snapshot.has_field("Icon Theme"));
+        assert!(!snapshot.has_field("Font"));
+    }
+
+    #[test]
+    fn test_full_profile_with_fake_collectors() {
+        let fakes = FullCollectors {
+            get_packages: || Some("42".to_string()),
+            get_shell: || "bash".to_string(),
+            get_resolution: || Some("1920x1080".to_string()),
+            get_gpu_info: || Some("NVIDIA".to_string()),
+            get_desktop_environment: || Some("GNOME".to_string()),
+            get_window_manager_or_session: || Some("X11".to_string()),
+            get_desktop_cosmetics: || DesktopCosmetics {
+                wm_theme: Some("Adwaita".to_string()),
+                gtk_theme: Some("Adwaita".to_string()),
+                icon_theme: Some("Adwaita".to_string()),
+                font: Some("Noto".to_string()),
+            },
+        };
+
+        let snapshot = SystemSnapshot::collect_with_collectors(CollectionProfile::Full, fakes);
+
+        assert_eq!(snapshot.get("Packages"), "42");
+        assert_eq!(snapshot.get("Shell"), "bash");
+        assert_eq!(snapshot.get("Resolution"), "1920x1080");
+        assert_eq!(snapshot.get("GPU"), "NVIDIA");
+        assert_eq!(snapshot.get("DE"), "GNOME");
+        assert_eq!(snapshot.get("WM"), "X11");
+        assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+        assert_eq!(snapshot.get("GTK Theme"), "Adwaita");
+        assert_eq!(snapshot.get("Icon Theme"), "Adwaita");
+        assert_eq!(snapshot.get("Font"), "Noto");
     }
 }
