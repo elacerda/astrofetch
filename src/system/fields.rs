@@ -50,6 +50,19 @@ impl SystemSnapshot {
     }
 }
 
+/// Collection profile controlling which system collectors are invoked.
+/// Full collects everything; Compact skips seven collectors whose output
+/// is never rendered in compact mode. Both profiles still populate `user_host`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum CollectionProfile {
+    /// Collect all available system information.
+    #[default]
+    Full,
+    /// Collect only OS, Kernel, Uptime, Disk, CPU, RAM (and user_host).
+    /// Skips: Packages, Shell, Resolution, GPU, DE, WM, DesktopCosmetics.
+    Compact,
+}
+
 /// Ordem screenFetch-like para full mode.
 const FULL_FIELD_ORDER: [&str; 16] = [
     "OS",

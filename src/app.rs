@@ -7,7 +7,9 @@ use crate::render::{
     prepare_density, render_ascii, render_half_blocks, render_shades, render_starfield,
     ColorPalette, EffectiveRenderer, PreparedDensity, RenderProfile,
 };
-use crate::system::{get_disk_detail_fields, get_display_field_order, SystemSnapshot};
+use crate::system::{
+    get_disk_detail_fields, get_display_field_order, CollectionProfile, SystemSnapshot,
+};
 use crate::terminal::{visible_width, Terminal, TerminalDimensions};
 use clap::Parser;
 
@@ -107,10 +109,19 @@ impl App {
         }
     }
 
+    /// Returns the collection profile based on CLI compact flag.
+    fn collection_profile(&self) -> CollectionProfile {
+        if self.args.compact {
+            CollectionProfile::Compact
+        } else {
+            CollectionProfile::Full
+        }
+    }
+
     /// Executa em modo InfoOnly: apenas informações do sistema.
     fn execute_info_only(&self, terminal: &Terminal) -> Result<(), AppError> {
         // Build formatted information lines
-        let system = SystemSnapshot::collect();
+        let system = SystemSnapshot::collect_with(self.collection_profile());
         let info_lines = self.build_info_lines(&system);
 
         terminal.print_lines(&info_lines)?;
@@ -179,7 +190,7 @@ impl App {
         terminal_dims: Option<TerminalDimensions>,
     ) -> Result<(), AppError> {
         // Build formatted information lines and measure dimensions
-        let system = SystemSnapshot::collect();
+        let system = SystemSnapshot::collect_with(self.collection_profile());
         let info_lines = self.build_info_lines(&system);
         let info_visible_width = info_lines
             .iter()
@@ -996,5 +1007,16 @@ mod tests {
     fn test_resolve_color_palette_mono_to_mono() {
         let palette = resolve_color_palette(crate::cli::PaletteChoice::Mono);
         assert_eq!(palette, ColorPalette::Mono);
+    }
+    #[test]
+    fn test_collection_profile_mapping_full() {
+        let app = build_test_app(false, true, false);
+        assert_eq!(app.collection_profile(), CollectionProfile::Full);
+    }
+
+    #[test]
+    fn test_collection_profile_mapping_compact() {
+        let app = build_test_app(true, true, false);
+        assert_eq!(app.collection_profile(), CollectionProfile::Compact);
     }
 }
