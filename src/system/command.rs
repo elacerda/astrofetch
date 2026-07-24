@@ -1,8 +1,81 @@
 use std::{
     io::{self, Read},
+    process::{Child, ExitStatus},
     sync::Mutex,
+    thread::sleep,
+    time::{Duration, Instant},
 };
 
+/// Poll interval for wait_with_timeout.
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Outcome of a bounded wait on a child process.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+enum WaitOutcome {
+    /// The child exited before the deadline.
+    Exited(ExitStatus),
+    /// The deadline elapsed. The child was terminated (or had already exited)
+    /// and reaped via wait(). The ExitStatus is the authoritative final status.
+    #[allow(dead_code)]
+    TimedOut(ExitStatus),
+}
+
+/// Wait for a spawned child process to exit, with a finite timeout.
+///
+/// Polls `child.try_wait()` at intervals until the child exits or the
+/// deadline passes. On timeout, calls `child.kill()` followed by
+/// `child.wait()` to terminate and reap the direct child.
+///
+/// # Arguments
+/// * `child` - Mutable reference to the spawned child process.
+/// * `timeout` - Maximum duration to wait. `Duration::ZERO` performs
+///   a single poll: if the child has not yet exited, the timeout path
+///   executes immediately.
+///
+/// # Returns
+/// * `Ok(WaitOutcome::Exited(status))` — child exited before deadline.
+/// * `Ok(WaitOutcome::TimedOut(status))` — deadline elapsed; `kill()` and
+///   `wait()` were called. `status` is the final exit status from `wait()`.
+///   The child may have exited naturally before `kill()` was attempted.
+/// * `Err(e)` — I/O error from `try_wait()`, `kill()`, or `wait()`.
+///   On error, the caller still owns `&mut Child` and is responsible
+///   for any further recovery (e.g., calling `wait()` to reap).
+///
+/// # Notes
+/// - Only the direct child is terminated. Descendants are not affected.
+/// - `kill()` errors are propagated; `wait()` is NOT called after a
+///   `kill()` error, because the child may still be running and
+///   `wait()` would block indefinitely.
+/// - The actual return time may exceed `timeout` due to scheduler delay,
+///   process termination latency, and wait/reap latency. No strict
+///   maximum overshoot is guaranteed by the standard library.
+#[cfg_attr(not(test), allow(dead_code))]
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<WaitOutcome> {
+    let started_at = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(WaitOutcome::Exited(status)),
+            Ok(None) => {}
+            Err(e) => return Err(e),
+        }
+
+        let elapsed = started_at.elapsed();
+        if elapsed >= timeout {
+            break;
+        }
+
+        let remaining = timeout.saturating_sub(elapsed);
+        let sleep_for = remaining.min(POLL_INTERVAL);
+        sleep(sleep_for);
+    }
+
+    // Timeout path: kill and reap.
+    child.kill()?;
+    let status = child.wait()?;
+    Ok(WaitOutcome::TimedOut(status))
+}
 /// Mutex global para proteger testes que mutam variáveis de ambiente.
 /// Isso evita race conditions quando os testes rodam em paralelo.
 #[allow(dead_code)]
@@ -159,6 +232,63 @@ fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<BoundedRead>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::{Command, Stdio};
+
+    // ── Fixture process for lifecycle tests ──
+
+    #[test]
+    fn wait_with_timeout_fixture_process() {
+        match std::env::var("ASTROFETCH_TEST_FIXTURE") {
+            Ok(val) if val == "1" => {
+                if let Ok(ms) = std::env::var("ASTROFETCH_TEST_SLEEP_MS") {
+                    let ms: u64 = ms
+                        .parse::<u64>()
+                        .expect("ASTROFETCH_TEST_SLEEP_MS must be a valid u64");
+                    if ms > 0 {
+                        std::thread::sleep(Duration::from_millis(ms));
+                    }
+                }
+                if let Ok(code) = std::env::var("ASTROFETCH_TEST_EXIT_CODE") {
+                    let code: i32 = code
+                        .parse::<i32>()
+                        .expect("ASTROFETCH_TEST_EXIT_CODE must be a valid i32");
+                    std::process::exit(code);
+                }
+            }
+            _ => {}
+        }
+        // No-op when run as part of the normal test suite.
+    }
+
+    /// Fully qualified name of the fixture test.
+    /// Discovered via: cargo test -- --list | rg 'wait_with_timeout_fixture_process'
+    const FIXTURE_TEST_NAME: &str = "system::command::tests::wait_with_timeout_fixture_process";
+
+    /// Spawn the libtest executable as a fixture child process.
+    /// All stdio is set to null.
+    fn spawn_fixture(env_vars: &[(&str, &str)]) -> Child {
+        let executable =
+            std::env::current_exe().expect("failed to locate current libtest executable");
+
+        let mut cmd = Command::new(executable);
+        cmd.env("ASTROFETCH_TEST_FIXTURE", "1")
+            .arg("--exact")
+            .arg(FIXTURE_TEST_NAME)
+            .arg("--nocapture")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        // Remove inherited optional fixture variables so only explicit env_vars apply.
+        cmd.env_remove("ASTROFETCH_TEST_SLEEP_MS")
+            .env_remove("ASTROFETCH_TEST_EXIT_CODE");
+
+        for (key, value) in env_vars {
+            cmd.env(key, value);
+        }
+
+        cmd.spawn().expect("failed to spawn fixture process")
+    }
 
     // ── Synthetic readers for read_bounded tests ──
 
@@ -520,5 +650,87 @@ mod tests {
             // O resultado deve ser Some("hello world")
             assert_eq!(result, Some(small_output.to_string()));
         }
+    }
+
+    // ── Lifecycle tests for wait_with_timeout ──
+
+    #[test]
+    fn test_wait_with_timeout_immediate_exit() {
+        let mut child = spawn_fixture(&[]);
+        let result = wait_with_timeout(&mut child, Duration::from_secs(5)).unwrap();
+        match result {
+            WaitOutcome::Exited(status) => assert!(status.success()),
+            WaitOutcome::TimedOut(_) => panic!("expected Exited, got TimedOut"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_immediate_nonzero_exit() {
+        let mut child = spawn_fixture(&[("ASTROFETCH_TEST_EXIT_CODE", "42")]);
+        let result = wait_with_timeout(&mut child, Duration::from_secs(5)).unwrap();
+        match result {
+            WaitOutcome::Exited(status) => {
+                assert_eq!(status.code(), Some(42));
+                assert!(!status.success());
+            }
+            WaitOutcome::TimedOut(_) => panic!("expected Exited, got TimedOut"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_delayed_exit_before_timeout() {
+        let mut child = spawn_fixture(&[("ASTROFETCH_TEST_SLEEP_MS", "100")]);
+        let result = wait_with_timeout(&mut child, Duration::from_secs(5)).unwrap();
+        match result {
+            WaitOutcome::Exited(status) => assert!(status.success()),
+            WaitOutcome::TimedOut(_) => panic!("expected Exited, got TimedOut"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_timeout_then_terminate() {
+        let mut child = spawn_fixture(&[("ASTROFETCH_TEST_SLEEP_MS", "60000")]);
+        let result = wait_with_timeout(&mut child, Duration::from_millis(200)).unwrap();
+        match result {
+            WaitOutcome::TimedOut(_) => {}
+            WaitOutcome::Exited(_) => panic!("expected TimedOut, got Exited"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_zero_timeout_running_child() {
+        let mut child = spawn_fixture(&[("ASTROFETCH_TEST_SLEEP_MS", "60000")]);
+        let result = wait_with_timeout(&mut child, Duration::ZERO).unwrap();
+        match result {
+            WaitOutcome::TimedOut(_) => {}
+            WaitOutcome::Exited(_) => panic!("expected TimedOut, got Exited"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_race_tolerance() {
+        let mut child = spawn_fixture(&[("ASTROFETCH_TEST_SLEEP_MS", "50")]);
+        let result = wait_with_timeout(&mut child, Duration::from_millis(50)).unwrap();
+        match result {
+            WaitOutcome::Exited(status) => assert!(status.success()),
+            WaitOutcome::TimedOut(_) => {}
+        }
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn test_wait_with_timeout_duration_max_no_overflow() {
+        let mut child = spawn_fixture(&[]);
+        let result = wait_with_timeout(&mut child, Duration::MAX).unwrap();
+        match result {
+            WaitOutcome::Exited(status) => assert!(status.success()),
+            WaitOutcome::TimedOut(_) => panic!("expected Exited, got TimedOut"),
+        }
+        assert!(child.try_wait().unwrap().is_some());
     }
 }
