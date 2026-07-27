@@ -8,6 +8,9 @@ use super::fields::SystemField;
 #[cfg(any(target_os = "linux", test))]
 use super::format;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::command::run_command_best_effort;
+
 /// Representação de uso de disco para um storage device específico.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg(any(target_os = "linux", test))]
@@ -238,24 +241,19 @@ pub(crate) fn get_disk_info() -> String {
 pub(crate) fn get_disk_info() -> String {
     use super::parsers::parse_df_size;
 
-    // Tenta usar df para obter informações do disco raiz
-    if let Ok(output) = std::process::Command::new("df").arg("-h").arg("/").output() {
-        if let Ok(text) = String::from_utf8(output.stdout) {
-            // Parse a saída do df
-            let lines: Vec<&str> = text.lines().collect();
-            if lines.len() >= 2 {
-                let parts: Vec<&str> = lines[1].split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let used = parts[2];
-                    let total = parts[1];
-                    // Tenta calcular percentual
-                    if let Some(used_val) = parse_df_size(used) {
-                        if let Some(total_val) = parse_df_size(total) {
-                            if total_val > 0 {
-                                let percent =
-                                    ((used_val as f64 / total_val as f64) * 100.0).round() as u8;
-                                return format!("{} / {} ({}%)", used, total, percent);
-                            }
+    if let Some(output) = run_command_best_effort("df", &["-h", "/"]) {
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() >= 2 {
+            let parts: Vec<&str> = lines[1].split_whitespace().collect();
+            if parts.len() >= 4 {
+                let used = parts[2];
+                let total = parts[1];
+                if let Some(used_val) = parse_df_size(used) {
+                    if let Some(total_val) = parse_df_size(total) {
+                        if total_val > 0 {
+                            let percent =
+                                ((used_val as f64 / total_val as f64) * 100.0).round() as u8;
+                            return format!("{} / {} ({}%)", used, total, percent);
                         }
                     }
                 }
@@ -269,35 +267,32 @@ pub(crate) fn get_disk_info() -> String {
 #[cfg(target_os = "windows")]
 pub(crate) fn get_disk_info() -> String {
     // Tenta usar wmic para obter informações do disco
-    if let Ok(output) = std::process::Command::new("wmic")
-        .arg("logicaldisk")
-        .arg("where")
-        .arg("DeviceID='C:'")
-        .arg("get")
-        .arg("Size,FreeSpace")
-        .output()
-    {
-        if let Ok(text) = String::from_utf8(output.stdout) {
-            // Parse a saída
-            let lines: Vec<&str> = text.lines().collect();
-            if lines.len() >= 2 {
-                let parts: Vec<&str> = lines[1].split_whitespace().collect();
-                if parts.len() >= 2 {
-                    let total = parts[0];
-                    let free = parts[1];
-                    if let (Ok(total_val), Ok(free_val)) =
-                        (total.parse::<u64>(), free.parse::<u64>())
-                    {
-                        let used = total_val - free_val;
-                        let total_gb = total_val as f64 / (1024.0 * 1024.0 * 1024.0);
-                        let used_gb = used as f64 / (1024.0 * 1024.0 * 1024.0);
-                        let percent = if total_val > 0 {
-                            ((used as f64 / total_val as f64) * 100.0).round() as u8
-                        } else {
-                            0
-                        };
-                        return format!("{:.1}GB / {:.1}GB ({}%)", used_gb, total_gb, percent);
-                    }
+    if let Some(output) = run_command_best_effort(
+        "wmic",
+        &[
+            "logicaldisk",
+            "where",
+            "DeviceID='C:'",
+            "get",
+            "Size,FreeSpace",
+        ],
+    ) {
+        let lines: Vec<&str> = output.lines().collect();
+        if lines.len() >= 2 {
+            let parts: Vec<&str> = lines[1].split_whitespace().collect();
+            if parts.len() >= 2 {
+                let total = parts[0];
+                let free = parts[1];
+                if let (Ok(total_val), Ok(free_val)) = (total.parse::<u64>(), free.parse::<u64>()) {
+                    let used = total_val - free_val;
+                    let total_gb = total_val as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let used_gb = used as f64 / (1024.0 * 1024.0 * 1024.0);
+                    let percent = if total_val > 0 {
+                        ((used as f64 / total_val as f64) * 100.0).round() as u8
+                    } else {
+                        0
+                    };
+                    return format!("{:.1}GB / {:.1}GB ({}%)", used_gb, total_gb, percent);
                 }
             }
         }
