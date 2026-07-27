@@ -239,6 +239,80 @@ impl FullCollectors {
     }
 }
 
+/// Private: discriminates between a spawned thread handle and a sequential fallback.
+#[cfg(any(target_os = "linux", test))]
+enum WorkerResult<'scope, T> {
+    Handle(std::thread::ScopedJoinHandle<'scope, T>),
+    Fallback(fn() -> T),
+}
+
+/// Private: resolve a worker result by joining the handle or invoking the fallback.
+#[cfg(any(target_os = "linux", test))]
+fn join_or_seq<'scope, T>(result: WorkerResult<'scope, T>) -> T {
+    match result {
+        WorkerResult::Handle(handle) => handle
+            .join()
+            .unwrap_or_else(|e| std::panic::resume_unwind(e)),
+        WorkerResult::Fallback(f) => f(),
+    }
+}
+
+/// Private: run four subprocess-bound collectors in parallel while main-thread
+/// work proceeds concurrently. Returns all four collector values plus the main
+/// work result.
+#[cfg(any(target_os = "linux", test))]
+fn collect_selected_in_parallel<M, F>(
+    collectors: FullCollectors,
+    main_work: F,
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    DesktopCosmetics,
+    M,
+)
+where
+    F: FnOnce() -> M,
+{
+    std::thread::scope(|scope| {
+        // Attempt all four spawns before any fallback or main work.
+        let packages_result = std::thread::Builder::new()
+            .name("collector-packages".into())
+            .spawn_scoped(scope, || (collectors.get_packages)())
+            .map(WorkerResult::Handle)
+            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_packages));
+
+        let resolution_result = std::thread::Builder::new()
+            .name("collector-resolution".into())
+            .spawn_scoped(scope, || (collectors.get_resolution)())
+            .map(WorkerResult::Handle)
+            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_resolution));
+
+        let gpu_result = std::thread::Builder::new()
+            .name("collector-gpu".into())
+            .spawn_scoped(scope, || (collectors.get_gpu_info)())
+            .map(WorkerResult::Handle)
+            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_gpu_info));
+
+        let cosmetics_result = std::thread::Builder::new()
+            .name("collector-cosmetics".into())
+            .spawn_scoped(scope, || (collectors.get_desktop_cosmetics)())
+            .map(WorkerResult::Handle)
+            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_desktop_cosmetics));
+
+        // Run main-thread work while workers execute.
+        let main_result = main_work();
+
+        // Join workers (or invoke fallbacks).
+        let packages = join_or_seq(packages_result);
+        let resolution = join_or_seq(resolution_result);
+        let gpu = join_or_seq(gpu_result);
+        let desktop_cosmetics = join_or_seq(cosmetics_result);
+
+        (packages, resolution, gpu, desktop_cosmetics, main_result)
+    })
+}
+
 impl SystemSnapshot {
     /// Coleta informações do sistema com fallbacks gracefuls.
     /// Backward-compatible entry point using the Full profile.
@@ -254,9 +328,11 @@ impl SystemSnapshot {
     }
 
     /// Private: core collection with optional collector injection.
-    /// Preserves the exact invocation order of the original `collect()`:
-    ///   user, host, OS, Kernel, Uptime, Packages, Shell, Resolution,
-    ///   CPU, GPU, RAM, Disk, DE, WM, DesktopCosmetics.
+    /// Final field names, values, omission rules, and formatting are stable.
+    /// BTreeMap assembly is deterministic. On Linux Full profile, selected
+    /// collectors may execute concurrently. Compact invokes no Full-only collector.
+    /// Non-Linux production collection remains sequential.
+    #[cfg(target_os = "linux")]
     fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
 
@@ -269,21 +345,120 @@ impl SystemSnapshot {
         let kernel = get_kernel();
         let uptime = get_uptime();
 
-        // Full-only: Packages
+        let (packages, resolution, gpu, desktop_cosmetics, (cpu, shell, de, wm, ram, disk)) =
+            if profile == CollectionProfile::Full {
+                collect_selected_in_parallel(collectors, || {
+                    let cpu = get_cpu_info(&system);
+                    let shell = (collectors.get_shell)();
+                    let de = (collectors.get_desktop_environment)();
+                    let wm = (collectors.get_window_manager_or_session)();
+                    let ram = get_ram_info(&system);
+                    let disk = get_disk_info();
+                    (cpu, shell, de, wm, ram, disk)
+                })
+            } else {
+                (
+                    None,
+                    None,
+                    None,
+                    DesktopCosmetics::default(),
+                    (
+                        get_cpu_info(&system),
+                        String::new(),
+                        None,
+                        None,
+                        get_ram_info(&system),
+                        get_disk_info(),
+                    ),
+                )
+            };
+
+        let shell = if profile == CollectionProfile::Full {
+            Some(shell)
+        } else {
+            None
+        };
+        let de = if profile == CollectionProfile::Full {
+            de
+        } else {
+            None
+        };
+        let wm = if profile == CollectionProfile::Full {
+            wm
+        } else {
+            None
+        };
+
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), os.clone());
+        fields.insert("Kernel".to_string(), kernel.clone());
+        fields.insert("Uptime".to_string(), uptime.clone());
+        if let Some(packages_val) = packages {
+            fields.insert("Packages".to_string(), packages_val);
+        }
+        if let Some(shell_val) = shell {
+            fields.insert("Shell".to_string(), shell_val);
+        }
+        if let Some(resolution_val) = resolution {
+            fields.insert("Resolution".to_string(), resolution_val);
+        }
+        fields.insert("CPU".to_string(), cpu.clone());
+        if let Some(gpu_val) = gpu {
+            fields.insert("GPU".to_string(), gpu_val);
+        }
+        fields.insert("RAM".to_string(), ram.clone());
+        fields.insert("Disk".to_string(), disk.clone());
+
+        if let Some(de_val) = de {
+            fields.insert("DE".to_string(), de_val);
+        }
+        if let Some(wm_val) = wm {
+            fields.insert("WM".to_string(), wm_val);
+        }
+        if let Some(wm_theme_val) = desktop_cosmetics.wm_theme {
+            fields.insert("WM Theme".to_string(), wm_theme_val);
+        }
+        if let Some(gtk_theme_val) = desktop_cosmetics.gtk_theme {
+            fields.insert("GTK Theme".to_string(), gtk_theme_val);
+        }
+        if let Some(icon_theme_val) = desktop_cosmetics.icon_theme {
+            fields.insert("Icon Theme".to_string(), icon_theme_val);
+        }
+        if let Some(font_val) = desktop_cosmetics.font {
+            fields.insert("Font".to_string(), font_val);
+        }
+
+        Self {
+            user_host: format!("{}@{}", user, host),
+            fields,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
+        let mut system = System::new();
+
+        system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        system.refresh_memory();
+
+        let user = env_or_fallback("USER", "unknown");
+        let host = env_or_fallback("HOSTNAME", "unknown");
+        let os = get_os();
+        let kernel = get_kernel();
+        let uptime = get_uptime();
+
         let packages: Option<String> = if profile == CollectionProfile::Full {
             (collectors.get_packages)()
         } else {
             None
         };
 
-        // Full-only: Shell
         let shell: Option<String> = if profile == CollectionProfile::Full {
             Some((collectors.get_shell)())
         } else {
             None
         };
 
-        // Full-only: Resolution
         let resolution: Option<String> = if profile == CollectionProfile::Full {
             (collectors.get_resolution)()
         } else {
@@ -292,7 +467,6 @@ impl SystemSnapshot {
 
         let cpu = get_cpu_info(&system);
 
-        // Full-only: GPU
         let gpu: Option<String> = if profile == CollectionProfile::Full {
             (collectors.get_gpu_info)()
         } else {
@@ -302,21 +476,18 @@ impl SystemSnapshot {
         let ram = get_ram_info(&system);
         let disk = get_disk_info();
 
-        // Full-only: DE
         let de: Option<String> = if profile == CollectionProfile::Full {
             (collectors.get_desktop_environment)()
         } else {
             None
         };
 
-        // Full-only: WM
         let wm: Option<String> = if profile == CollectionProfile::Full {
             (collectors.get_window_manager_or_session)()
         } else {
             None
         };
 
-        // Full-only: DesktopCosmetics
         let desktop_cosmetics: DesktopCosmetics = if profile == CollectionProfile::Full {
             (collectors.get_desktop_cosmetics)()
         } else {
@@ -787,5 +958,190 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
         assert_eq!(snapshot.get("GTK Theme"), "Adwaita");
         assert_eq!(snapshot.get("Icon Theme"), "Adwaita");
         assert_eq!(snapshot.get("Font"), "Noto");
+    }
+    // ─── Overlap coordinator for deterministic concurrency tests ───
+
+    mod overlap_coordinator {
+        use std::sync::{Condvar, Mutex, OnceLock};
+
+        struct CoordinatorState {
+            entered: u32,
+            released: bool,
+        }
+
+        static COORDINATOR: OnceLock<(Mutex<CoordinatorState>, Condvar)> = OnceLock::new();
+
+        fn state() -> &'static (Mutex<CoordinatorState>, Condvar) {
+            COORDINATOR.get_or_init(|| {
+                (
+                    Mutex::new(CoordinatorState {
+                        entered: 0,
+                        released: true,
+                    }),
+                    Condvar::new(),
+                )
+            })
+        }
+
+        pub fn reset() {
+            let mut inner = state().0.lock().unwrap();
+            inner.entered = 0;
+            inner.released = true;
+        }
+
+        pub fn enter() {
+            {
+                let mut inner = state().0.lock().unwrap();
+                inner.entered += 1;
+                inner.released = false;
+            }
+            state().1.notify_all();
+            // Wait until released
+            let mut inner = state().0.lock().unwrap();
+            while !inner.released {
+                inner = state().1.wait(inner).unwrap();
+            }
+        }
+
+        pub fn wait_for_all(timeout_ms: u64) -> u32 {
+            let mut inner = state().0.lock().unwrap();
+            let start = std::time::Instant::now();
+            while inner.entered < 4 {
+                let elapsed = start.elapsed();
+                if elapsed >= std::time::Duration::from_millis(timeout_ms) {
+                    break;
+                }
+                let remaining = std::time::Duration::from_millis(timeout_ms) - elapsed;
+                let timeout = std::time::Duration::from_millis(50).min(remaining);
+                inner = state().1.wait_timeout(inner, timeout).unwrap().0;
+            }
+            inner.entered
+        }
+
+        pub fn release_all() {
+            {
+                let mut inner = state().0.lock().unwrap();
+                inner.released = true;
+            }
+            state().1.notify_all();
+        }
+    }
+
+    fn test_get_packages_fn() -> Option<String> {
+        overlap_coordinator::enter();
+        Some("test-packages".to_string())
+    }
+
+    fn test_get_resolution_fn() -> Option<String> {
+        overlap_coordinator::enter();
+        Some("test-resolution".to_string())
+    }
+
+    fn test_get_gpu_info_fn() -> Option<String> {
+        overlap_coordinator::enter();
+        Some("test-gpu".to_string())
+    }
+
+    fn test_get_desktop_cosmetics_fn() -> DesktopCosmetics {
+        overlap_coordinator::enter();
+        DesktopCosmetics {
+            wm_theme: Some("test-wm".to_string()),
+            gtk_theme: Some("test-gtk".to_string()),
+            icon_theme: Some("test-icon".to_string()),
+            font: Some("test-font".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_full_collectors_overlap() {
+        overlap_coordinator::reset();
+
+        let collectors = FullCollectors {
+            get_packages: test_get_packages_fn,
+            get_shell: || "test-shell".to_string(),
+            get_resolution: test_get_resolution_fn,
+            get_gpu_info: test_get_gpu_info_fn,
+            get_desktop_environment: || Some("test-de".to_string()),
+            get_window_manager_or_session: || Some("test-wm".to_string()),
+            get_desktop_cosmetics: test_get_desktop_cosmetics_fn,
+        };
+
+        // Run the parallel helper in a separate thread so we can wait for overlap.
+        let collection_handle = std::thread::spawn(move || {
+            collect_selected_in_parallel(collectors, || {
+                ("test-shell".to_string(), None::<String>, None::<String>)
+            })
+        });
+
+        // Wait for all four workers to enter (with timeout).
+        let entered = overlap_coordinator::wait_for_all(5000);
+
+        // Release all workers before joining.
+        overlap_coordinator::release_all();
+
+        // Join the collection thread.
+        let (packages, resolution, gpu, cosmetics, (shell, de, wm)) = collection_handle
+            .join()
+            .expect("collection thread panicked");
+
+        // Assert overlap: all four workers must have entered before any was released.
+        assert_eq!(
+            entered, 4,
+            "expected 4 overlapping workers, but only {} entered before timeout",
+            entered
+        );
+
+        // Verify results are correct.
+        assert_eq!(packages.as_deref(), Some("test-packages"));
+        assert_eq!(resolution.as_deref(), Some("test-resolution"));
+        assert_eq!(gpu.as_deref(), Some("test-gpu"));
+        assert_eq!(cosmetics.wm_theme.as_deref(), Some("test-wm"));
+        assert_eq!(shell.as_str(), "test-shell");
+        assert_eq!(de, None);
+        assert_eq!(wm, None);
+    }
+
+    #[test]
+    fn test_full_parallel_omits_none_results() {
+        let collectors = FullCollectors {
+            get_packages: || None,
+            get_shell: || "shell".to_string(),
+            get_resolution: || None,
+            get_gpu_info: || None,
+            get_desktop_environment: || None,
+            get_window_manager_or_session: || None,
+            get_desktop_cosmetics: || DesktopCosmetics::default(),
+        };
+
+        let (packages, resolution, gpu, cosmetics, _) =
+            collect_selected_in_parallel(collectors, || {
+                ("shell".to_string(), None::<String>, None::<String>)
+            });
+
+        assert!(packages.is_none());
+        assert!(resolution.is_none());
+        assert!(gpu.is_none());
+        assert!(cosmetics.wm_theme.is_none());
+        assert!(cosmetics.gtk_theme.is_none());
+        assert!(cosmetics.icon_theme.is_none());
+        assert!(cosmetics.font.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "packages panic")]
+    fn test_panic_in_parallel_collector_propagates() {
+        let collectors = FullCollectors {
+            get_packages: || panic!("packages panic"),
+            get_shell: || "shell".to_string(),
+            get_resolution: || Some("1920x1080".to_string()),
+            get_gpu_info: || Some("GPU".to_string()),
+            get_desktop_environment: || Some("DE".to_string()),
+            get_window_manager_or_session: || Some("WM".to_string()),
+            get_desktop_cosmetics: || DesktopCosmetics::default(),
+        };
+
+        let _ = collect_selected_in_parallel(collectors, || {
+            ("shell".to_string(), None::<String>, None::<String>)
+        });
     }
 }
