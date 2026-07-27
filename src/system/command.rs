@@ -1,16 +1,21 @@
 use std::{
     io::{self, Read},
-    process::{Child, ExitStatus},
-    sync::Mutex,
-    thread::sleep,
+    process::{Child, ExitStatus, Stdio},
+    sync::{mpsc, Mutex},
+    thread::{self, sleep},
     time::{Duration, Instant},
 };
 
 /// Poll interval for wait_with_timeout.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Default timeout for command execution.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Grace period for the stdout reader thread after child lifecycle.
+const DEFAULT_READER_GRACE: Duration = Duration::from_millis(500);
+
 /// Outcome of a bounded wait on a child process.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 enum WaitOutcome {
     /// The child exited before the deadline.
@@ -50,7 +55,6 @@ enum WaitOutcome {
 /// - The actual return time may exceed `timeout` due to scheduler delay,
 ///   process termination latency, and wait/reap latency. No strict
 ///   maximum overshoot is guaranteed by the standard library.
-#[cfg_attr(not(test), allow(dead_code))]
 fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<WaitOutcome> {
     let started_at = Instant::now();
 
@@ -76,28 +80,34 @@ fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<WaitOut
     let status = child.wait()?;
     Ok(WaitOutcome::TimedOut(status))
 }
-/// Mutex global para proteger testes que mutam variáveis de ambiente.
-/// Isso evita race conditions quando os testes rodam em paralelo.
+/// Global mutex protecting tests that mutate environment variables.
+/// Prevents race conditions when tests run in parallel.
 #[allow(dead_code)]
 pub(crate) static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-/// Executa um comando externo de forma segura e best-effort.
+/// Executes an external command safely in a best-effort manner.
 ///
 /// # Arguments
-/// * `cmd` - Nome do comando (ex: "uname", "hostname")
-/// * `args` - Argumentos do comando como fatias de strings
+/// * `cmd` - Command name (e.g., "uname", "hostname")
+/// * `args` - Command arguments as string slices
 ///
 /// # Returns
-/// * `Some(String)` - Comando executado com sucesso e stdout não vazio
-/// * `None` - Comando falhou, saiu com código diferente de zero,
-///   stdout é inválido UTF-8, ou stdout está vazio
+/// * `Some(String)` - Command succeeded and stdout is non-empty
+/// * `None` - Spawn failure, timeout, non-zero exit, invalid UTF-8,
+///   empty stdout, or output exceeded the limit
 ///
-/// # Limitações
-/// * Não há timeout implementado ainda (TODO: adicionar timeout antes de usar
-///   para comandos potencialmente lentos)
-/// * Output limitado a 64KB para evitar strings muito grandes
+/// # Limitations
+/// - The production timeout is currently 10 seconds.
+/// - Only the direct child is terminated; descendants are not terminated.
+/// - Stdout is retained up to 64 KiB; reading continues after overflow
+///   to drain the pipe, but output exceeding the limit is rejected.
+/// - Stderr is discarded.
+/// - Stdin is closed (null) rather than inherited.
+/// - If a descendant process retains the stdout writer, the reader thread
+///   may be detached after the reader grace period expires.
+/// - The external contract remains best-effort `Option<String>`.
 ///
-/// # Exemplos
+/// # Examples
 /// ```ignore
 /// let os = run_command_best_effort("uname", &["-s"]);
 /// let hostname = run_command_best_effort("hostname", &[]);
@@ -107,18 +117,36 @@ pub fn run_command_best_effort(cmd: &str, args: &[&str]) -> Option<String> {
     run_command_best_effort_with_limit(cmd, args, 64 * 1024)
 }
 
-/// Executa um comando externo com limite de tamanho customizável.
-/// Usado para comandos que podem gerar output grande (ex: listagem de pacotes).
+/// Executes an external command with a configurable output size limit.
+/// Used for commands that may produce large output (e.g., package listings).
 ///
 /// # Arguments
-/// * `cmd` - Nome do comando
-/// * `args` - Argumentos do comando
-/// * `max_output_size` - Tamanho máximo do output em bytes
+/// * `cmd` - Command name
+/// * `args` - Command arguments
+/// * `max_output_size` - Maximum output size in bytes
 ///
 /// # Returns
-/// * `Some(String)` - Comando executado com sucesso e stdout não vazio
-/// * `None` - Comando falhou, saiu com código diferente de zero,
-///   stdout é inválido UTF-8, stdout está vazio, ou output foi truncado
+/// * `Some(String)` - Command succeeded and stdout is non-empty
+/// * `None` - Spawn failure, timeout, non-zero exit, invalid UTF-8,
+///   empty stdout, or output exceeded the limit
+///
+/// # Limitations
+/// - The production timeout is currently 10 seconds.
+/// - Only the direct child is terminated; descendants are not terminated.
+/// - Stdout is retained up to `max_output_size` bytes; reading continues
+///   after overflow to drain the pipe, but output exceeding the limit is
+///   rejected with `None`.
+/// - Stderr is discarded.
+/// - Stdin is closed (null) rather than inherited.
+/// - If a descendant process retains the stdout writer, the reader thread
+///   may be detached after the reader grace period expires.
+///
+/// # Memory
+/// Retained output content is at most `max_output_size` bytes.
+/// `read_bounded` uses one fixed 8 KiB buffer.
+/// Vec capacity, reader-thread stack, channel state, thread handle, and OS
+/// pipe resources are additional implementation-dependent overheads.
+/// Retained memory does not grow with total drained output.
 #[allow(dead_code)]
 pub(crate) fn run_command_best_effort_with_limit(
     cmd: &str,
@@ -128,34 +156,101 @@ pub(crate) fn run_command_best_effort_with_limit(
     let mut command = std::process::Command::new(cmd);
     command.args(args);
 
-    // Executa o comando e captura o output
-    let output = command.output().ok()?;
+    run_prepared_command_best_effort(
+        command,
+        max_output_size,
+        DEFAULT_COMMAND_TIMEOUT,
+        DEFAULT_READER_GRACE,
+    )
+}
 
-    // Verifica se o comando saiu com código de sucesso (0)
-    if !output.status.success() {
-        return None;
+/// Best-effort cleanup for a potentially still-running child process.
+///
+/// Attempts to kill the child; if successful, reaps it via `wait()`.
+/// Does nothing if `kill()` fails (the child may still be running).
+fn cleanup_child(child: &mut Child) {
+    if child.kill().is_ok() {
+        let _ = child.wait();
+    }
+}
+
+/// Executes a pre-configured [`Command`] with bounded stdout capture.
+///
+/// Spawns the command, drains stdout in a dedicated reader thread with a
+/// hard byte limit, and waits for the child to exit within a timeout.
+/// Returns trimmed stdout only on full success; `None` for any failure.
+///
+/// # Arguments
+/// * `command` - Pre-configured `Command` to execute.
+/// * `max_output_size` - Maximum bytes of stdout to retain.
+/// * `timeout` - Maximum duration to wait for the child to exit.
+/// * `reader_grace` - Additional time to wait for the reader thread
+///   after the child lifecycle completes.
+///
+/// # Returns
+/// * `Some(String)` — trimmed, non-empty stdout on successful exit.
+/// * `None` — any failure (spawn, timeout, non-zero exit, overflow,
+///   I/O error, invalid UTF-8, empty output, reader detachment).
+fn run_prepared_command_best_effort(
+    mut command: std::process::Command,
+    max_output_size: usize,
+    timeout: Duration,
+    reader_grace: Duration,
+) -> Option<String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let mut child = command.spawn().ok()?;
+
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            cleanup_child(&mut child);
+            return None;
+        }
+    };
+
+    let (tx, rx) = mpsc::sync_channel(1);
+    let reader_handle = match thread::Builder::new()
+        .name("stdout-reader".into())
+        .spawn(move || {
+            let result = read_bounded(stdout, max_output_size);
+            let _ = tx.send(result);
+        }) {
+        Ok(handle) => handle,
+        Err(_) => {
+            cleanup_child(&mut child);
+            return None;
+        }
+    };
+
+    let lifecycle_result = wait_with_timeout(&mut child, timeout);
+    if lifecycle_result.is_err() {
+        cleanup_child(&mut child);
     }
 
-    // Converte stdout para String, retornando None se não for UTF-8 válido
-    let stdout = String::from_utf8(output.stdout).ok()?;
+    let reader_result = match rx.recv_timeout(reader_grace) {
+        Ok(result) => result,
+        Err(_) => {
+            drop(reader_handle);
+            return None;
+        }
+    };
 
-    // Trimming da saída
-    let trimmed = stdout.trim();
+    drop(reader_handle);
 
-    // Retorna None se output estiver vazio após trim
+    let bytes = match (lifecycle_result, reader_result) {
+        (Ok(WaitOutcome::Exited(status)), Ok(BoundedRead::Complete(b))) if status.success() => b,
+        _ => return None,
+    };
+
+    let output = String::from_utf8(bytes).ok()?;
+    let trimmed = output.trim();
+
     if trimmed.is_empty() {
         return None;
-    }
-
-    // Verifica se o output foi truncado (excedeu o limite)
-    // Se o output original era maior que max_output_size, não podemos confiar no resultado
-    if stdout.len() > max_output_size {
-        return None;
-    }
-
-    // Limita o tamanho do output para evitar strings muito grandes
-    if trimmed.len() > max_output_size {
-        return Some(trimmed[..max_output_size].to_string());
     }
 
     Some(trimmed.to_string())
@@ -170,7 +265,6 @@ pub(crate) fn run_command_best_effort_with_limit(
 /// - In both cases, `Vec` capacity and allocator overhead may exceed `output.len()`.
 /// - Memory does not grow with the amount drained after overflow.
 /// - This helper has no timeout and may block until EOF or error.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, PartialEq, Eq)]
 enum BoundedRead {
     Complete(Vec<u8>),
@@ -194,7 +288,6 @@ enum BoundedRead {
 /// - `ErrorKind::Interrupted` is retried transparently.
 /// - All other I/O errors are propagated immediately.
 /// - An I/O error after overflow returns `Err` rather than `Exceeded`.
-#[cfg_attr(not(test), allow(dead_code))]
 fn read_bounded<R: Read>(reader: R, max_bytes: usize) -> io::Result<BoundedRead> {
     const BUF_SIZE: usize = 8 * 1024;
 
@@ -236,10 +329,68 @@ mod tests {
 
     // ── Fixture process for lifecycle tests ──
 
+    /// Fixture process: invoked when the test executable runs itself as a child.
+    /// Uses ASTROFETCH_TEST_* environment variables to control behavior.
     #[test]
     fn wait_with_timeout_fixture_process() {
         match std::env::var("ASTROFETCH_TEST_FIXTURE") {
             Ok(val) if val == "1" => {
+                // Depth-0: spawn a real descendant, then exit immediately.
+                if std::env::var("ASTROFETCH_TEST_HOLD_PIPE").is_ok()
+                    && std::env::var("ASTROFETCH_TEST_HOLD_DEPTH").is_err()
+                {
+                    let hold_pipe = std::env::var("ASTROFETCH_TEST_HOLD_PIPE")
+                        .expect("ASTROFETCH_TEST_HOLD_PIPE must be set")
+                        .parse::<u64>()
+                        .expect("ASTROFETCH_TEST_HOLD_PIPE must be a valid u64");
+
+                    let mut child_cmd = fixture_command(&[
+                        ("ASTROFETCH_TEST_HOLD_PIPE", &hold_pipe.to_string()),
+                        ("ASTROFETCH_TEST_HOLD_DEPTH", "1"),
+                    ]);
+                    child_cmd.stdout(Stdio::inherit());
+                    child_cmd
+                        .spawn()
+                        .expect("failed to spawn pipe-holding child");
+                    std::process::exit(0);
+                }
+
+                // Depth-1: hold the pipe for the requested duration.
+                if let Ok(depth) = std::env::var("ASTROFETCH_TEST_HOLD_DEPTH") {
+                    if depth == "1" {
+                        let hold_pipe = std::env::var("ASTROFETCH_TEST_HOLD_PIPE")
+                            .expect("ASTROFETCH_TEST_HOLD_PIPE must be set")
+                            .parse::<u64>()
+                            .expect("ASTROFETCH_TEST_HOLD_PIPE must be a valid u64");
+                        std::thread::sleep(Duration::from_millis(hold_pipe));
+                        std::process::exit(0);
+                    } else {
+                        panic!("ASTROFETCH_TEST_HOLD_DEPTH has unexpected value: {depth:?}");
+                    }
+                }
+
+                // Ordinary fixture path: write output, sleep, exit.
+                use std::io::Write;
+                let mut stdout = std::io::stdout();
+
+                if let Ok(n) = std::env::var("ASTROFETCH_TEST_OUTPUT_ASCII") {
+                    let count: usize = n
+                        .parse::<usize>()
+                        .expect("ASTROFETCH_TEST_OUTPUT_ASCII must be a valid usize");
+                    let buf = vec![b'A'; count];
+                    stdout.write_all(&buf).expect("fixture stdout write failed");
+                }
+
+                if let Ok(n) = std::env::var("ASTROFETCH_TEST_OUTPUT_RAW") {
+                    let count: usize = n
+                        .parse::<usize>()
+                        .expect("ASTROFETCH_TEST_OUTPUT_RAW must be a valid usize");
+                    let buf = vec![0xAAu8; count];
+                    stdout.write_all(&buf).expect("fixture stdout write failed");
+                }
+
+                stdout.flush().expect("fixture stdout flush failed");
+
                 if let Ok(ms) = std::env::var("ASTROFETCH_TEST_SLEEP_MS") {
                     let ms: u64 = ms
                         .parse::<u64>()
@@ -248,12 +399,14 @@ mod tests {
                         std::thread::sleep(Duration::from_millis(ms));
                     }
                 }
-                if let Ok(code) = std::env::var("ASTROFETCH_TEST_EXIT_CODE") {
-                    let code: i32 = code
-                        .parse::<i32>()
-                        .expect("ASTROFETCH_TEST_EXIT_CODE must be a valid i32");
-                    std::process::exit(code);
-                }
+
+                let exit_code = if let Ok(code) = std::env::var("ASTROFETCH_TEST_EXIT_CODE") {
+                    code.parse::<i32>()
+                        .expect("ASTROFETCH_TEST_EXIT_CODE must be a valid i32")
+                } else {
+                    0
+                };
+                std::process::exit(exit_code);
             }
             _ => {}
         }
@@ -261,33 +414,41 @@ mod tests {
     }
 
     /// Fully qualified name of the fixture test.
-    /// Discovered via: cargo test -- --list | rg 'wait_with_timeout_fixture_process'
     const FIXTURE_TEST_NAME: &str = "system::command::tests::wait_with_timeout_fixture_process";
 
-    /// Spawn the libtest executable as a fixture child process.
-    /// All stdio is set to null.
-    fn spawn_fixture(env_vars: &[(&str, &str)]) -> Child {
-        let executable =
-            std::env::current_exe().expect("failed to locate current libtest executable");
-
-        let mut cmd = Command::new(executable);
+    /// Build a Rust-only fixture command using the current test executable.
+    fn fixture_command(env_vars: &[(&str, &str)]) -> Command {
+        let mut cmd =
+            Command::new(std::env::current_exe().expect("cannot determine test executable path"));
         cmd.env("ASTROFETCH_TEST_FIXTURE", "1")
             .arg("--exact")
             .arg(FIXTURE_TEST_NAME)
             .arg("--nocapture")
+            .arg("--quiet")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        // Remove inherited optional fixture variables so only explicit env_vars apply.
-        cmd.env_remove("ASTROFETCH_TEST_SLEEP_MS")
-            .env_remove("ASTROFETCH_TEST_EXIT_CODE");
+        // Remove optional fixture variables before applying explicit values.
+        cmd.env_remove("ASTROFETCH_TEST_OUTPUT_ASCII")
+            .env_remove("ASTROFETCH_TEST_OUTPUT_RAW")
+            .env_remove("ASTROFETCH_TEST_SLEEP_MS")
+            .env_remove("ASTROFETCH_TEST_EXIT_CODE")
+            .env_remove("ASTROFETCH_TEST_HOLD_PIPE")
+            .env_remove("ASTROFETCH_TEST_HOLD_DEPTH");
 
         for (key, value) in env_vars {
             cmd.env(key, value);
         }
 
-        cmd.spawn().expect("failed to spawn fixture process")
+        cmd
+    }
+
+    /// Spawn the fixture as a child process (stdout suppressed).
+    fn spawn_fixture(env_vars: &[(&str, &str)]) -> Child {
+        fixture_command(env_vars)
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("failed to spawn fixture process")
     }
 
     // ── Synthetic readers for read_bounded tests ──
@@ -732,5 +893,139 @@ mod tests {
             WaitOutcome::TimedOut(_) => panic!("expected Exited, got TimedOut"),
         }
         assert!(child.try_wait().unwrap().is_some());
+    }
+    // ── Integration tests for run_prepared_command_best_effort ──
+
+    #[test]
+    fn test_wrapper_success() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_OUTPUT_ASCII", "5")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        let output = result.expect("expected successful output");
+        assert!(
+            output.ends_with("AAAAA"),
+            "output should end with 5 'A' chars, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_under_limit() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_OUTPUT_ASCII", "5")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            100,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        let output = result.expect("expected successful output");
+        assert!(
+            output.ends_with("AAAAA"),
+            "output should end with 5 'A' chars, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_overflow() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_OUTPUT_ASCII", "2048")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            1024,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_wrapper_nonzero_exit() {
+        let cmd = fixture_command(&[
+            ("ASTROFETCH_TEST_OUTPUT_ASCII", "4"),
+            ("ASTROFETCH_TEST_EXIT_CODE", "1"),
+        ]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_wrapper_timeout() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_SLEEP_MS", "60000")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_millis(200),
+            Duration::from_millis(100),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_wrapper_output_then_delayed_exit() {
+        let cmd = fixture_command(&[
+            ("ASTROFETCH_TEST_OUTPUT_ASCII", "7"),
+            ("ASTROFETCH_TEST_SLEEP_MS", "50"),
+        ]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        let output = result.expect("expected successful output");
+        assert!(
+            output.ends_with("AAAAAAA"),
+            "output should end with 7 'A' chars, got: {output:?}"
+        );
+    }
+
+    #[test]
+    fn test_wrapper_invalid_utf8() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_OUTPUT_RAW", "3")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_wrapper_zero_limit() {
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_OUTPUT_ASCII", "1")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            0,
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_wrapper_descendant_pipe_hold() {
+        let start = Instant::now();
+        let cmd = fixture_command(&[("ASTROFETCH_TEST_HOLD_PIPE", "500")]);
+        let result = run_prepared_command_best_effort(
+            cmd,
+            64 * 1024,
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        );
+        let elapsed = start.elapsed();
+        assert_eq!(result, None);
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "elapsed {:?} exceeds 2s bound",
+            elapsed
+        );
     }
 }
