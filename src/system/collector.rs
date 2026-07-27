@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "macos")]
+use super::command::run_command_best_effort;
 #[cfg(target_os = "linux")]
 use super::command::run_command_best_effort_with_limit;
 use super::desktop::{
@@ -58,13 +60,7 @@ fn get_os() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("sw_vers")
-            .arg("-productName")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "macOS".to_string())
+        run_command_best_effort("sw_vers", &["-productName"]).unwrap_or_else(|| "macOS".to_string())
     }
 
     #[cfg(target_os = "windows")]
@@ -90,13 +86,7 @@ fn get_kernel() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("uname")
-            .arg("-r")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|| "Darwin".to_string())
+        run_command_best_effort("uname", &["-r"]).unwrap_or_else(|| "Darwin".to_string())
     }
 
     #[cfg(target_os = "windows")]
@@ -155,10 +145,6 @@ fn get_uptime() -> String {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("sysctl")
-            .arg("-n")
-            .arg("kern.boottime")
-            .output();
         "N/A".to_string()
     }
 
