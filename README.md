@@ -192,6 +192,24 @@ Use a fixed seed for reproducible output:
 astrofetch --model spiral --seed 42
 ```
 
+## Performance and cache
+
+On Linux, the default full output may cache stable but expensive system
+information (package count, GPU, screen resolution, and desktop themes) so
+repeated runs finish faster. Entries expire automatically, from minutes
+(resolution) up to a day (GPU).
+
+- `--compact` remains the lightweight path and never uses the cache.
+- Caching is transparent and best-effort: stale, missing, or unreadable
+  entries simply fall back to live collection, and cache problems never
+  break the output.
+- Disable the cache for a run: `ASTROFETCH_DISABLE_CACHE=1 astrofetch`
+- Override the cache directory (absolute path):
+  `ASTROFETCH_CACHE_DIR=/path/to/dir astrofetch`. By default AstroFetch
+  uses `$XDG_CACHE_HOME/astrofetch` when a usable absolute
+  `XDG_CACHE_HOME` is available, otherwise it falls back to
+  `$HOME/.cache/astrofetch`.
+
 ## Shell startup integration
 
 AstroFetch can add a managed block to your shell startup file. The block is marked with:

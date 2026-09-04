@@ -59,6 +59,11 @@ A imagem à esquerda deve substituir o logo fixo tradicional de ferramentas como
 - Tratar Linux, macOS e Windows como plataformas de primeira classe.
 - Manter campos lentos fora do caminho padrão.
 
+Nota (Patch 5): o princípio "manter campos lentos fora do caminho padrão" foi
+substituído — o padrão Full coleta campos lentos com delimitação (timeout,
+limite de saída, paralelismo) e cache no Linux; `--compact` é o caminho
+leve. Ver "Patch 5: Coleta de Sistema".
+
 ## Restrições Técnicas Críticas
 
 ### 1. Orçamento de performance
@@ -80,6 +85,12 @@ astrofetch padrão: idealmente abaixo de 100 ms em máquina comum.
 ```
 
 Essa meta não é uma garantia rígida, mas deve orientar decisões de implementação.
+
+Nota (Patch 5): a regra "não chamar subprocessos lentos no caminho padrão"
+foi substituída — o padrão Full executa subprocessos delimitados (timeout,
+limite de saída, paralelismo, cache no Linux); o caminho leve é
+`--compact`. A meta de 100 ms segue como referência, não garantia: no
+benchmark do Patch 5, Full cold mediu 204.7 ms na máquina de referência.
 
 ### 2. Layout robusto com ANSI e Unicode
 
@@ -434,6 +445,10 @@ Critério de aceite:
 - O app continua útil fora de GNOME, fora de Ubuntu, no macOS e no Windows.
 - Os campos avançados não bloqueiam o comando padrão.
 
+Nota (Patch 5): o critério "a coleta padrão não chama subprocessos lentos"
+foi substituído — a coleta padrão (Full) executa subprocessos delimitados.
+Ver "Patch 5: Coleta de Sistema".
+
 ## Fase 8: Layout Final
 
 Implemente o módulo `layout.rs`.
@@ -483,6 +498,11 @@ Critério de aceite:
 - A CLI permanece fácil de entender.
 
 ## Fase 10: Campos Lentos e Cache Opcional
+
+Status: implementado nos Patches 5B–5E (ver "Patch 5: Coleta de Sistema" no
+final deste documento). As regras abaixo foram substituídas: os campos
+lentos estão no perfil Full padrão, com timeout, limite de saída,
+paralelismo e cache no Linux; o caminho leve é `--compact`.
 
 Campos como packages, GPU detalhada, temas e resolução podem exigir subprocessos ou APIs específicas.
 
@@ -731,6 +751,9 @@ Prioridades:
 10. Aplicar contraste e correção de aspecto na renderização.
 11. Implementar incrementalmente, com testes onde fizer sentido.
 
+Nota (Patch 5): a prioridade 7 foi substituída pela política de subprocessos
+delimitados do perfil Full (ver "Patch 5: Coleta de Sistema").
+
 Ao implementar, comece por `astrofetch` imprimindo uma tela screenFetch-like mínima e multiplataforma. Depois melhore o motor visual e adicione campos extras.
 
 ## MVP 0.2 - Visual Polish e ScreenFetch Parity
@@ -844,9 +867,101 @@ Critérios de aceite:
 
 ### Próximos trabalhos
 
-- Aplicar timeout real para comandos externos.
+- Aplicar timeout real para comandos externos. (Concluído no Patch 5C.)
 - Considerar cache opcional ou modos fast/full para campos mais caros.
+  (Concluído nos Patches 5B e 5E: perfis Full/Compact e cache TTL seletivo.)
 - Consolidar GitHub Releases binários e `install.sh`.
 - Preparar crates.io e Homebrew como canais futuros, depois dos releases
   binários.
 - Melhorar fontes de informação em macOS e Windows.
+
+## Patch 5: Coleta de Sistema (5A–5E)
+
+Status: implementado e concluído (PRs #7–#14; mesclado em `cdc88fa`).
+
+O Patch 5 reestruturou a coleta de sistema e adicionou perfis de coleta,
+segurança de subprocessos, paralelismo controlado e cache TTL seletivo.
+
+### 5A — Decomposição da coleta de sistema
+
+`src/system.rs` foi dividido em `src/system/` (`collector`, `cache`,
+`command`, `desktop`, `disk`, `fields`, `format`, `parsers`), com
+fronteiras limpas entre coleta, campos e formatação. Refatoração sem
+mudança de comportamento.
+
+### 5B — Perfis Full e Compact
+
+`CollectionProfile::Full` (padrão) coleta todos os campos;
+`CollectionProfile::Compact` (`--compact`) pula os sete coletores cujos
+valores nunca são renderizados no modo compacto: Packages, Shell,
+Resolution, GPU, DE, WM e cosméticos de desktop. Compact é o caminho leve.
+
+### 5C — Runner de comandos com saída limitada e timeout
+
+Todos os comandos externos passam pelo runner seguro: timeout de 10 s com
+kill/reap do processo, limite de saída de 64 KiB por padrão (o coletor de packages usa 256 KiB), e qualquer falha vira
+`None` (campo omitido). Nenhum coletor depende mais de caminhos diretos sem
+limite.
+
+### 5D — Paralelismo controlado
+
+Os quatro coletores caros do perfil Full (packages, resolution, GPU e
+cosméticos de desktop) rodam em threads escopadas em paralelo com o trabalho
+da thread principal; falha de spawn faz fallback sequencial; a montagem
+final dos campos é determinística (ordem estável via `BTreeMap`).
+
+### 5E — Cache TTL seletivo (Linux, perfil Full)
+
+Cache persistente por arquivo para os quatro coletores caros, somente no
+perfil Full em Linux:
+
+| Campo | TTL |
+| --- | ---: |
+| Packages | 30 min |
+| Resolution | 5 min |
+| GPU | 24 h |
+| Cosméticos desktop | 15 min |
+
+Comportamento:
+
+- Compact e plataformas não-Linux nunca tocam o cache.
+- Entrada stale, malformada ou com scope não correspondente vira coleta ao vivo.
+- Valores `None`/vazios e cosméticos todos-`None` não são gravados.
+- Hit de cache pula o trabalho de coleta correspondente.
+- Falhas de cache são best-effort e nunca quebram a saída normal.
+- Controle por ambiente: `ASTROFETCH_DISABLE_CACHE` (desativa);
+  `ASTROFETCH_CACHE_DIR` (diretório absoluto); senão
+  `$XDG_CACHE_HOME/astrofetch`; senão `~/.cache/astrofetch`.
+
+### Benchmark final (5E)
+
+Máquina: Ubuntu 24.04, Ryzen 7 5800X; 5 execuções por série.
+
+| Série | Mediana |
+| --- | ---: |
+| Full pré-5E (cold) | 204.7 ms |
+| Full pós-5E (cold) | 204.7 ms |
+| Full pós-5E (warm) | 53.2 ms |
+| Compact pré-5E | 32.2 ms |
+| Compact pós-5E | 32.9 ms |
+
+No warm run, os hits persistidos foram Packages, GPU e cosméticos de
+desktop; Resolution retornou `None` e permaneceu como coleta ao vivo
+(miss).
+
+Interpretação conservadora:
+
+- Warm observou ~3.85x mais rápido / ~74% menos tempo nesta máquina/amostra.
+- Sem regressão observável no caminho cold.
+- Diferença do Compact consistente com ruído entre execuções.
+- Uma máquina, 5 execuções por série; não é garantia de performance geral.
+
+### Encerramento (definition of done)
+
+- 5A–5E mesclados e cobertos por testes.
+- Comportamento do cache documentado no README (seção "Performance and
+  cache").
+- Declarações históricas substituídas pelo Patch 5 foram anotadas nas
+  seções correspondentes (Princípios, Restrição 1, Fase 7, Fase 10, Prompt
+  de Continuidade e MVP 0.2B).
+- Patch 5 considerado fechado; não há trabalho pendente.
