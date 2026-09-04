@@ -1,4 +1,5 @@
 use crate::density::DensityMap;
+use crate::seed::GenerationContext;
 use noise::{NoiseFn, OpenSimplex};
 use rand::rngs::StdRng;
 use rand::RngExt;
@@ -6,7 +7,7 @@ use rand::RngExt;
 const TAU: f64 = std::f64::consts::PI * 2.0;
 
 /// Tunable parameters for the analytic spiral galaxy model.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpiralGalaxyConfig {
     pub arms: usize,
     pub pitch: f64,
@@ -36,15 +37,44 @@ impl SpiralGalaxyConfig {
     }
 }
 
+/// Generates a spiral galaxy using the legacy RNG-only entry point.
+///
+/// Production scene generation uses [`generate_spiral_galaxy_with_context`].
+/// This wrapper remains for focused density tests that predate feature-specific
+/// seed namespaces; no optional feature should depend on this context-free path.
+#[cfg(test)]
+pub fn generate_spiral_galaxy(
+    terminal_width: usize,
+    terminal_height: usize,
+    rng: &mut StdRng,
+) -> DensityMap {
+    generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, None)
+}
+
+/// Generates a spiral galaxy with explicit access to the base scene seed.
+///
+/// `GenerationContext` does not replace or advance the legacy RNG. It exists so
+/// Phase 1 and later optional morphology can derive isolated feature streams
+/// without perturbing the existing Spiral configuration or OpenSimplex seed.
+pub fn generate_spiral_galaxy_with_context(
+    terminal_width: usize,
+    terminal_height: usize,
+    rng: &mut StdRng,
+    context: GenerationContext,
+) -> DensityMap {
+    generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, Some(context))
+}
+
 /// Generates a spiral galaxy as a high-resolution density field.
 ///
 /// `terminal_height` is the number of terminal text rows requested by the user.
 /// The returned map has twice that height because the renderer consumes two
 /// density rows per visible terminal row via half-block glyphs.
-pub fn generate_spiral_galaxy(
+fn generate_spiral_galaxy_impl(
     terminal_width: usize,
     terminal_height: usize,
     rng: &mut StdRng,
+    _context: Option<GenerationContext>,
 ) -> DensityMap {
     let config = SpiralGalaxyConfig::from_rng(rng);
 
@@ -171,7 +201,36 @@ fn normalized_noise(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
+    use crate::seed::{derive_feature_seed, SPIRAL_BAR_V1};
+    use rand::{RngExt, SeedableRng};
+
+    fn legacy_rng_checkpoint_signature(seed: u64) -> u64 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let config = SpiralGalaxyConfig::from_rng(&mut rng);
+        let noise_seed = rng.random::<u32>();
+
+        let words = [
+            config.arms as u64,
+            config.pitch.to_bits(),
+            config.inclination_rad.to_bits(),
+            config.rotation_rad.to_bits(),
+            config.bulge_sigma.to_bits(),
+            config.disk_scale.to_bits(),
+            config.arm_width.to_bits(),
+            config.arm_strength.to_bits(),
+            config.noise_scale.to_bits(),
+            u64::from(noise_seed),
+        ];
+
+        let mut hash = 0xcbf29ce484222325_u64;
+        for word in words {
+            for byte in word.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x100000001b3);
+            }
+        }
+        hash
+    }
 
     #[test]
     fn test_spiral_galaxy_is_deterministic() {
@@ -182,6 +241,23 @@ mod tests {
         let map2 = generate_spiral_galaxy(30, 12, &mut rng2);
 
         assert_eq!(map1, map2);
+    }
+
+    #[test]
+    fn test_spiral_context_path_matches_legacy_path_before_features() {
+        let seed = 42;
+        let mut legacy_rng = StdRng::seed_from_u64(seed);
+        let mut contextual_rng = StdRng::seed_from_u64(seed);
+
+        let legacy = generate_spiral_galaxy(30, 12, &mut legacy_rng);
+        let contextual = generate_spiral_galaxy_with_context(
+            30,
+            12,
+            &mut contextual_rng,
+            GenerationContext::new(seed),
+        );
+
+        assert_eq!(contextual, legacy);
     }
 
     #[test]
@@ -219,6 +295,49 @@ mod tests {
         assert_eq!(SpiralGalaxyConfig::from_rng(&mut rng).arms, 4);
         let mut rng = StdRng::seed_from_u64(0);
         assert_eq!(SpiralGalaxyConfig::from_rng(&mut rng).arms, 5);
+    }
+
+    #[test]
+    fn test_spiral_legacy_rng_checkpoint_anchors() {
+        // Baseline captured from main at f036c2b230dc5a1faf6f9dcb2614b12d0e7726e8.
+        // These signatures cover every legacy SpiralGalaxyConfig draw plus the
+        // subsequent OpenSimplex seed draw. New feature RNGs must not perturb
+        // this checkpoint.
+        let actual = [
+            (4_u64, legacy_rng_checkpoint_signature(4)),
+            (16_u64, legacy_rng_checkpoint_signature(16)),
+            (42_u64, legacy_rng_checkpoint_signature(42)),
+        ];
+        let expected = [
+            (4_u64, 11016964189280910970_u64),
+            (16_u64, 15594627238422693320_u64),
+            (42_u64, 13280321653872101795_u64),
+        ];
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_spiral_feature_rng_does_not_advance_legacy_stream() {
+        let seed = 42;
+
+        let mut baseline_rng = StdRng::seed_from_u64(seed);
+        let baseline_config = SpiralGalaxyConfig::from_rng(&mut baseline_rng);
+        let baseline_noise_seed = baseline_rng.random::<u32>();
+
+        let mut isolated_rng = StdRng::seed_from_u64(seed);
+        let isolated_config = SpiralGalaxyConfig::from_rng(&mut isolated_rng);
+
+        let bar_seed = derive_feature_seed(seed, SPIRAL_BAR_V1);
+        let mut bar_rng = StdRng::seed_from_u64(bar_seed);
+        for _ in 0..32 {
+            let _ = bar_rng.random::<u64>();
+        }
+
+        let isolated_noise_seed = isolated_rng.random::<u32>();
+
+        assert_eq!(isolated_config, baseline_config);
+        assert_eq!(isolated_noise_seed, baseline_noise_seed);
     }
 
     #[test]

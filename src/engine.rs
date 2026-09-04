@@ -1,5 +1,6 @@
 use crate::density::DensityMap;
-use crate::galaxy::generate_spiral_galaxy;
+use crate::galaxy::generate_spiral_galaxy_with_context;
+use crate::seed::GenerationContext;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
@@ -53,8 +54,10 @@ impl ArtModel {
     /// O fluxo de RNG é explícito:
     /// 1. Um RNG é criado com o seed para selecionar o modelo concreto.
     /// 2. Um novo RNG é criado com o mesmo seed para gerar a cena.
+    /// 3. O seed base é passado separadamente como contexto para features isoladas.
     ///
-    /// Isso preserva o comportamento determinístico existente.
+    /// Isso preserva o comportamento determinístico existente sem obrigar novas
+    /// features a consumir o stream de RNG legado.
     pub fn generate_scene(&self, width: usize, height: usize, seed: Option<u64>) -> GeneratedScene {
         let seed = seed.unwrap_or_else(rand::random);
         let mut selection_rng = StdRng::seed_from_u64(seed);
@@ -63,6 +66,7 @@ impl ArtModel {
         // Cria um novo RNG com o mesmo seed para geração da cena
         // Isso garante que o estado do RNG não seja afetado pela seleção do modelo
         let mut generation_rng = StdRng::seed_from_u64(seed);
+        let generation_context = GenerationContext::new(seed);
 
         let width = width.max(1);
         let height = height.max(1);
@@ -77,7 +81,12 @@ impl ArtModel {
             ArtModel::Elliptical => {
                 generate_elliptical_density(width, render_height, &mut generation_rng)
             }
-            ArtModel::Spiral => generate_spiral_galaxy(width, height, &mut generation_rng),
+            ArtModel::Spiral => generate_spiral_galaxy_with_context(
+                width,
+                height,
+                &mut generation_rng,
+                generation_context,
+            ),
             ArtModel::Cluster => {
                 let canvas = generate_cluster(width, render_height, &mut generation_rng);
                 DensityMap::from_rows(canvas).unwrap()
