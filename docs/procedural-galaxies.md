@@ -37,7 +37,7 @@ The `RenderProfile` is an explicit per-model configuration that determines:
 - whether normalization is applied;
 - which contrast stretch is used;
 - how the visibility threshold is determined;
-- which renderer family is used.
+- which preparation family is used (galaxy or raw starfield).
 
 This separation makes post-processing decisions explicit and testable.
 
@@ -54,9 +54,11 @@ Galaxy models share a common density preparation path:
 
 This preparation is **renderer-neutral**: the same prepared density is consumed by all three renderers (HalfBlock, Shade, ASCII). The choice of renderer happens after density preparation.
 
-### Starfield bypass
+### Starfield preparation
 
-The Starfield model uses its dedicated rendering path. It does not undergo normalization or contrast stretch. Starfield density is rendered directly with its point-like glyphs.
+With the dedicated Starfield renderer (selected by `auto`), the Starfield model uses its own rendering path. It does not undergo normalization or contrast stretch. Starfield density is rendered directly with its point-like glyphs.
+
+When Starfield is rendered through HalfBlock, Shade, or ASCII, its sparse density is prepared like a galaxy model: robust percentile normalization (2nd–98th), gamma stretch (γ=0.85), and a target-occupancy threshold (0.10).
 
 ## Renderer selection
 
@@ -69,11 +71,14 @@ After the requested model is resolved to a concrete model, the effective rendere
 | Spiral         | HalfBlock | HalfBlock    | Shade        | ASCII     |
 | Elliptical     | HalfBlock | HalfBlock    | Shade        | ASCII     |
 | Cluster        | HalfBlock | HalfBlock    | Shade        | ASCII     |
-| Starfield      | Starfield | incompatible | incompatible | Starfield |
+| Starfield      | Starfield | HalfBlock    | Shade        | ASCII     |
 
 ### Compatibility rules
 
-- **Galaxy models** (Spiral, Elliptical, Cluster) accept all renderer choices:
+Every explicit renderer choice works with every concrete model. `auto` keeps
+the model-specific default:
+
+- **Galaxy models** (Spiral, Elliptical, Cluster):
   - `auto` → HalfBlock
   - `half-block` → HalfBlock
   - `shade` → Shade
@@ -81,21 +86,20 @@ After the requested model is resolved to a concrete model, the effective rendere
 
 - **Starfield model**:
   - `auto` → Starfield (dedicated renderer)
-  - `ascii` → Starfield (dedicated renderer)
-  - `half-block` → CLI error
-  - `shade` → CLI error
+  - `half-block` → HalfBlock
+  - `shade` → Shade
+  - `ascii` → ASCII
 
 ### Random model resolution
 
 The `random` model is resolved to a concrete model (Spiral, Elliptical, Cluster, or Starfield) **before** renderer selection. The matrix applies to the resolved model, not the unresolved `random` choice.
 
-### No silent fallback
-
-When an incompatible renderer is selected for Starfield, the CLI returns an explicit error. There is no silent fallback to a compatible renderer.
-
 ### Implementation
 
-Renderer resolution is implemented in `App::resolve_effective_renderer` in `src/app.rs`. Invalid combinations return `AppError::Cli` with a descriptive message.
+Renderer resolution is implemented in `App::resolve_effective_renderer` in
+`src/app.rs`. Density preparation is selected by
+`RenderProfile::for_model_and_renderer` in `src/render/profile.rs`. An
+unresolved `random` model reaching renderer selection is an internal error.
 
 ## Density map representation
 
@@ -192,7 +196,7 @@ The spiral renderer builds a face-on analytic galaxy and then applies projection
 
 For each generated spiral, seeded random parameters define:
 
-- number of arms, usually 2 or 3;
+- number of arms, from 2 to 5;
 - spiral pitch;
 - inclination;
 - sky-plane rotation;

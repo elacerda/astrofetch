@@ -5,6 +5,7 @@
 use crate::density::DensityMap;
 use crate::engine::ArtModel;
 use crate::render::stretch::{apply_gamma_stretch, StretchType};
+use crate::render::EffectiveRenderer;
 
 /// Normalization strategy for density maps.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +90,32 @@ impl RenderProfile {
                 // This should never happen - Random is resolved before this is called
                 panic!("Random model should be resolved before getting render profile")
             }
+        }
+    }
+}
+
+impl RenderProfile {
+    /// Returns the render profile for a resolved model and the effective renderer.
+    ///
+    /// The dedicated Starfield renderer keeps raw sparse densities. Every galaxy
+    /// renderer (HalfBlock, Shade, Ascii) consumes Galaxy preparation, even when
+    /// the model is Starfield, so explicit renderer choices work with every
+    /// concrete model.
+    pub fn for_model_and_renderer(model: ArtModel, renderer: EffectiveRenderer) -> Self {
+        if renderer == EffectiveRenderer::Starfield {
+            return Self::for_model(model);
+        }
+        match model {
+            ArtModel::Starfield => RenderProfile {
+                normalization: Normalization::Robust {
+                    low_percentile: 0.02,
+                    high_percentile: 0.98,
+                },
+                stretch: StretchType::Gamma(0.85),
+                threshold: ThresholdStrategy::TargetOccupancy(0.10),
+                preparation: PreparationKind::Galaxy,
+            },
+            other => Self::for_model(other),
         }
     }
 }
@@ -335,6 +362,56 @@ mod tests {
         assert_eq!(profile.normalization, Normalization::None);
         assert_eq!(profile.stretch, StretchType::None);
         assert!(matches!(profile.threshold, ThresholdStrategy::Dedicated));
+    }
+
+    #[test]
+    fn test_profile_for_model_and_renderer_starfield_dedicated_keeps_raw() {
+        let profile = RenderProfile::for_model_and_renderer(
+            ArtModel::Starfield,
+            EffectiveRenderer::Starfield,
+        );
+        assert_eq!(profile, RenderProfile::for_model(ArtModel::Starfield));
+    }
+
+    #[test]
+    fn test_profile_for_model_and_renderer_starfield_galaxy_renderers() {
+        for renderer in [
+            EffectiveRenderer::HalfBlock,
+            EffectiveRenderer::Shade,
+            EffectiveRenderer::Ascii,
+        ] {
+            let profile = RenderProfile::for_model_and_renderer(ArtModel::Starfield, renderer);
+            assert_eq!(profile.preparation, PreparationKind::Galaxy);
+            assert!(matches!(
+                profile.normalization,
+                Normalization::Robust {
+                    low_percentile: 0.02,
+                    high_percentile: 0.98
+                }
+            ));
+            assert_eq!(profile.stretch, StretchType::Gamma(0.85));
+            assert!(matches!(
+                profile.threshold,
+                ThresholdStrategy::TargetOccupancy(0.10)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_profile_for_model_and_renderer_galaxy_models_unchanged() {
+        for model in [ArtModel::Spiral, ArtModel::Elliptical, ArtModel::Cluster] {
+            for renderer in [
+                EffectiveRenderer::HalfBlock,
+                EffectiveRenderer::Shade,
+                EffectiveRenderer::Ascii,
+            ] {
+                assert_eq!(
+                    RenderProfile::for_model_and_renderer(model, renderer),
+                    RenderProfile::for_model(model),
+                    "{model:?} + {renderer:?} should keep the model profile"
+                );
+            }
+        }
     }
 
     #[test]

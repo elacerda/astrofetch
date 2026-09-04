@@ -164,7 +164,8 @@ impl App {
         let effective_renderer =
             Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
 
-        let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
+        let profile: RenderProfile =
+            RenderProfile::for_model_and_renderer(engine_resolved, effective_renderer);
         let prepared = prepare_density(density, profile);
 
         let effective_palette = resolve_color_palette(self.args.palette);
@@ -227,7 +228,8 @@ impl App {
         let effective_renderer =
             Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
 
-        let profile: RenderProfile = RenderProfile::for_model(engine_resolved);
+        let profile: RenderProfile =
+            RenderProfile::for_model_and_renderer(engine_resolved, effective_renderer);
         let prepared = prepare_density(density, profile);
 
         let effective_palette = resolve_color_palette(self.args.palette);
@@ -253,15 +255,15 @@ impl App {
 
     /// Resolves the effective renderer based on the requested renderer choice and resolved model.
     ///
-    /// Implements the compatibility matrix:
+    /// Every explicit renderer choice works with every concrete model:
     /// - Galaxy models (Spiral, Elliptical, Cluster) with Auto → HalfBlock
     /// - Galaxy models with HalfBlock → HalfBlock
     /// - Galaxy models with Shade → Shade
     /// - Galaxy models with Ascii → Ascii
     /// - Starfield with Auto → Starfield
-    /// - Starfield with Ascii → Starfield
-    /// - Starfield with HalfBlock → CLI error
-    /// - Starfield with Shade → CLI error
+    /// - Starfield with HalfBlock → HalfBlock
+    /// - Starfield with Shade → Shade
+    /// - Starfield with Ascii → Ascii
     /// - Random model (unresolved) → Render error (should never happen)
     fn resolve_effective_renderer(
         requested: RendererChoice,
@@ -286,13 +288,9 @@ impl App {
 
             // Starfield model
             (EngineModel::Starfield, RendererChoice::Auto) => Ok(EffectiveRenderer::Starfield),
-            (EngineModel::Starfield, RendererChoice::HalfBlock) => Err(AppError::Cli(
-                "model starfield is incompatible with --renderer half-block".to_string(),
-            )),
-            (EngineModel::Starfield, RendererChoice::Shade) => Err(AppError::Cli(
-                "model starfield is incompatible with --renderer shade".to_string(),
-            )),
-            (EngineModel::Starfield, RendererChoice::Ascii) => Ok(EffectiveRenderer::Starfield),
+            (EngineModel::Starfield, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
+            (EngineModel::Starfield, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
+            (EngineModel::Starfield, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
 
             // Random model should be resolved before this function is called
             (EngineModel::Random, _) => Err(AppError::Render(
@@ -729,51 +727,60 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_effective_renderer_starfield_halfblock_error() {
+    fn test_resolve_effective_renderer_starfield_halfblock() {
         let result =
             App::resolve_effective_renderer(RendererChoice::HalfBlock, EngineModel::Starfield);
-        assert!(matches!(result, Err(AppError::Cli(_))));
+        assert_eq!(result.unwrap(), EffectiveRenderer::HalfBlock);
     }
 
     #[test]
-    fn test_resolve_effective_renderer_starfield_shade_error() {
+    fn test_resolve_effective_renderer_starfield_shade() {
         let result = App::resolve_effective_renderer(RendererChoice::Shade, EngineModel::Starfield);
-        assert!(matches!(result, Err(AppError::Cli(_))));
+        assert_eq!(result.unwrap(), EffectiveRenderer::Shade);
     }
 
     #[test]
-    fn test_resolve_effective_renderer_starfield_ascii_starfield() {
+    fn test_resolve_effective_renderer_starfield_ascii() {
         let result = App::resolve_effective_renderer(RendererChoice::Ascii, EngineModel::Starfield);
-        assert_eq!(result.unwrap(), EffectiveRenderer::Starfield);
+        assert_eq!(result.unwrap(), EffectiveRenderer::Ascii);
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_full_concrete_matrix() {
+        let auto_defaults = [
+            (EngineModel::Spiral, EffectiveRenderer::HalfBlock),
+            (EngineModel::Elliptical, EffectiveRenderer::HalfBlock),
+            (EngineModel::Cluster, EffectiveRenderer::HalfBlock),
+            (EngineModel::Starfield, EffectiveRenderer::Starfield),
+        ];
+        for (model, auto_renderer) in auto_defaults {
+            assert_eq!(
+                App::resolve_effective_renderer(RendererChoice::Auto, model).unwrap(),
+                auto_renderer,
+                "Auto should keep the model-specific default for {model:?}"
+            );
+            assert_eq!(
+                App::resolve_effective_renderer(RendererChoice::HalfBlock, model).unwrap(),
+                EffectiveRenderer::HalfBlock,
+                "HalfBlock should work for {model:?}"
+            );
+            assert_eq!(
+                App::resolve_effective_renderer(RendererChoice::Shade, model).unwrap(),
+                EffectiveRenderer::Shade,
+                "Shade should work for {model:?}"
+            );
+            assert_eq!(
+                App::resolve_effective_renderer(RendererChoice::Ascii, model).unwrap(),
+                EffectiveRenderer::Ascii,
+                "Ascii should work for {model:?}"
+            );
+        }
     }
 
     #[test]
     fn test_resolve_effective_renderer_random_error() {
         let result = App::resolve_effective_renderer(RendererChoice::Auto, EngineModel::Random);
         assert!(matches!(result, Err(AppError::Render(_))));
-    }
-
-    #[test]
-    fn test_resolve_effective_renderer_incompatible_errors_contain_model_and_renderer() {
-        let result1 =
-            App::resolve_effective_renderer(RendererChoice::HalfBlock, EngineModel::Starfield);
-        match result1 {
-            Err(AppError::Cli(ref message)) => {
-                assert!(message.contains("starfield"));
-                assert!(message.contains("half-block"));
-            }
-            other => panic!("expected CLI error, got {other:?}"),
-        }
-
-        let result2 =
-            App::resolve_effective_renderer(RendererChoice::Shade, EngineModel::Starfield);
-        match result2 {
-            Err(AppError::Cli(ref message)) => {
-                assert!(message.contains("starfield"));
-                assert!(message.contains("shade"));
-            }
-            other => panic!("expected CLI error, got {other:?}"),
-        }
     }
 
     // ===== render_prepared_density tests =====
@@ -906,6 +913,82 @@ mod tests {
             ColorPalette::Nebula,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_starfield_end_to_end_galaxy_renderers_fixed_seed() {
+        let terminal = Terminal::with_colors(true, false);
+        let scene = EngineModel::Starfield.generate_scene(20, 10, Some(42));
+
+        let cases = [
+            (EffectiveRenderer::HalfBlock, "▀▄█"),
+            (EffectiveRenderer::Shade, "░▒▓█"),
+            (EffectiveRenderer::Ascii, ".:-=+*#%@"),
+        ];
+
+        for (renderer, glyphs) in cases {
+            let profile = RenderProfile::for_model_and_renderer(EngineModel::Starfield, renderer);
+            let prepared = prepare_density(scene.density.clone(), profile);
+            let lines = App::render_prepared_density(
+                prepared,
+                renderer,
+                false,
+                &terminal,
+                ColorPalette::Nebula,
+            )
+            .unwrap_or_else(|err| panic!("starfield + {renderer:?} should render: {err}"));
+
+            let mut saw_glyph = false;
+            for line in &lines {
+                for ch in line.chars() {
+                    if ch.is_whitespace() {
+                        continue;
+                    }
+                    assert!(
+                        glyphs.contains(ch) || ".*+".contains(ch),
+                        "unexpected glyph {ch:?} for {renderer:?}"
+                    );
+                    if glyphs.contains(ch) {
+                        saw_glyph = true;
+                    }
+                }
+            }
+            assert!(saw_glyph, "{renderer:?} should produce visible structure");
+        }
+    }
+
+    #[test]
+    fn test_starfield_end_to_end_galaxy_renderers_deterministic() {
+        let terminal = Terminal::with_colors(true, false);
+        let renderers = [
+            EffectiveRenderer::HalfBlock,
+            EffectiveRenderer::Shade,
+            EffectiveRenderer::Ascii,
+        ];
+
+        let mut previous: Vec<(EffectiveRenderer, Vec<String>)> = Vec::new();
+        for _ in 0..2 {
+            let scene = EngineModel::Starfield.generate_scene(20, 10, Some(42));
+            for renderer in renderers {
+                let profile =
+                    RenderProfile::for_model_and_renderer(EngineModel::Starfield, renderer);
+                let prepared = prepare_density(scene.density.clone(), profile);
+                let lines = App::render_prepared_density(
+                    prepared,
+                    renderer,
+                    false,
+                    &terminal,
+                    ColorPalette::Nebula,
+                )
+                .unwrap();
+                match previous.iter_mut().find(|(r, _)| *r == renderer) {
+                    Some((_, prev)) => {
+                        assert_eq!(prev, &lines, "{renderer:?} should be deterministic")
+                    }
+                    None => previous.push((renderer, lines)),
+                }
+            }
+        }
     }
 
     #[test]

@@ -23,7 +23,7 @@ impl SpiralGalaxyConfig {
     /// Draws deterministic-looking physical parameters from the seeded RNG.
     pub fn from_rng(rng: &mut StdRng) -> Self {
         Self {
-            arms: rng.gen_range(2..=3),
+            arms: rng.gen_range(2..=5),
             pitch: rng.gen_range(0.42..0.70),
             inclination_rad: rng.gen_range(0.70..1.05),
             rotation_rad: rng.gen_range(0.0..TAU),
@@ -192,5 +192,41 @@ mod tests {
         assert_eq!(map.width, 30);
         assert_eq!(map.height, 24);
         assert!(map.data.iter().any(|v| *v > 0.1));
+    }
+
+    #[test]
+    fn test_spiral_arm_count_range_is_2_to_5() {
+        let mut counts = [0usize; 6];
+        for seed in 0..2000u64 {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let config = SpiralGalaxyConfig::from_rng(&mut rng);
+            assert!(
+                (2..=5).contains(&config.arms),
+                "seed {seed}: arms out of range"
+            );
+            counts[config.arms] += 1;
+        }
+        for (arms, &count) in counts.iter().enumerate().skip(2).take(4) {
+            assert!(count > 0, "expected at least one seed with {arms} arms");
+        }
+    }
+
+    #[test]
+    fn test_spiral_fixed_seed_arm_count_anchors() {
+        // Seed anchors for the current RNG stream: seed 4 has 4 arms,
+        // seed 0 has 5 arms.
+        let mut rng = StdRng::seed_from_u64(4);
+        assert_eq!(SpiralGalaxyConfig::from_rng(&mut rng).arms, 4);
+        let mut rng = StdRng::seed_from_u64(0);
+        assert_eq!(SpiralGalaxyConfig::from_rng(&mut rng).arms, 5);
+    }
+
+    #[test]
+    fn test_spiral_4_and_5_arm_scenes_are_deterministic() {
+        for seed in [0u64, 4] {
+            let scene1 = crate::engine::ArtModel::Spiral.generate_scene(30, 15, Some(seed));
+            let scene2 = crate::engine::ArtModel::Spiral.generate_scene(30, 15, Some(seed));
+            assert_eq!(scene1.density, scene2.density);
+        }
     }
 }
