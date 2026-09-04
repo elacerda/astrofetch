@@ -1,7 +1,7 @@
 use crate::density::DensityMap;
 use noise::{NoiseFn, OpenSimplex};
 use rand::rngs::StdRng;
-use rand::Rng;
+use rand::RngExt;
 
 const TAU: f64 = std::f64::consts::PI * 2.0;
 
@@ -23,15 +23,15 @@ impl SpiralGalaxyConfig {
     /// Draws deterministic-looking physical parameters from the seeded RNG.
     pub fn from_rng(rng: &mut StdRng) -> Self {
         Self {
-            arms: rng.gen_range(2..=5),
-            pitch: rng.gen_range(0.42..0.70),
-            inclination_rad: rng.gen_range(0.70..1.05),
-            rotation_rad: rng.gen_range(0.0..TAU),
-            bulge_sigma: rng.gen_range(0.045..0.075),
-            disk_scale: rng.gen_range(0.45..0.62),
-            arm_width: rng.gen_range(0.018..0.034),
-            arm_strength: rng.gen_range(2.0..3.4),
-            noise_scale: rng.gen_range(3.5..6.0),
+            arms: rng.random_range(2..=5),
+            pitch: rng.random_range(0.42..0.70),
+            inclination_rad: rng.random_range(0.70..1.05),
+            rotation_rad: rng.random_range(0.0..TAU),
+            bulge_sigma: rng.random_range(0.045..0.075),
+            disk_scale: rng.random_range(0.45..0.62),
+            arm_width: rng.random_range(0.018..0.034),
+            arm_strength: rng.random_range(2.0..3.4),
+            noise_scale: rng.random_range(3.5..6.0),
         }
     }
 }
@@ -57,7 +57,7 @@ pub fn generate_spiral_galaxy(
     let high_width = out_width * sample;
     let high_height = out_height * sample;
 
-    let noise_seed = rng.gen::<u32>();
+    let noise_seed = rng.random::<u32>();
     let coarse_noise = OpenSimplex::new(noise_seed);
     let fine_noise = OpenSimplex::new(noise_seed.wrapping_add(1));
 

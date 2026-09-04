@@ -1,7 +1,7 @@
 use crate::density::DensityMap;
 use crate::galaxy::generate_spiral_galaxy;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Modelo de arte ASCII.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,7 +42,7 @@ impl ArtModel {
                     ArtModel::Spiral,
                     ArtModel::Cluster,
                 ];
-                models[rng.gen_range(0..models.len())]
+                models[rng.random_range(0..models.len())]
             }
             model => *model,
         }
@@ -106,15 +106,15 @@ fn generate_starfield(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<
     // stars over empty cells, so this model should not fill the whole canvas.
     let num_stars = (width * height / 64).max(8);
     for _ in 0..num_stars {
-        let x = rng.gen_range(0..width);
-        let y = rng.gen_range(0..height);
-        let brightness: f64 = rng.gen_range(0.040_f64..0.180_f64);
+        let x = rng.random_range(0..width);
+        let y = rng.random_range(0..height);
+        let brightness: f64 = rng.random_range(0.040_f64..0.180_f64);
         canvas[y][x] = canvas[y][x].max(brightness);
     }
 
     // Tiny invisible seed signature so the renderer-derived star overlay varies
     // by seed even when the field is mostly empty.
-    let seed_signature: f64 = rng.gen_range(0.001_f64..0.004_f64);
+    let seed_signature: f64 = rng.random_range(0.001_f64..0.004_f64);
     canvas[0][0] = canvas[0][0].max(seed_signature);
 
     canvas
@@ -127,8 +127,8 @@ fn generate_elliptical_density(width: usize, height: usize, rng: &mut StdRng) ->
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
 
-    let ellipticity = 0.2 + rng.gen_range(0.0..1.0) * 0.6;
-    let rotation = rng.gen_range(0.0..std::f64::consts::PI);
+    let ellipticity = 0.2 + rng.random_range(0.0..1.0) * 0.6;
+    let rotation = rng.random_range(0.0..std::f64::consts::PI);
 
     let cos_rot = rotation.cos();
     let sin_rot = rotation.sin();
@@ -167,7 +167,7 @@ fn generate_elliptical_density(width: usize, height: usize, rng: &mut StdRng) ->
 
             // Very light grain only where the galaxy is actually visible.
             if value > 0.0 {
-                value += rng.gen_range(-0.012_f64..0.012_f64);
+                value += rng.random_range(-0.012_f64..0.012_f64);
             }
 
             map.set(x, y, value.clamp(0.0_f64, 1.0_f64));
@@ -184,17 +184,17 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
     let center_x = width as f64 / 2.0;
     let center_y = height as f64 / 2.0;
 
-    let num_stars = 34 + rng.gen_range(0..56);
+    let num_stars = 34 + rng.random_range(0..56);
 
     for _ in 0..num_stars {
-        let angle = rng.gen_range(0.0..2.0 * std::f64::consts::PI);
-        let r = rng.gen_range(0.0_f64..1.0).powf(1.75) * 0.44;
+        let angle = rng.random_range(0.0..2.0 * std::f64::consts::PI);
+        let r = rng.random_range(0.0_f64..1.0).powf(1.75) * 0.44;
 
         let x = (center_x + r * width as f64 * angle.cos()) as usize;
         let y = (center_y + r * height as f64 * angle.sin()) as usize;
 
         if x < width && y < height {
-            let brightness = rng.gen_range(0.16_f64..0.95_f64);
+            let brightness = rng.random_range(0.16_f64..0.95_f64);
             canvas[y][x] = brightness;
         }
     }
@@ -212,7 +212,7 @@ fn generate_cluster(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<f6
     for row in &mut canvas {
         for value in row {
             // Add light noise only where there is structure
-            *value += rng.gen_range(-0.006_f64..0.006_f64);
+            *value += rng.random_range(-0.006_f64..0.006_f64);
             // Clamp only negative values to zero (no positive display cutoff)
             *value = value.clamp(0.0_f64, 1.0_f64);
         }

@@ -13,9 +13,36 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  verify-version:
+    name: Verify tag matches Cargo version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compare tag and Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' Cargo.toml | sed -n '1p')"
+          echo "release tag: ${GITHUB_REF_NAME} (version: ${tag})"
+          echo "cargo version: ${cargo_version}"
+          if [ -z "$cargo_version" ]; then
+            echo "::error::Could not read version from Cargo.toml"
+            exit 1
+          fi
+          if [ "$tag" != "$cargo_version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${cargo_version}"
+            exit 1
+          fi
+          echo "Tag and Cargo version match: ${tag}"
+
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    needs: verify-version
 
     strategy:
       fail-fast: false
@@ -39,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -71,7 +98,7 @@ jobs:
           Compress-Archive -Path "dist/$package/astrofetch.exe" -DestinationPath "dist/$package.zip" -Force
 
       - name: Upload packaged asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: astrofetch-${{ github.ref_name }}-${{ matrix.target }}
           path: dist/astrofetch-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.archive }}
@@ -84,7 +111,7 @@ jobs:
 
     steps:
       - name: Download packaged assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -95,7 +122,16 @@ jobs:
           set -euo pipefail
           find dist -maxdepth 1 -type f -print | sort
 
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) -printf '%P\n' | sort | xargs -r sha256sum > SHA256SUMS
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
       - name: Publish release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*

@@ -538,7 +538,7 @@ impl SystemSnapshot {
     fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
 
-        system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        system.refresh_cpu_specifics(CpuRefreshKind::nothing().with_frequency());
         system.refresh_memory();
 
         let user = env_or_fallback("USER", "unknown");
@@ -627,7 +627,7 @@ impl SystemSnapshot {
         // 1. Cheap/common data needed before worker execution.
         let mut system = System::new();
 
-        system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        system.refresh_cpu_specifics(CpuRefreshKind::nothing().with_frequency());
         system.refresh_memory();
 
         let user = env_or_fallback("USER", "unknown");
@@ -704,7 +704,7 @@ impl SystemSnapshot {
     fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
 
-        system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        system.refresh_cpu_specifics(CpuRefreshKind::nothing().with_frequency());
         system.refresh_memory();
 
         let user = env_or_fallback("USER", "unknown");
@@ -879,7 +879,7 @@ mod tests {
     #[test]
     fn test_get_cpu_info_returns_brand() {
         let mut sys = System::new();
-        sys.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        sys.refresh_cpu_specifics(CpuRefreshKind::nothing().with_frequency());
         let cpu = get_cpu_info(&sys);
         assert!(!cpu.is_empty());
     }

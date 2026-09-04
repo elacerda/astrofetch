@@ -38,6 +38,9 @@ The recommended install method downloads the latest GitHub Release binary:
 curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh
 ```
 
+The installer verifies the downloaded archive against the release `SHA256SUMS`
+file and refuses to install if the checksum does not match.
+
 Preview what the installer would do:
 
 ```bash
@@ -47,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
 Install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.3.1
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.4.0
 ```
 
 Check the installed binary:
@@ -192,6 +195,42 @@ Use a fixed seed for reproducible output:
 ```bash
 astrofetch --model spiral --seed 42
 ```
+
+## Update notifications
+
+AstroFetch passively checks for newer releases. GitHub Releases is the version
+authority. The check is designed to be invisible:
+
+- It runs at most once every 24 hours, using a persistent, platform-appropriate
+  cache file.
+- It only runs when stderr is an interactive terminal.
+- It is completely silent on any failure (network, API, cache, parsing, or
+  timeout), and prints nothing when you are already on the latest release.
+- It never performs an automatic self-update.
+
+When a newer release exists, AstroFetch prints a short notice to stderr with the
+update command for your installation method:
+
+- **Homebrew** (detected from a `Cellar` path): `brew upgrade astrofetch`
+- **Install script** (detected from `~/.local/bin`): re-run the official
+  installer, which updates in place:
+  `curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh`
+- **Unknown**: the release page,
+  `https://github.com/elacerda/astrofetch/releases/latest`
+
+Detection uses only local evidence (the running executable path) and never makes
+extra network calls. When the method cannot be inferred, it falls back to the
+release page and never suggests a command that would create a parallel install.
+
+Disable the check for a single run with `--no-update-check`, or for all runs with
+the environment variable:
+
+```bash
+astrofetch --no-update-check
+ASTROFETCH_NO_UPDATE_CHECK=1 astrofetch
+```
+
+When disabled, AstroFetch performs no update-related network or cache work.
 
 ## Performance and cache
 

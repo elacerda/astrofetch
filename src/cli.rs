@@ -137,6 +137,14 @@ pub struct Args {
     /// Color palette used for procedural art
     #[arg(long, value_enum, default_value_t = PaletteChoice::Auto)]
     pub palette: PaletteChoice,
+
+    /// Disable the passive update notification check.
+    ///
+    /// The check is also disabled by the `ASTROFETCH_NO_UPDATE_CHECK=1`
+    /// environment variable. When disabled, no update-related network or
+    /// cache work is performed.
+    #[arg(long)]
+    pub no_update_check: bool,
 }
 
 /// Subcomandos explícitos do AstroFetch.

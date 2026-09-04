@@ -59,9 +59,17 @@ impl App {
     }
 
     /// Executa o app principal.
+    ///
+    /// After the main work completes, a passive update notification check is
+    /// performed. The check is silent, throttled to once per 24 hours, and
+    /// gated on an interactive stderr, so it never delays or breaks the fetch
+    /// output.
     pub fn run() -> Result<(), AppError> {
         let app = Self::new()?;
-        app.execute()
+        let no_update_check = app.args.no_update_check;
+        app.execute()?;
+        crate::update_check::maybe_check(no_update_check);
+        Ok(())
     }
 
     /// Executa a lógica principal.
@@ -455,6 +463,7 @@ mod tests {
                 layout: LayoutChoice::Auto,
                 renderer: RendererChoice::Auto,
                 palette: crate::cli::PaletteChoice::Auto,
+                no_update_check: false,
             },
             terminal: Terminal {
                 is_tty: colors_enabled,

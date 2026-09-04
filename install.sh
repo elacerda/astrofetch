@@ -102,6 +102,18 @@ detect_target() {
     esac
 }
 
+sha256_of() {
+    # Print the SHA-256 hex digest of a file.
+    # Linux provides sha256sum; macOS provides shasum.
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        die "no SHA-256 tool available (need sha256sum or shasum)"
+    fi
+}
+
 latest_version() {
     need_cmd curl
     api_url="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
@@ -149,6 +161,7 @@ fi
 
 artifact="astrofetch-${version}-${target}.tar.gz"
 download_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${version}/${artifact}"
+checksums_url="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${version}/SHA256SUMS"
 
 if [ "$dry_run" -eq 1 ]; then
     cat <<EOF
@@ -157,6 +170,7 @@ AstroFetch install dry run
   target:      ${target}
   artifact:    ${artifact}
   download:    ${download_url}
+  checksum:    ${checksums_url}
   install dir: ${install_dir}
 
 No files were downloaded or installed.
@@ -173,6 +187,14 @@ trap 'rm -rf "$tmpdir"' EXIT INT HUP TERM
 
 printf 'Downloading AstroFetch %s for %s...\n' "$version" "$target"
 curl -fsSL "$download_url" -o "$tmpdir/$artifact"
+
+printf 'Verifying checksum against release SHA256SUMS...\n'
+curl -fsSL "$checksums_url" -o "$tmpdir/SHA256SUMS"
+expected_sha="$(awk -v f="$artifact" '{ name=$NF; sub(/^\*/, "", name); if (name == f) { print $1; exit } }' "$tmpdir/SHA256SUMS")"
+[ -n "$expected_sha" ] || die "SHA256SUMS has no entry for $artifact; refusing to install"
+actual_sha="$(sha256_of "$tmpdir/$artifact")"
+[ "$expected_sha" = "$actual_sha" ] || die "checksum mismatch for $artifact (expected $expected_sha, got $actual_sha)"
+printf 'Checksum OK.\n'
 
 tar -xzf "$tmpdir/$artifact" -C "$tmpdir"
 [ -f "$tmpdir/astrofetch" ] || die "release artifact did not contain an astrofetch binary"

@@ -10,6 +10,7 @@ mod render;
 mod setup_shell;
 mod system;
 mod terminal;
+mod update_check;
 
 use app::App;
 
