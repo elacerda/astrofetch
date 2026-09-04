@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
+use super::cache::{CacheScope, CacheStore, FsCache, StringCacheKey};
 #[cfg(target_os = "macos")]
 use super::command::run_command_best_effort;
 #[cfg(target_os = "linux")]
@@ -239,14 +241,70 @@ impl FullCollectors {
     }
 }
 
-/// Private: discriminates between a spawned thread handle and a sequential fallback.
+/// Private: which of the four expensive collectors must run live.
+/// A `false` flag marks a cache hit whose cached value is returned as-is.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy)]
+struct CollectFlags {
+    packages: bool,
+    resolution: bool,
+    gpu: bool,
+    cosmetics: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl CollectFlags {
+    /// All four collectors run live (the cache-free path).
+    fn all() -> Self {
+        Self {
+            packages: true,
+            resolution: true,
+            gpu: true,
+            cosmetics: true,
+        }
+    }
+
+    /// True when at least one collector must run live.
+    fn any(&self) -> bool {
+        self.packages || self.resolution || self.gpu || self.cosmetics
+    }
+}
+
+/// Private: cache-hit values for the four expensive collectors;
+/// `None` marks a miss that must be collected live.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Default)]
+struct CachedValues {
+    packages: Option<String>,
+    resolution: Option<String>,
+    gpu: Option<String>,
+    cosmetics: Option<DesktopCosmetics>,
+}
+
+#[cfg(target_os = "linux")]
+impl CachedValues {
+    /// Reads all four cache entries; any miss reason yields `None`.
+    fn read(store: &dyn CacheStore, scope: &CacheScope) -> Self {
+        Self {
+            packages: store.get_string(StringCacheKey::Packages, scope),
+            resolution: store.get_string(StringCacheKey::Resolution, scope),
+            gpu: store.get_string(StringCacheKey::Gpu, scope),
+            cosmetics: store.get_cosmetics(scope),
+        }
+    }
+}
+
+/// Private: discriminates between a spawned thread handle, a sequential
+/// fallback, and a cache-hit value that needs no collection.
 #[cfg(any(target_os = "linux", test))]
 enum WorkerResult<'scope, T> {
     Handle(std::thread::ScopedJoinHandle<'scope, T>),
     Fallback(fn() -> T),
+    Cached(T),
 }
 
-/// Private: resolve a worker result by joining the handle or invoking the fallback.
+/// Private: resolve a worker result by joining the handle, invoking the
+/// fallback, or returning the cached value.
 #[cfg(any(target_os = "linux", test))]
 fn join_or_seq<'scope, T>(result: WorkerResult<'scope, T>) -> T {
     match result {
@@ -254,15 +312,21 @@ fn join_or_seq<'scope, T>(result: WorkerResult<'scope, T>) -> T {
             .join()
             .unwrap_or_else(|e| std::panic::resume_unwind(e)),
         WorkerResult::Fallback(f) => f(),
+        WorkerResult::Cached(value) => value,
     }
 }
 
-/// Private: run four subprocess-bound collectors in parallel while main-thread
-/// work proceeds concurrently. Returns all four collector values plus the main
-/// work result.
+/// Private: run the flagged (cache-miss) subprocess-bound collectors in
+/// parallel while main-thread work proceeds concurrently. Collectors whose
+/// flag is false are cache hits: their cached value is returned without any
+/// spawn, collector invocation, or sequential fallback. When every flag is
+/// false, no thread scope is created and `main_work` runs directly once.
+/// Returns all four collector values plus the main work result.
 #[cfg(any(target_os = "linux", test))]
 fn collect_selected_in_parallel<M, F>(
     collectors: FullCollectors,
+    flags: CollectFlags,
+    cached: CachedValues,
     main_work: F,
 ) -> (
     Option<String>,
@@ -274,36 +338,65 @@ fn collect_selected_in_parallel<M, F>(
 where
     F: FnOnce() -> M,
 {
+    if !flags.any() {
+        // All four expensive values are cache hits: run main_work directly
+        // once and return the cached values.
+        let main_result = main_work();
+        return (
+            cached.packages,
+            cached.resolution,
+            cached.gpu,
+            cached.cosmetics.unwrap_or_default(),
+            main_result,
+        );
+    }
+
     std::thread::scope(|scope| {
-        // Attempt all four spawns before any fallback or main work.
-        let packages_result = std::thread::Builder::new()
-            .name("collector-packages".into())
-            .spawn_scoped(scope, || (collectors.get_packages)())
-            .map(WorkerResult::Handle)
-            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_packages));
+        // Attempt all miss spawns before any fallback or main work.
+        let packages_result = if flags.packages {
+            std::thread::Builder::new()
+                .name("collector-packages".into())
+                .spawn_scoped(scope, || (collectors.get_packages)())
+                .map(WorkerResult::Handle)
+                .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_packages))
+        } else {
+            WorkerResult::Cached(cached.packages)
+        };
 
-        let resolution_result = std::thread::Builder::new()
-            .name("collector-resolution".into())
-            .spawn_scoped(scope, || (collectors.get_resolution)())
-            .map(WorkerResult::Handle)
-            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_resolution));
+        let resolution_result = if flags.resolution {
+            std::thread::Builder::new()
+                .name("collector-resolution".into())
+                .spawn_scoped(scope, || (collectors.get_resolution)())
+                .map(WorkerResult::Handle)
+                .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_resolution))
+        } else {
+            WorkerResult::Cached(cached.resolution)
+        };
 
-        let gpu_result = std::thread::Builder::new()
-            .name("collector-gpu".into())
-            .spawn_scoped(scope, || (collectors.get_gpu_info)())
-            .map(WorkerResult::Handle)
-            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_gpu_info));
+        let gpu_result = if flags.gpu {
+            std::thread::Builder::new()
+                .name("collector-gpu".into())
+                .spawn_scoped(scope, || (collectors.get_gpu_info)())
+                .map(WorkerResult::Handle)
+                .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_gpu_info))
+        } else {
+            WorkerResult::Cached(cached.gpu)
+        };
 
-        let cosmetics_result = std::thread::Builder::new()
-            .name("collector-cosmetics".into())
-            .spawn_scoped(scope, || (collectors.get_desktop_cosmetics)())
-            .map(WorkerResult::Handle)
-            .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_desktop_cosmetics));
+        let cosmetics_result = if flags.cosmetics {
+            std::thread::Builder::new()
+                .name("collector-cosmetics".into())
+                .spawn_scoped(scope, || (collectors.get_desktop_cosmetics)())
+                .map(WorkerResult::Handle)
+                .unwrap_or_else(|_| WorkerResult::Fallback(collectors.get_desktop_cosmetics))
+        } else {
+            WorkerResult::Cached(cached.cosmetics.unwrap_or_default())
+        };
 
         // Run main-thread work while workers execute.
         let main_result = main_work();
 
-        // Join workers (or invoke fallbacks).
+        // Join workers (or invoke fallbacks / take cached values).
         let packages = join_or_seq(packages_result);
         let resolution = join_or_seq(resolution_result);
         let gpu = join_or_seq(gpu_result);
@@ -311,6 +404,97 @@ where
 
         (packages, resolution, gpu, desktop_cosmetics, main_result)
     })
+}
+
+/// Private: values computed by a Linux collection pass, in the exact
+/// optionality the deterministic field assembly expects.
+#[cfg(target_os = "linux")]
+struct SnapshotValues {
+    os: String,
+    kernel: String,
+    uptime: String,
+    packages: Option<String>,
+    shell: Option<String>,
+    resolution: Option<String>,
+    cpu: String,
+    gpu: Option<String>,
+    ram: String,
+    disk: String,
+    de: Option<String>,
+    wm: Option<String>,
+    cosmetics: DesktopCosmetics,
+}
+
+#[cfg(target_os = "linux")]
+impl SnapshotValues {
+    /// Builds the snapshot with stable field names, omission rules, and
+    /// `user_host` formatting.
+    fn assemble(self, user: &str, host: &str) -> SystemSnapshot {
+        let mut fields = BTreeMap::new();
+        fields.insert("OS".to_string(), self.os);
+        fields.insert("Kernel".to_string(), self.kernel);
+        fields.insert("Uptime".to_string(), self.uptime);
+        if let Some(packages_val) = self.packages {
+            fields.insert("Packages".to_string(), packages_val);
+        }
+        if let Some(shell_val) = self.shell {
+            fields.insert("Shell".to_string(), shell_val);
+        }
+        if let Some(resolution_val) = self.resolution {
+            fields.insert("Resolution".to_string(), resolution_val);
+        }
+        fields.insert("CPU".to_string(), self.cpu);
+        if let Some(gpu_val) = self.gpu {
+            fields.insert("GPU".to_string(), gpu_val);
+        }
+        fields.insert("RAM".to_string(), self.ram);
+        fields.insert("Disk".to_string(), self.disk);
+        if let Some(de_val) = self.de {
+            fields.insert("DE".to_string(), de_val);
+        }
+        if let Some(wm_val) = self.wm {
+            fields.insert("WM".to_string(), wm_val);
+        }
+        if let Some(wm_theme_val) = self.cosmetics.wm_theme {
+            fields.insert("WM Theme".to_string(), wm_theme_val);
+        }
+        if let Some(gtk_theme_val) = self.cosmetics.gtk_theme {
+            fields.insert("GTK Theme".to_string(), gtk_theme_val);
+        }
+        if let Some(icon_theme_val) = self.cosmetics.icon_theme {
+            fields.insert("Icon Theme".to_string(), icon_theme_val);
+        }
+        if let Some(font_val) = self.cosmetics.font {
+            fields.insert("Font".to_string(), font_val);
+        }
+        SystemSnapshot {
+            user_host: format!("{}@{}", user, host),
+            fields,
+        }
+    }
+}
+
+/// Private: best-effort cache write for a live-collected string value.
+/// `None` and empty values are not cached.
+#[cfg(target_os = "linux")]
+fn put_live_string(
+    store: &dyn CacheStore,
+    key: StringCacheKey,
+    scope: &CacheScope,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.filter(|v| !v.is_empty()) {
+        store.put_string(key, scope, value);
+    }
+}
+
+/// Private: true when at least one DesktopCosmetics field was collected.
+#[cfg(target_os = "linux")]
+fn has_any_cosmetic_value(cosmetics: &DesktopCosmetics) -> bool {
+    cosmetics.wm_theme.is_some()
+        || cosmetics.gtk_theme.is_some()
+        || cosmetics.icon_theme.is_some()
+        || cosmetics.font.is_some()
 }
 
 impl SystemSnapshot {
@@ -323,15 +507,33 @@ impl SystemSnapshot {
 
     /// Collect system information using the given profile.
     /// Compact skips seven collectors whose output is never rendered in compact mode.
+    /// On Linux, Full additionally consults the persistent 5E cache before
+    /// running the expensive collectors; Compact never touches the cache.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn collect_with(profile: CollectionProfile) -> Self {
+        let collectors = FullCollectors::real();
+        if profile == CollectionProfile::Full {
+            let cache = FsCache::from_environment();
+            let store = cache.as_ref().map(|c| c as &dyn CacheStore);
+            Self::collect_full_with_cache(collectors, store)
+        } else {
+            Self::collect_with_collectors(profile, collectors)
+        }
+    }
+
+    /// Collect system information using the given profile.
+    /// Compact skips seven collectors whose output is never rendered in compact mode.
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn collect_with(profile: CollectionProfile) -> Self {
         Self::collect_with_collectors(profile, FullCollectors::real())
     }
 
     /// Private: core collection with optional collector injection.
-    /// Final field names, values, omission rules, and formatting are stable.
-    /// BTreeMap assembly is deterministic. On Linux Full profile, selected
-    /// collectors may execute concurrently. Compact invokes no Full-only collector.
-    /// Non-Linux production collection remains sequential.
+    /// This path is cache-free on every platform. Final field names,
+    /// values, omission rules, and formatting are stable. BTreeMap
+    /// assembly is deterministic. On Linux Full profile, selected
+    /// collectors may execute concurrently. Compact invokes no Full-only
+    /// collector. Non-Linux production collection remains sequential.
     #[cfg(target_os = "linux")]
     fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
@@ -347,15 +549,20 @@ impl SystemSnapshot {
 
         let (packages, resolution, gpu, desktop_cosmetics, (cpu, shell, de, wm, ram, disk)) =
             if profile == CollectionProfile::Full {
-                collect_selected_in_parallel(collectors, || {
-                    let cpu = get_cpu_info(&system);
-                    let shell = (collectors.get_shell)();
-                    let de = (collectors.get_desktop_environment)();
-                    let wm = (collectors.get_window_manager_or_session)();
-                    let ram = get_ram_info(&system);
-                    let disk = get_disk_info();
-                    (cpu, shell, de, wm, ram, disk)
-                })
+                collect_selected_in_parallel(
+                    collectors,
+                    CollectFlags::all(),
+                    CachedValues::default(),
+                    || {
+                        let cpu = get_cpu_info(&system);
+                        let shell = (collectors.get_shell)();
+                        let de = (collectors.get_desktop_environment)();
+                        let wm = (collectors.get_window_manager_or_session)();
+                        let ram = get_ram_info(&system);
+                        let disk = get_disk_info();
+                        (cpu, shell, de, wm, ram, disk)
+                    },
+                )
             } else {
                 (
                     None,
@@ -389,51 +596,110 @@ impl SystemSnapshot {
             None
         };
 
-        let mut fields = BTreeMap::new();
-        fields.insert("OS".to_string(), os.clone());
-        fields.insert("Kernel".to_string(), kernel.clone());
-        fields.insert("Uptime".to_string(), uptime.clone());
-        if let Some(packages_val) = packages {
-            fields.insert("Packages".to_string(), packages_val);
+        SnapshotValues {
+            os,
+            kernel,
+            uptime,
+            packages,
+            shell,
+            resolution,
+            cpu,
+            gpu,
+            ram,
+            disk,
+            de,
+            wm,
+            cosmetics: desktop_cosmetics,
         }
-        if let Some(shell_val) = shell {
-            fields.insert("Shell".to_string(), shell_val);
-        }
-        if let Some(resolution_val) = resolution {
-            fields.insert("Resolution".to_string(), resolution_val);
-        }
-        fields.insert("CPU".to_string(), cpu.clone());
-        if let Some(gpu_val) = gpu {
-            fields.insert("GPU".to_string(), gpu_val);
-        }
-        fields.insert("RAM".to_string(), ram.clone());
-        fields.insert("Disk".to_string(), disk.clone());
-
-        if let Some(de_val) = de {
-            fields.insert("DE".to_string(), de_val);
-        }
-        if let Some(wm_val) = wm {
-            fields.insert("WM".to_string(), wm_val);
-        }
-        if let Some(wm_theme_val) = desktop_cosmetics.wm_theme {
-            fields.insert("WM Theme".to_string(), wm_theme_val);
-        }
-        if let Some(gtk_theme_val) = desktop_cosmetics.gtk_theme {
-            fields.insert("GTK Theme".to_string(), gtk_theme_val);
-        }
-        if let Some(icon_theme_val) = desktop_cosmetics.icon_theme {
-            fields.insert("Icon Theme".to_string(), icon_theme_val);
-        }
-        if let Some(font_val) = desktop_cosmetics.font {
-            fields.insert("Font".to_string(), font_val);
-        }
-
-        Self {
-            user_host: format!("{}@{}", user, host),
-            fields,
-        }
+        .assemble(&user, &host)
     }
 
+    /// Private: Linux Full collection wired to the persistent 5E cache.
+    ///
+    /// Order: cheap/common data first, then `CacheScope` (only when a
+    /// store is present, and only after `host` is known), then all four
+    /// cache reads, then the Patch 5D parallel path for misses only,
+    /// then best-effort cache writes, then deterministic assembly.
+    /// A cache put failure never changes the live collected result, and
+    /// no cache operation is held across subprocess execution.
+    #[cfg(target_os = "linux")]
+    fn collect_full_with_cache(collectors: FullCollectors, cache: Option<&dyn CacheStore>) -> Self {
+        // 1. Cheap/common data needed before worker execution.
+        let mut system = System::new();
+
+        system.refresh_cpu_specifics(CpuRefreshKind::new().with_frequency());
+        system.refresh_memory();
+
+        let user = env_or_fallback("USER", "unknown");
+        let host = env_or_fallback("HOSTNAME", "unknown");
+        let os = get_os();
+        let kernel = get_kernel();
+        let uptime = get_uptime();
+
+        // 2-3. Scope after host is known; all reads before any worker.
+        let scope = cache.map(|_| CacheScope::from_environment(&host));
+        let cached = match (cache, &scope) {
+            (Some(store), Some(scope)) => CachedValues::read(store, scope),
+            _ => CachedValues::default(),
+        };
+        let flags = CollectFlags {
+            packages: cached.packages.is_none(),
+            resolution: cached.resolution.is_none(),
+            gpu: cached.gpu.is_none(),
+            cosmetics: cached.cosmetics.is_none(),
+        };
+
+        // 5-6. Run the Patch 5D path for misses only; join as before.
+        let (packages, resolution, gpu, desktop_cosmetics, (cpu, shell, de, wm, ram, disk)) =
+            collect_selected_in_parallel(collectors, flags, cached, || {
+                let cpu = get_cpu_info(&system);
+                let shell = (collectors.get_shell)();
+                let de = (collectors.get_desktop_environment)();
+                let wm = (collectors.get_window_manager_or_session)();
+                let ram = get_ram_info(&system);
+                let disk = get_disk_info();
+                (cpu, shell, de, wm, ram, disk)
+            });
+
+        // 7. Best-effort writes after collection completes.
+        if let (Some(store), Some(scope)) = (cache, &scope) {
+            if flags.packages {
+                put_live_string(store, StringCacheKey::Packages, scope, packages.as_deref());
+            }
+            if flags.resolution {
+                put_live_string(
+                    store,
+                    StringCacheKey::Resolution,
+                    scope,
+                    resolution.as_deref(),
+                );
+            }
+            if flags.gpu {
+                put_live_string(store, StringCacheKey::Gpu, scope, gpu.as_deref());
+            }
+            if flags.cosmetics && has_any_cosmetic_value(&desktop_cosmetics) {
+                store.put_cosmetics(scope, &desktop_cosmetics);
+            }
+        }
+
+        // 8. Deterministic assembly.
+        SnapshotValues {
+            os,
+            kernel,
+            uptime,
+            packages,
+            shell: Some(shell),
+            resolution,
+            cpu,
+            gpu,
+            ram,
+            disk,
+            de,
+            wm,
+            cosmetics: desktop_cosmetics,
+        }
+        .assemble(&user, &host)
+    }
     #[cfg(not(target_os = "linux"))]
     fn collect_with_collectors(profile: CollectionProfile, collectors: FullCollectors) -> Self {
         let mut system = System::new();
@@ -543,6 +809,9 @@ impl SystemSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system::cache::{
+        encode_string_entry, CacheScope, CacheStore, Clock, FakeCache, StringCacheKey,
+    };
     use crate::system::command::ENV_MUTEX;
 
     #[test]
@@ -1068,9 +1337,12 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
 
         // Run the parallel helper in a separate thread so we can wait for overlap.
         let collection_handle = std::thread::spawn(move || {
-            collect_selected_in_parallel(collectors, || {
-                ("test-shell".to_string(), None::<String>, None::<String>)
-            })
+            collect_selected_in_parallel(
+                collectors,
+                CollectFlags::all(),
+                CachedValues::default(),
+                || ("test-shell".to_string(), None::<String>, None::<String>),
+            )
         });
 
         // Wait for all four workers to enter (with timeout).
@@ -1113,10 +1385,12 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
             get_desktop_cosmetics: || DesktopCosmetics::default(),
         };
 
-        let (packages, resolution, gpu, cosmetics, _) =
-            collect_selected_in_parallel(collectors, || {
-                ("shell".to_string(), None::<String>, None::<String>)
-            });
+        let (packages, resolution, gpu, cosmetics, _) = collect_selected_in_parallel(
+            collectors,
+            CollectFlags::all(),
+            CachedValues::default(),
+            || ("shell".to_string(), None::<String>, None::<String>),
+        );
 
         assert!(packages.is_none());
         assert!(resolution.is_none());
@@ -1140,8 +1414,443 @@ ii  base-files     12.4         amd64        Debian base system miscellaneous fi
             get_desktop_cosmetics: || DesktopCosmetics::default(),
         };
 
-        let _ = collect_selected_in_parallel(collectors, || {
-            ("shell".to_string(), None::<String>, None::<String>)
-        });
+        let _ = collect_selected_in_parallel(
+            collectors,
+            CollectFlags::all(),
+            CachedValues::default(),
+            || ("shell".to_string(), None::<String>, None::<String>),
+        );
+    }
+
+    #[test]
+    fn test_fake_cache_prepopulation_helper_roundtrip() {
+        // Cross-platform roundtrip of the prepopulation pattern used by
+        // the Linux cache integration tests below.
+        let cache = FakeCache::new(Clock::Fixed(1_000));
+        let scope = CacheScope::new(
+            "test-host",
+            "linux",
+            "x86_64",
+            Some(":0"),
+            Some("wayland-1"),
+            Some("wayland"),
+            Some("GNOME"),
+            Some("gnome"),
+            Some("GNOME"),
+        );
+        let scope_bytes = scope
+            .encode_for_string_key(StringCacheKey::Packages)
+            .unwrap();
+        cache.insert_raw(
+            "packages",
+            encode_string_entry(StringCacheKey::Packages, 1_000, &scope_bytes, "42").unwrap(),
+        );
+        assert_eq!(
+            cache.get_string(StringCacheKey::Packages, &scope),
+            Some("42".to_string())
+        );
+    }
+
+    // ─── Patch 5E3: Linux collector cache integration tests ───
+    //
+    // These tests exercise the private `collect_full_with_cache` helper
+    // with `FakeCache`; they never touch the real filesystem cache,
+    // use no sleeps, and mutate no global environment.
+
+    #[cfg(target_os = "linux")]
+    mod cache_integration {
+        use super::*;
+        use crate::system::cache::{
+            encode_cosmetics_entry, encode_string_entry, CacheScope, Clock, FakeCache,
+            StringCacheKey,
+        };
+        use std::sync::atomic::Ordering;
+
+        mod counters {
+            use std::sync::atomic::{AtomicU64, Ordering};
+
+            pub static COLD_PACKAGES: AtomicU64 = AtomicU64::new(0);
+            pub static COLD_RESOLUTION: AtomicU64 = AtomicU64::new(0);
+            pub static COLD_GPU: AtomicU64 = AtomicU64::new(0);
+            pub static COLD_COSMETICS: AtomicU64 = AtomicU64::new(0);
+            pub static PARTIAL_RESOLUTION: AtomicU64 = AtomicU64::new(0);
+            pub static PARTIAL_COSMETICS: AtomicU64 = AtomicU64::new(0);
+            pub static PUTFAIL_PACKAGES: AtomicU64 = AtomicU64::new(0);
+            pub static PUTFAIL_RESOLUTION: AtomicU64 = AtomicU64::new(0);
+            pub static PUTFAIL_GPU: AtomicU64 = AtomicU64::new(0);
+            pub static PUTFAIL_COSMETICS: AtomicU64 = AtomicU64::new(0);
+
+            pub fn reset_all() {
+                let all = [
+                    &COLD_PACKAGES,
+                    &COLD_RESOLUTION,
+                    &COLD_GPU,
+                    &COLD_COSMETICS,
+                    &PARTIAL_RESOLUTION,
+                    &PARTIAL_COSMETICS,
+                    &PUTFAIL_PACKAGES,
+                    &PUTFAIL_RESOLUTION,
+                    &PUTFAIL_GPU,
+                    &PUTFAIL_COSMETICS,
+                ];
+                for counter in all {
+                    counter.store(0, Ordering::SeqCst);
+                }
+            }
+        }
+
+        fn cold_packages() -> Option<String> {
+            counters::COLD_PACKAGES.fetch_add(1, Ordering::SeqCst);
+            Some("42".to_string())
+        }
+
+        fn cold_resolution() -> Option<String> {
+            counters::COLD_RESOLUTION.fetch_add(1, Ordering::SeqCst);
+            Some("1920x1080".to_string())
+        }
+
+        fn cold_gpu() -> Option<String> {
+            counters::COLD_GPU.fetch_add(1, Ordering::SeqCst);
+            Some("NVIDIA".to_string())
+        }
+
+        fn cold_cosmetics() -> DesktopCosmetics {
+            counters::COLD_COSMETICS.fetch_add(1, Ordering::SeqCst);
+            DesktopCosmetics {
+                wm_theme: Some("Adwaita".to_string()),
+                gtk_theme: Some("Adwaita-dark".to_string()),
+                icon_theme: Some("Yaru".to_string()),
+                font: Some("Noto Sans 11".to_string()),
+            }
+        }
+
+        fn partial_resolution() -> Option<String> {
+            counters::PARTIAL_RESOLUTION.fetch_add(1, Ordering::SeqCst);
+            Some("2560x1440".to_string())
+        }
+
+        fn partial_cosmetics() -> DesktopCosmetics {
+            counters::PARTIAL_COSMETICS.fetch_add(1, Ordering::SeqCst);
+            DesktopCosmetics {
+                wm_theme: Some("Adwaita".to_string()),
+                gtk_theme: None,
+                icon_theme: None,
+                font: Some("Noto Sans 11".to_string()),
+            }
+        }
+
+        fn putfail_packages() -> Option<String> {
+            counters::PUTFAIL_PACKAGES.fetch_add(1, Ordering::SeqCst);
+            Some("42".to_string())
+        }
+
+        fn putfail_resolution() -> Option<String> {
+            counters::PUTFAIL_RESOLUTION.fetch_add(1, Ordering::SeqCst);
+            Some("1920x1080".to_string())
+        }
+
+        fn putfail_gpu() -> Option<String> {
+            counters::PUTFAIL_GPU.fetch_add(1, Ordering::SeqCst);
+            Some("NVIDIA".to_string())
+        }
+
+        fn putfail_cosmetics() -> DesktopCosmetics {
+            counters::PUTFAIL_COSMETICS.fetch_add(1, Ordering::SeqCst);
+            DesktopCosmetics {
+                wm_theme: Some("Adwaita".to_string()),
+                gtk_theme: Some("Adwaita-dark".to_string()),
+                icon_theme: Some("Yaru".to_string()),
+                font: Some("Noto Sans 11".to_string()),
+            }
+        }
+
+        /// Builds the same scope the production path builds for the
+        /// current environment (read-only; no env mutation).
+        fn current_scope() -> CacheScope {
+            let host = env_or_fallback("HOSTNAME", "unknown");
+            CacheScope::from_environment(&host)
+        }
+
+        fn insert_string_entry(
+            cache: &FakeCache,
+            key: StringCacheKey,
+            file_name: &str,
+            value: &str,
+        ) {
+            let scope = current_scope();
+            let scope_bytes = scope.encode_for_string_key(key).unwrap();
+            cache.insert_raw(
+                file_name,
+                encode_string_entry(key, 1_000, &scope_bytes, value).unwrap(),
+            );
+        }
+
+        fn insert_cosmetics_entry(cache: &FakeCache, cosmetics: &DesktopCosmetics) {
+            let scope = current_scope();
+            let scope_bytes = scope.encode_for_cosmetics().unwrap();
+            cache.insert_raw(
+                "cosmetics",
+                encode_cosmetics_entry(1_000, &scope_bytes, cosmetics).unwrap(),
+            );
+        }
+
+        fn full_fakes(
+            get_packages: fn() -> Option<String>,
+            get_resolution: fn() -> Option<String>,
+            get_gpu_info: fn() -> Option<String>,
+            get_desktop_cosmetics: fn() -> DesktopCosmetics,
+        ) -> FullCollectors {
+            FullCollectors {
+                get_packages,
+                get_shell: || "bash".to_string(),
+                get_resolution,
+                get_gpu_info,
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics,
+            }
+        }
+
+        #[test]
+        fn test_full_cold_invokes_each_expensive_collector_once() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            counters::reset_all();
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+            let fakes = full_fakes(cold_packages, cold_resolution, cold_gpu, cold_cosmetics);
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(counters::COLD_PACKAGES.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::COLD_RESOLUTION.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::COLD_GPU.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::COLD_COSMETICS.load(Ordering::SeqCst), 1);
+
+            assert_eq!(snapshot.get("Packages"), "42");
+            assert_eq!(snapshot.get("Resolution"), "1920x1080");
+            assert_eq!(snapshot.get("GPU"), "NVIDIA");
+            assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+            assert_eq!(snapshot.get("Font"), "Noto Sans 11");
+            // Live values were written to the cache.
+            assert_eq!(cache.len(), 4);
+        }
+
+        #[test]
+        fn test_full_partial_hits_invoke_only_misses() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            counters::reset_all();
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+            insert_string_entry(&cache, StringCacheKey::Packages, "packages", "1234");
+            insert_string_entry(&cache, StringCacheKey::Gpu, "gpu", "AMD GPU");
+
+            let fakes = FullCollectors {
+                get_packages: || panic!("cached packages collector must not run"),
+                get_shell: || "bash".to_string(),
+                get_resolution: partial_resolution,
+                get_gpu_info: || panic!("cached gpu collector must not run"),
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics: partial_cosmetics,
+            };
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(counters::PARTIAL_RESOLUTION.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::PARTIAL_COSMETICS.load(Ordering::SeqCst), 1);
+
+            assert_eq!(snapshot.get("Packages"), "1234");
+            assert_eq!(snapshot.get("GPU"), "AMD GPU");
+            assert_eq!(snapshot.get("Resolution"), "2560x1440");
+            assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+            assert!(!snapshot.has_field("GTK Theme"));
+            assert!(!snapshot.has_field("Icon Theme"));
+            assert_eq!(snapshot.get("Font"), "Noto Sans 11");
+        }
+
+        #[test]
+        fn test_full_warm_invokes_no_expensive_collector() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+            insert_string_entry(&cache, StringCacheKey::Packages, "packages", "1234");
+            insert_string_entry(
+                &cache,
+                StringCacheKey::Resolution,
+                "resolution",
+                "2560x1440",
+            );
+            insert_string_entry(&cache, StringCacheKey::Gpu, "gpu", "AMD GPU");
+            insert_cosmetics_entry(
+                &cache,
+                &DesktopCosmetics {
+                    wm_theme: Some("Adwaita".to_string()),
+                    gtk_theme: Some("Adwaita-dark".to_string()),
+                    icon_theme: Some("Yaru".to_string()),
+                    font: Some("Noto Sans 11".to_string()),
+                },
+            );
+
+            let fakes = FullCollectors {
+                get_packages: || panic!("warm: packages must come from cache"),
+                get_shell: || "bash".to_string(),
+                get_resolution: || panic!("warm: resolution must come from cache"),
+                get_gpu_info: || panic!("warm: gpu must come from cache"),
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics: || panic!("warm: cosmetics must come from cache"),
+            };
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(snapshot.get("Packages"), "1234");
+            assert_eq!(snapshot.get("Resolution"), "2560x1440");
+            assert_eq!(snapshot.get("GPU"), "AMD GPU");
+            assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+            assert_eq!(snapshot.get("GTK Theme"), "Adwaita-dark");
+            assert_eq!(snapshot.get("Icon Theme"), "Yaru");
+            assert_eq!(snapshot.get("Font"), "Noto Sans 11");
+        }
+
+        #[test]
+        fn test_full_cache_put_failure_keeps_live_values() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            counters::reset_all();
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+            cache.set_fail_put(true);
+
+            let fakes = full_fakes(
+                putfail_packages,
+                putfail_resolution,
+                putfail_gpu,
+                putfail_cosmetics,
+            );
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(counters::PUTFAIL_PACKAGES.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::PUTFAIL_RESOLUTION.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::PUTFAIL_GPU.load(Ordering::SeqCst), 1);
+            assert_eq!(counters::PUTFAIL_COSMETICS.load(Ordering::SeqCst), 1);
+
+            // Live values still appear in the snapshot despite put failure.
+            assert_eq!(snapshot.get("Packages"), "42");
+            assert_eq!(snapshot.get("Resolution"), "1920x1080");
+            assert_eq!(snapshot.get("GPU"), "NVIDIA");
+            assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+            // Nothing was written.
+            assert_eq!(cache.len(), 0);
+        }
+
+        #[test]
+        fn test_full_failed_or_empty_results_are_not_cached() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+
+            let fakes = FullCollectors {
+                get_packages: || None,
+                get_shell: || "bash".to_string(),
+                get_resolution: || Some(String::new()),
+                get_gpu_info: || None,
+                get_desktop_environment: || None,
+                get_window_manager_or_session: || None,
+                get_desktop_cosmetics: || DesktopCosmetics::default(),
+            };
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(cache.len(), 0);
+            assert!(!snapshot.has_field("Packages"));
+            assert!(!snapshot.has_field("GPU"));
+            assert!(!snapshot.has_field("WM Theme"));
+            assert!(!snapshot.has_field("GTK Theme"));
+            assert!(!snapshot.has_field("Icon Theme"));
+            assert!(!snapshot.has_field("Font"));
+        }
+
+        #[test]
+        fn test_full_partial_cosmetics_maps_to_correct_fields() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+            insert_cosmetics_entry(
+                &cache,
+                &DesktopCosmetics {
+                    wm_theme: Some("Adwaita".to_string()),
+                    gtk_theme: None,
+                    icon_theme: None,
+                    font: Some("Noto Sans 11".to_string()),
+                },
+            );
+
+            let fakes = FullCollectors {
+                get_packages: || Some("42".to_string()),
+                get_shell: || "bash".to_string(),
+                get_resolution: || Some("1920x1080".to_string()),
+                get_gpu_info: || Some("NVIDIA".to_string()),
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics: || panic!("cached cosmetics collector must not run"),
+            };
+
+            let snapshot = SystemSnapshot::collect_full_with_cache(fakes, Some(&cache));
+
+            assert_eq!(snapshot.get("WM Theme"), "Adwaita");
+            assert_eq!(snapshot.get("Font"), "Noto Sans 11");
+            assert!(!snapshot.has_field("GTK Theme"));
+            assert!(!snapshot.has_field("Icon Theme"));
+        }
+
+        #[test]
+        fn test_full_cold_and_warm_snapshots_are_equivalent() {
+            let _env_guard = ENV_MUTEX.lock().unwrap();
+
+            let cache = FakeCache::new(Clock::Fixed(1_000));
+
+            let value_fakes = FullCollectors {
+                get_packages: || Some("42".to_string()),
+                get_shell: || "bash".to_string(),
+                get_resolution: || Some("1920x1080".to_string()),
+                get_gpu_info: || Some("NVIDIA".to_string()),
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics: || DesktopCosmetics {
+                    wm_theme: Some("Adwaita".to_string()),
+                    gtk_theme: Some("Adwaita-dark".to_string()),
+                    icon_theme: Some("Yaru".to_string()),
+                    font: Some("Noto Sans 11".to_string()),
+                },
+            };
+
+            let cold = SystemSnapshot::collect_full_with_cache(value_fakes, Some(&cache));
+            assert_eq!(cache.len(), 4);
+
+            let panic_fakes = FullCollectors {
+                get_packages: || panic!("warm: packages must come from cache"),
+                get_shell: || "bash".to_string(),
+                get_resolution: || panic!("warm: resolution must come from cache"),
+                get_gpu_info: || panic!("warm: gpu must come from cache"),
+                get_desktop_environment: || Some("GNOME".to_string()),
+                get_window_manager_or_session: || Some("Wayland".to_string()),
+                get_desktop_cosmetics: || panic!("warm: cosmetics must come from cache"),
+            };
+
+            let warm = SystemSnapshot::collect_full_with_cache(panic_fakes, Some(&cache));
+
+            let expensive_labels = [
+                "Packages",
+                "Resolution",
+                "GPU",
+                "WM Theme",
+                "GTK Theme",
+                "Icon Theme",
+                "Font",
+            ];
+            for label in expensive_labels {
+                assert_eq!(cold.get(label), warm.get(label), "mismatch for {label}");
+            }
+        }
     }
 }
