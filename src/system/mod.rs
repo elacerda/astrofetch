@@ -8,7 +8,10 @@
 //! - `disk`: Coleta de informações de disco com deduplicação.
 //! - `desktop`: DE, WM, resolução, cosméticos de desktop.
 //! - `collector`: `SystemSnapshot::collect()` e helpers de coleta.
+//! - `cache`: Primitivas puras da cache do Patch 5E (chaves, escopo, codec, relógio/TTL, resolver de diretório).
 
+#[cfg(any(target_os = "linux", test))]
+mod cache;
 mod collector;
 mod command;
 mod desktop;
