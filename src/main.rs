@@ -1,4 +1,6 @@
 mod app;
+#[allow(dead_code)]
+mod bar;
 mod cli;
 mod density;
 mod display_plan;
