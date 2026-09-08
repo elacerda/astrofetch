@@ -1,4 +1,3 @@
-use crate::galaxy::SpiralGalaxyConfig;
 use crate::seed::{GenerationContext, SPIRAL_BAR_V1};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -13,10 +12,10 @@ const MAX_STRENGTH: f64 = 0.24;
 
 /// Parameters for the optional central bar of a spiral galaxy.
 ///
-/// The bar lives in the intrinsic, deprojected disk plane. Its orientation is
-/// therefore independent of the sky-plane rotation stored by
-/// [`SpiralGalaxyConfig`]. `angle_rad` only needs the range `[0, pi)` because a
-/// bar is symmetric under a 180-degree rotation.
+/// The bar lives in the intrinsic, deprojected disk plane. `angle_rad` only
+/// needs the range `[0, pi)` because a bar is symmetric under a 180-degree
+/// rotation. Coupling the spiral-arm roots to the bar ends belongs to the
+/// density-integration step, not to random parameter generation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BarConfig {
     pub half_length: f64,
@@ -31,10 +30,7 @@ impl BarConfig {
     /// No draw from this function can advance the legacy Spiral RNG. Returning
     /// `None` represents a genuinely unbarred spiral rather than a bar whose
     /// strength was forced to zero.
-    pub fn from_context(
-        context: GenerationContext,
-        _spiral: &SpiralGalaxyConfig,
-    ) -> Option<Self> {
+    pub fn from_context(context: GenerationContext) -> Option<Self> {
         let mut rng = StdRng::seed_from_u64(context.feature_seed(SPIRAL_BAR_V1));
 
         if rng.random::<f64>() >= BAR_PROBABILITY {
@@ -58,22 +54,14 @@ impl BarConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
-
-    fn spiral_config(seed: u64) -> SpiralGalaxyConfig {
-        let mut rng = StdRng::seed_from_u64(seed);
-        SpiralGalaxyConfig::from_rng(&mut rng)
-    }
 
     #[test]
     fn test_bar_config_is_deterministic_for_same_scene_seed() {
-        let seed = 42;
-        let spiral = spiral_config(seed);
-        let context = GenerationContext::new(seed);
+        let context = GenerationContext::new(42);
 
         assert_eq!(
-            BarConfig::from_context(context, &spiral),
-            BarConfig::from_context(context, &spiral)
+            BarConfig::from_context(context),
+            BarConfig::from_context(context)
         );
     }
 
@@ -83,8 +71,7 @@ mod tests {
         let mut unbarred = 0usize;
 
         for seed in 0..512_u64 {
-            let spiral = spiral_config(seed);
-            match BarConfig::from_context(GenerationContext::new(seed), &spiral) {
+            match BarConfig::from_context(GenerationContext::new(seed)) {
                 Some(_) => barred += 1,
                 None => unbarred += 1,
             }
@@ -97,8 +84,7 @@ mod tests {
     #[test]
     fn test_bar_config_values_stay_in_v1_ranges() {
         for seed in 0..512_u64 {
-            let spiral = spiral_config(seed);
-            let Some(bar) = BarConfig::from_context(GenerationContext::new(seed), &spiral) else {
+            let Some(bar) = BarConfig::from_context(GenerationContext::new(seed)) else {
                 continue;
             };
 
@@ -114,10 +100,7 @@ mod tests {
     #[test]
     fn test_bar_config_changes_across_scene_seeds() {
         let configs: Vec<_> = (0..64_u64)
-            .filter_map(|seed| {
-                let spiral = spiral_config(seed);
-                BarConfig::from_context(GenerationContext::new(seed), &spiral)
-            })
+            .filter_map(|seed| BarConfig::from_context(GenerationContext::new(seed)))
             .collect();
 
         assert!(configs.len() >= 2, "expected multiple barred seeds");
