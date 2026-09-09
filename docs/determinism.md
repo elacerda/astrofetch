@@ -13,7 +13,7 @@ New optional procedural features must not advance the legacy scene RNG merely be
 
 The derivation is implemented by `derive_feature_seed` in `src/seed.rs`. The algorithm uses fixed byte hashing plus a fixed SplitMix64 avalanche and does not use Rust's `Hash` implementations or randomized hash state.
 
-`GenerationContext` carries the base scene seed separately from the legacy `StdRng`. The engine creates this context from the already-resolved scene seed and passes it to the Spiral generator. The context does not itself consume randomness; future optional morphology derives feature seeds from it.
+`GenerationContext` carries the base scene seed separately from the legacy `StdRng`. The engine creates this context from the already-resolved scene seed and passes it to the Spiral generator. The context does not itself consume randomness; the optional barred morphology derives its feature seed from it.
 
 Feature namespaces are versioned deliberately. If a future implementation needs a different random stream for the same feature, it should opt into a new namespace such as `spiral/bar/v2` rather than silently changing unrelated feature streams.
 
@@ -30,11 +30,13 @@ These exact RNG checkpoints are anchored for seeds 4, 16, and 42. A separate tes
 
 ## Visual baseline
 
-Phase 0 also freezes the final no-color Spiral terminal output at 40×20 for seeds 4, 16, and 42 using the existing HalfBlock, Shade, and ASCII renderers. The test hashes the final UTF-8 terminal lines after generation, normalization, stretch, threshold selection, background-star policy, and rendering.
+The visual baseline freezes the final no-color Spiral terminal output at 40×20 for seeds 4, 16, and 42 using the existing HalfBlock, Shade, and ASCII renderers. The test hashes the final UTF-8 terminal lines after generation, normalization, stretch, threshold selection, background-star policy, and rendering.
+
+Seed 4 is unbarred under `spiral/bar/v1` and retains its Phase 0 anchors. Seeds 16 and 42 are barred; their anchors were updated when the Phase 1B barred morphology was accepted.
 
 The visual baseline deliberately covers renderer output rather than hashing the intermediate floating-point density map. This protects the visible behavior that later renderer-preserving refactors must maintain while avoiding an unnecessary bitwise contract on every intermediate floating-point operation.
 
-Intentional morphology changes such as barred spirals are expected to update visual expectations only when their changed behavior is explicitly accepted. The legacy RNG checkpoint remains a separate guard against accidentally perturbing unrelated random streams.
+Intentional morphology changes update visual expectations only when their changed behavior is explicitly accepted. The legacy RNG checkpoint remains a separate guard against accidentally perturbing unrelated random streams.
 
 ## Scope of the guarantee
 

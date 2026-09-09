@@ -266,6 +266,24 @@ A_arm ~ exp[-0.5 (distance / width)^2]
 
 The arm contribution fades with radius and is scaled by the configured arm strength.
 
+### Bar
+
+A subset of spiral scenes contains a central stellar bar. Bar presence and parameters (half-length, axis ratio, strength, angle) are derived deterministically from the isolated `spiral/bar/v1` feature stream, so a fixed seed always produces the same bar or no bar, without advancing the legacy scene RNG.
+
+The bar is a finite elliptical Ferrers profile in the intrinsic disk plane:
+
+```text
+m2 = (x_b / a)^2 + (y_b / b)^2
+B_bar = strength * (1 - m2)^2   for m2 < 1
+B_bar = 0                        otherwise
+```
+
+where `a` is the bar half-length, `b` the bar half-width, and `(x_b, y_b)` are the intrinsic disk coordinates rotated into the bar frame.
+
+When a bar is present, the spiral arms are radially gated between 0.65 and 1.05 times the bar half-length, and the logarithmic spiral phase is shifted so arm 0 reaches the bar orientation near the bar end. Stellar knots follow the same gate, so no spiral-associated structure appears inside the gated nuclear region.
+
+At current terminal resolution a valid intrinsic bar can be visually subtle: central structure, projection, normalization, and sampling can all reduce its contrast. Bar visibility is intentionally not tuned by distorting the galaxy model; future visibility improvements belong to later sampling and rendering work.
+
 ### Noise and stellar knots
 
 Smooth analytic spirals look too artificial in a terminal. AstroFetch adds OpenSimplex noise at two scales:
@@ -278,8 +296,10 @@ This produces a more organic appearance reminiscent of star-forming regions, wit
 The final spiral density is approximately:
 
 ```text
-I(r, theta) = bulge + disk + arms * clumpiness + stellar_knots
+I(r, theta) = bulge + disk + bar + gate * arms * clumpiness + gate * stellar_knots
 ```
+
+where `bar` is zero for unbarred scenes and `gate` is 1 for unbarred scenes or the radial arm gate described above for barred scenes.
 
 The model preserves its native positive density. Mathematically invalid negative values (from noise subtraction) are clamped to zero. Visibility sparsification is handled by the target-occupancy threshold in the post-processing pipeline, not by generation-time cutoffs.
 
@@ -461,7 +481,6 @@ The renderer is best understood as a compact procedural visualization inspired b
 
 Possible future directions include:
 
-- barred spiral models;
 - dust lanes;
 - ring galaxies;
 - improved inclination handling;
