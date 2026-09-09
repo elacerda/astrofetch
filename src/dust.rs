@@ -1,9 +1,10 @@
 //! Deterministic dust-lane configuration for spiral galaxies.
 //!
-//! Phase 2A is configuration-only: this module derives an optional
-//! [`DustLaneConfig`] from the `spiral/dust/v1` feature stream. The dust
-//! stream is not yet consumed by the galaxy density model, so constructing a
-//! dust config must never change rendered output.
+//! This module derives an optional [`DustLaneConfig`] from the
+//! `spiral/dust/v1` feature stream. Phase 2B consumes the configuration in
+//! Spiral generation as a deterministic multiplicative extinction of the
+//! luminous disk; the dust stream remains isolated from the legacy scene RNG
+//! and the `spiral/bar/v1` stream.
 
 use crate::seed::{GenerationContext, SPIRAL_DUST_V1};
 use rand::rngs::StdRng;
@@ -31,16 +32,13 @@ const MAX_WIDTH_FACTOR: f64 = 1.2;
 /// All fields are procedural calibration values, not physically measured
 /// quantities:
 ///
-/// - `strength` is a dimensionless optical-depth (tau) amplitude intended
-///   for a future extinction relation of the form
-///   `tau = strength * profile * radial_gate`,
-///   `extinction = exp(-tau)`. It is **not** a fractional attenuation depth,
-///   and no attenuation is rendered yet.
+/// - `strength` is a dimensionless optical-depth (tau) amplitude for the
+///   extinction relation `tau = strength * profile * radial_gate`,
+///   `extinction = exp(-tau)`. It is **not** a fractional attenuation depth.
 /// - `offset` is a signed arm-phase offset in radians. The current model has
 ///   no explicit chirality or rotation-direction semantics, so the offset is
 ///   not a leading/trailing statement.
-/// - `width_factor` is intended to scale the local spiral-arm width in a
-///   future phase; that geometry is not implemented yet.
+/// - `width_factor` scales the local spiral-arm width for the dust lanes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DustLaneConfig {
     pub strength: f64,

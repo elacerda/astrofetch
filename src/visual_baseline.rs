@@ -62,9 +62,9 @@ fn hash_terminal_lines(lines: &[String]) -> u64 {
 ///
 /// Ordering for each seed: HalfBlock, Shade, ASCII.
 const SEED_4_ANCHORS: [u64; 3] = [
-    14236180911378073206_u64,
-    2203561058913801456_u64,
-    399856844935426647_u64,
+    9021070325485438629_u64,
+    277280708508277260_u64,
+    3350187248859413498_u64,
 ];
 
 /// Accepted Phase 1B visual-baseline anchors for the barred morphology.

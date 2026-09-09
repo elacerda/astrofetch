@@ -4,8 +4,7 @@ mod bar;
 mod cli;
 mod density;
 mod display_plan;
-// Phase 2A: deterministic dust-lane configuration; not yet consumed by the density model.
-#[allow(dead_code)]
+// Phase 2B: deterministic dust-lane configuration, consumed as Spiral extinction.
 mod dust;
 mod engine;
 mod error;

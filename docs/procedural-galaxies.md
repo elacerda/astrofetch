@@ -284,18 +284,31 @@ When a bar is present, the spiral arms are radially gated between 0.65 and 1.05 
 
 At current terminal resolution a valid intrinsic bar can be visually subtle: central structure, projection, normalization, and sampling can all reduce its contrast. Bar visibility is intentionally not tuned by distorting the galaxy model; future visibility improvements belong to later sampling and rendering work.
 
-### Dust lanes (configuration-only)
+### Dust lanes
 
 A subset of spiral scenes carries an optional `DustLaneConfig`. Presence and parameters are derived deterministically from the isolated `spiral/dust/v1` feature stream, so a fixed seed always produces the same dust configuration or no dust, without advancing the legacy scene RNG or the `spiral/bar/v1` stream.
 
 - **Presence**: a scene is dusty with probability 0.60; otherwise it is genuinely dustless.
-- **`strength`**: a dimensionless optical-depth (tau) amplitude in `0.25..0.55`. It is *not* a fractional attenuation depth; it is intended for a future extinction relation of the form `tau = strength * profile * radial_gate`, `extinction = exp(-tau)`.
-- **`offset`**: a signed arm-phase offset in radians, in `-0.30..0.30`. The current model has no explicit chirality or rotation-direction semantics, so the offset is not a leading/trailing statement.
-- **`width_factor`**: a factor in `0.5..1.2` intended to scale the local spiral-arm width in a future phase.
+- **`strength`**: a dimensionless optical-depth (tau) amplitude in `0.25..0.55`. It is *not* a fractional attenuation depth.
+- **`offset`**: a signed arm-phase offset in radians, in `-0.30..0.30`. The model has no explicit chirality or rotation-direction semantics, so the offset is not a leading/trailing statement.
+- **`width_factor`**: a factor in `0.5..1.2` scaling the local spiral-arm width for the dust lanes.
 
 These are procedural calibration ranges chosen for visual plausibility, not empirically validated astrophysical distributions.
 
-**Dust attenuation is not rendered yet.** Phase 2A only generates the configuration; the dust stream is not consumed by the density model, so the density equation above is unchanged and no rendered output differs from the pre-dust behavior.
+Dust is rendered as a deterministic multiplicative extinction of the luminous disk:
+
+- The dust lanes are a **signed phase-offset copy of the stellar-arm geometry**: each dust ridge sits at the stellar arm angle plus `offset`, evaluated in the same intrinsic/deprojected disk frame as the arms (including the bar phase alignment when a bar is present).
+- Each arm contributes a Gaussian profile `exp[-0.5 (distance / width)^2]` with `distance = r * |Delta theta|` and `width = arm_width * (1 + 0.75 r) * width_factor`; the arms are combined with a **MAX (not a SUM)** so overlapping lanes do not stack. The profile is finite, non-negative, and at most 1.
+- The optical depth is `tau = strength * profile * radial_gate`, and the extinction factor is `exp(-tau)`.
+
+The radial gate controls where dust appears:
+
+- **Barred scenes**: the same transition as the spiral-arm gate, a cubic smoothstep between 0.65 and 1.05 times the bar half-length.
+- **Unbarred scenes**: a cubic smoothstep between `bulge_sigma` and `2 * bulge_sigma` (a fixed first-version morphology relation, not an RNG parameter and not a calibrated astrophysical law).
+
+Composition: dust attenuates the disk and the gated arms times clumpiness (the "luminous disk"). Dust does **not** attenuate the bulge, the stellar bar, or the stellar knots. This is a deliberate first-version composition choice for procedural terminal art, not physical radiative-transfer behavior.
+
+For dustless scenes the density equation is exactly the pre-dust expression; the dustless branch is kept explicit (rather than using a mathematically equivalent `extinction = 1` formulation) to preserve the floating-point evaluation order and bit-identical output.
 
 ### Noise and stellar knots
 
@@ -309,10 +322,10 @@ This produces a more organic appearance reminiscent of star-forming regions, wit
 The final spiral density is approximately:
 
 ```text
-I(r, theta) = bulge + disk + bar + gate * arms * clumpiness + gate * stellar_knots
+I(r, theta) = bulge + bar + (disk + gate * arms * clumpiness) * extinction + gate * stellar_knots
 ```
 
-where `bar` is zero for unbarred scenes and `gate` is 1 for unbarred scenes or the radial arm gate described above for barred scenes.
+where `extinction` is 1 for dustless scenes or `exp(-tau)` for dusty scenes, `bar` is zero for unbarred scenes, and `gate` is 1 for unbarred scenes or the radial arm gate described above for barred scenes.
 
 The model preserves its native positive density. Mathematically invalid negative values (from noise subtraction) are clamped to zero. Visibility sparsification is handled by the target-occupancy threshold in the post-processing pipeline, not by generation-time cutoffs.
 
@@ -483,7 +496,7 @@ AstroFetch output should not be interpreted as scientific data. In particular, i
 - gravitational dynamics;
 - stellar population synthesis;
 - gas hydrodynamics;
-- dust attenuation;
+- physical dust attenuation (the rendered dust lanes are a bounded procedural extinction approximation, not a physical model);
 - radiative transfer;
 - cosmological environment;
 - observational PSF or detector response.
@@ -494,7 +507,6 @@ The renderer is best understood as a compact procedural visualization inspired b
 
 Possible future directions include:
 
-- dust lanes;
 - ring galaxies;
 - improved inclination handling;
 - color maps tuned for color-blind accessibility;

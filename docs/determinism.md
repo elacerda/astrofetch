@@ -21,7 +21,7 @@ Feature namespaces are versioned deliberately. If a future implementation needs 
 
 `spiral/dust/v1` is an independent versioned feature stream for the deterministic dust-lane configuration (`DustLaneConfig` in `src/dust.rs`). It derives from the same `derive_feature_seed` algorithm as `spiral/bar/v1` and is isolated from it: constructing a dust config never advances the legacy scene RNG, the `spiral/bar/v1` stream, or any other feature stream.
 
-Phase 2A is configuration-only. The dust stream generates parameters (presence, strength, arm-phase offset, width factor) but is **not yet consumed by the galaxy density model**, so no rendered output changes. Dust attenuation integration belongs to a later phase and will keep drawing from this same versioned stream.
+Phase 2B consumes this stream in Spiral generation: each scene derives at most one `DustLaneConfig` from it, and the dust parameters drive a deterministic multiplicative extinction of the luminous disk (disk plus gated arms times clumpiness). The feature RNG contract is unchanged: the dust stream still never advances the legacy scene RNG or the `spiral/bar/v1` stream, and no new legacy RNG draw was added. The extinction itself is a bounded procedural approximation (`tau = strength * profile * radial_gate`, `extinction = exp(-tau)`, with `tau <= 0.55` under the v1 calibration ranges), not a radiative-transfer simulation.
 
 The derivation is anchored for seeds 0, 4, 16, and 42 in `src/seed.rs`, and a test proves that `spiral/dust/v1` and `spiral/bar/v1` derive distinct feature seeds for the same base seed.
 

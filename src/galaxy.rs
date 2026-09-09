@@ -1,5 +1,6 @@
 use crate::bar::BarConfig;
 use crate::density::DensityMap;
+use crate::dust::DustLaneConfig;
 use crate::seed::GenerationContext;
 use noise::{NoiseFn, OpenSimplex};
 use rand::rngs::StdRng;
@@ -97,9 +98,16 @@ fn generate_spiral_galaxy_impl(
     // Derive the optional central bar exactly once per scene from the isolated
     // feature stream. `BarConfig::from_context` never advances the legacy RNG,
     // so the existing `SpiralGalaxyConfig` and `noise_seed` draws are preserved
-    // bit-for-bit. When no context is supplied (the legacy test path) the bar is
-    // absent and the density reduces to the original Spiral model.
+    // bit-for-bit.
     let bar = context.and_then(BarConfig::from_context);
+
+    // Derive the optional dust lanes exactly once per scene from the isolated
+    // dust feature stream, independently of the bar stream.
+    // `DustLaneConfig::from_context` never advances the legacy RNG, so the
+    // existing `SpiralGalaxyConfig` and `noise_seed` draws are preserved
+    // bit-for-bit. When no context is supplied (the legacy test path) the dust
+    // is absent and the density reduces exactly to the pre-dust Spiral model.
+    let dust = context.and_then(DustLaneConfig::from_context);
 
     let out_width = terminal_width.max(1);
     let out_height = terminal_height.max(1) * 2;
@@ -118,7 +126,7 @@ fn generate_spiral_galaxy_impl(
         let x = normalized_coord(sx, high_width);
         let y = normalized_coord(sy, high_height);
 
-        spiral_density(x, y, &config, bar, &coarse_noise, &fine_noise)
+        spiral_density(x, y, &config, bar, dust, &coarse_noise, &fine_noise)
     });
 
     high.downsample_average(out_width, out_height)
@@ -133,6 +141,7 @@ fn spiral_density(
     y: f64,
     config: &SpiralGalaxyConfig,
     bar: Option<BarConfig>,
+    dust: Option<DustLaneConfig>,
     coarse_noise: &OpenSimplex,
     fine_noise: &OpenSimplex,
 ) -> f64 {
@@ -190,13 +199,36 @@ fn spiral_density(
     let clumpiness = 0.45 + 1.35 * coarse.powf(1.4);
     let stellar_knots = fine.powf(8.0) * arms * arm_gate_value * 0.85;
 
-    // Intended composition:
-    //   bulge + disk + bar + gated_arms * clumpiness + gated_stellar_knots
-    // `stellar_knots` is suppressed by exactly the same radial arm gate as the
-    // main spiral-arm contribution, so spiral-associated knots vanish inside
-    // the gated nuclear/bar region. Mathematically invalid negative values are
-    // clamped to zero.
-    let density = bulge + disk + bar_term + arms * arm_gate_value * clumpiness + stellar_knots;
+    let density = match dust {
+        // Dustless scenes keep the exact Phase 2A evaluation order. Do not
+        // replace this branch with the mathematically equivalent
+        // `extinction = 1` formulation: the explicit branch preserves the
+        // floating-point evaluation order and bit-identical output.
+        None => {
+            // Intended composition:
+            //   bulge + disk + bar + gated_arms * clumpiness + gated_stellar_knots
+            // `stellar_knots` is suppressed by exactly the same radial arm gate
+            // as the main spiral-arm contribution, so spiral-associated knots
+            // vanish inside the gated nuclear/bar region.
+            bulge + disk + bar_term + arms * arm_gate_value * clumpiness + stellar_knots
+        }
+        Some(dust) => {
+            // Dusty composition: dust attenuates only the luminous disk
+            // (disk + gated arms * clumpiness). The bulge, bar term, and
+            // stellar knots are NOT attenuated: this is a deliberate
+            // first-version composition choice for procedural terminal art,
+            // not physical radiative-transfer behavior.
+            let arm_clump = arms * arm_gate_value * clumpiness;
+            let luminous_disk = disk + arm_clump;
+            let tau = dust.strength
+                * dust_lane_profile(r, theta, config, bar, &dust)
+                * dust_radial_gate(r, bar, config);
+            let extinction = (-tau).exp();
+            bulge + bar_term + luminous_disk * extinction + stellar_knots
+        }
+    };
+
+    // Mathematically invalid negative values are clamped to zero.
     density.max(0.0)
 }
 
@@ -268,7 +300,28 @@ fn bar_density(xd: f64, yd: f64, bar: BarConfig) -> f64 {
 fn arm_gate(r: f64, bar: BarConfig) -> f64 {
     let inner = 0.65 * bar.half_length;
     let outer = 1.05 * bar.half_length;
+    smoothstep_gate(r, inner, outer)
+}
 
+/// Cubic smoothstep radial gate.
+///
+/// Returns `0` for `r <= inner`, `1` for `r >= outer`, and the cubic
+/// smoothstep `t * t * (3 - 2 * t)` between them, with
+/// `t = clamp((r - inner) / (outer - inner), 0, 1)`. This is the exact
+/// arithmetic sequence previously inlined in `arm_gate`; callers must not
+/// algebraically rewrite it, because anchored outputs are bit-for-bit
+/// contracts on this evaluation order.
+///
+/// Parameters
+/// ----------
+/// r : radius in the intrinsic disk plane (dimensionless scene units).
+/// inner : inner boundary; the gate is exactly `0` at and below it.
+/// outer : outer boundary; the gate is exactly `1` at and above it.
+///
+/// Returns
+/// -------
+/// Gate value in `[0, 1]`, monotonically increasing through the transition.
+fn smoothstep_gate(r: f64, inner: f64, outer: f64) -> f64 {
     if r <= inner {
         0.0
     } else if r >= outer {
@@ -279,6 +332,86 @@ fn arm_gate(r: f64, bar: BarConfig) -> f64 {
         let t = t.clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
+}
+
+/// Radial gate for the dust-lane extinction.
+///
+/// Barred scenes reuse the exact spiral-arm gate (`arm_gate`), so dust fades
+/// in over the same radial transition as the arms. Unbarred scenes use the
+/// fixed first-version morphology relation
+/// `inner = bulge_sigma`, `outer = 2 * bulge_sigma` with the same cubic
+/// smoothstep. These multiples are a fixed morphology relation, not an RNG
+/// parameter and not an empirically calibrated astrophysical law.
+///
+/// Parameters
+/// ----------
+/// r : radius in the intrinsic disk plane (dimensionless scene units).
+/// bar : optional bar configuration (only `half_length` is used).
+/// config : spiral configuration (uses `bulge_sigma` when unbarred).
+///
+/// Returns
+/// -------
+/// Gate value in `[0, 1]`.
+fn dust_radial_gate(r: f64, bar: Option<BarConfig>, config: &SpiralGalaxyConfig) -> f64 {
+    match bar {
+        Some(bar) => arm_gate(r, bar),
+        None => smoothstep_gate(r, config.bulge_sigma, 2.0 * config.bulge_sigma),
+    }
+}
+
+/// Max-over-arms Gaussian profile of the dust lanes at `(r, theta)`.
+///
+/// The dust lanes are a signed phase-offset copy of the stellar-arm geometry:
+/// each dust ridge sits at
+/// `spiral_base_theta(r, config, bar) + arm * (TAU / arms) + dust.offset`,
+/// evaluated in the same intrinsic/deprojected disk frame as the stellar
+/// arms (including the bar phase alignment when a bar is present). Each arm
+/// contributes
+/// `gaussian(r * |angular_distance(theta, dust_arm_theta)|, width)` with
+/// `width = local_arm_width(r, config) * dust.width_factor`, and the arms are
+/// combined with MAX (not SUM) so overlapping lanes do not stack.
+///
+/// `dust.offset` is applied exactly once, per arm ridge. There is no
+/// independent spiral math, no per-arm random phase, no per-pixel RNG, and no
+/// chirality semantics: the offset is a signed phase shift only. There is no
+/// nuclear cutoff here; nuclear suppression belongs to `dust_radial_gate`.
+///
+/// Parameters
+/// ----------
+/// r : radius in the intrinsic disk plane (dimensionless scene units).
+/// theta : angle in the intrinsic disk plane (radians, `atan2` convention).
+/// config : spiral configuration (uses `arms`, `pitch`, `arm_width`).
+/// bar : optional bar configuration (bar phase alignment is inherited).
+/// dust : dust-lane configuration (uses `offset`, `width_factor`).
+///
+/// Returns
+/// -------
+/// Profile value in `[0, 1]`: finite, non-negative, at most 1 (it reaches 1
+/// exactly on a dust lane ridge).
+fn dust_lane_profile(
+    r: f64,
+    theta: f64,
+    config: &SpiralGalaxyConfig,
+    bar: Option<BarConfig>,
+    dust: &DustLaneConfig,
+) -> f64 {
+    let base_theta = spiral_base_theta(r, config, bar);
+    let arm_spacing = TAU / config.arms as f64;
+    let width = local_arm_width(r, config) * dust.width_factor;
+
+    let mut profile: f64 = 0.0;
+    for arm in 0..config.arms {
+        let dust_arm_theta = base_theta + arm as f64 * arm_spacing + dust.offset;
+        let dtheta = angular_distance(theta, dust_arm_theta);
+
+        // Approximate angular separation as a physical transverse distance.
+        let distance = r * dtheta.abs();
+        let profile_arm = gaussian(distance, width);
+
+        profile = profile.max(profile_arm);
+    }
+
+    profile
 }
 
 /// Global phase offset for the logarithmic spiral so that, when a bar is
@@ -296,6 +429,56 @@ fn bar_phase_offset(bar: BarConfig, pitch: f64) -> f64 {
     bar.angle_rad - base_theta_at_bar_end
 }
 
+/// Base angle of arm 0 of the logarithmic spiral at radius `r`.
+///
+/// The legacy spiral obeys `r = a * exp(b * theta)`, so the angle of arm 0 at
+/// radius `r` is `ln(r / a) / b`, with `a = SPIRAL_LOG_A` and `b = pitch`.
+/// When a bar is present, a single global phase offset
+/// (`bar_phase_offset`) is added so arm 0 reaches the bar orientation near
+/// `r = bar.half_length`; the offset is a no-op when the bar is absent.
+///
+/// This performs exactly the arithmetic previously inlined in
+/// `spiral_arm_density`; the dust-lane profile reuses it so stellar-arm and
+/// dust geometry cannot diverge.
+///
+/// Parameters
+/// ----------
+/// r : radius in the intrinsic disk plane (dimensionless scene units).
+/// config : spiral configuration (uses `pitch`).
+/// bar : optional bar configuration (uses `half_length` and `angle_rad`).
+///
+/// Returns
+/// -------
+/// Base angle of arm 0 in radians (unwrapped; arm `k` adds `k * TAU / arms`).
+fn spiral_base_theta(r: f64, config: &SpiralGalaxyConfig, bar: Option<BarConfig>) -> f64 {
+    let mut base_theta = (r / SPIRAL_LOG_A).max(1.0e-4).ln() / config.pitch;
+
+    if let Some(bar) = bar {
+        base_theta += bar_phase_offset(bar, config.pitch);
+    }
+
+    base_theta
+}
+
+/// Local transverse width of a spiral arm at radius `r`.
+///
+/// The width grows linearly with radius: `arm_width * (1 + 0.75 * r)`. This is
+/// the exact expression previously inlined in `spiral_arm_density`; the
+/// dust-lane profile reuses it (scaled by `DustLaneConfig::width_factor`) so
+/// both geometries share one definition.
+///
+/// Parameters
+/// ----------
+/// r : radius in the intrinsic disk plane (dimensionless scene units).
+/// config : spiral configuration (uses `arm_width`).
+///
+/// Returns
+/// -------
+/// Positive transverse width in the same dimensionless units as `r`.
+fn local_arm_width(r: f64, config: &SpiralGalaxyConfig) -> f64 {
+    config.arm_width * (1.0 + 0.75 * r)
+}
+
 fn spiral_arm_density(
     r: f64,
     theta: f64,
@@ -308,15 +491,7 @@ fn spiral_arm_density(
 
     // Logarithmic spiral: r = a * exp(b * theta).
     // We invert it to compare the observed angle against the nearest arm angle.
-    let a = SPIRAL_LOG_A;
-    let b = config.pitch;
-    let mut base_theta = (r / a).max(1.0e-4).ln() / b;
-
-    // Apply a single global phase offset so arm 0 reaches the bar orientation
-    // near r = bar.half_length. No-op when the bar is absent.
-    if let Some(b_cfg) = bar {
-        base_theta += bar_phase_offset(b_cfg, config.pitch);
-    }
+    let base_theta = spiral_base_theta(r, config, bar);
 
     let arm_spacing = TAU / config.arms as f64;
     let radial_fade = (-r / config.disk_scale).exp();
@@ -329,7 +504,7 @@ fn spiral_arm_density(
 
         // Approximate angular separation as a physical transverse distance.
         let distance = r * dtheta.abs();
-        let width = config.arm_width * (1.0 + 0.75 * r);
+        let width = local_arm_width(r, config);
 
         density += gaussian(distance, width);
     }
@@ -771,8 +946,8 @@ mod tests {
         let x = xr * cos_r - yr * sin_r;
         let y = xr * sin_r + yr * cos_r;
 
-        let barred = spiral_density(x, y, &config, Some(bar), &coarse_noise, &fine_noise);
-        let legacy = spiral_density(x, y, &config, None, &coarse_noise, &fine_noise);
+        let barred = spiral_density(x, y, &config, Some(bar), None, &coarse_noise, &fine_noise);
+        let legacy = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise);
         let bar_term = bar_density(xr, yd, bar);
 
         assert!(bar_term > 0.0, "test point must lie inside the bar support");
@@ -835,7 +1010,7 @@ mod tests {
         }
         let (knot, x, y) = best.expect("no sample with ungated arms and non-zero fine noise");
 
-        let full = spiral_density(x, y, &config, Some(bar), &coarse_noise, &fine_noise);
+        let full = spiral_density(x, y, &config, Some(bar), None, &coarse_noise, &fine_noise);
         let r = (x * x + y * y).sqrt();
         let reference = gaussian(r, config.bulge_sigma) * 0.30
             + (-r / config.disk_scale).exp() * 0.035
@@ -853,8 +1028,10 @@ mod tests {
 
     #[test]
     fn test_unbarred_seed_matches_legacy_density_exactly() {
-        // Seed 1 is unbarred. The production (contextual) density must match
-        // the legacy/context-free density bit-for-bit.
+        // Seed 1 is unbarred and dustless. The production (contextual)
+        // density must match the legacy/context-free density bit-for-bit,
+        // proving both the bar and dust integrations are pure no-ops when
+        // absent.
         let seed = 1_u64;
         let mut legacy_rng = StdRng::seed_from_u64(seed);
         let legacy = generate_spiral_galaxy(40, 20, &mut legacy_rng);
@@ -864,5 +1041,378 @@ mod tests {
             generate_spiral_galaxy_with_context(40, 20, &mut ctx_rng, GenerationContext::new(seed));
 
         assert_eq!(contextual, legacy);
+    }
+
+    // ---- Phase 2B: dust-lane geometry and extinction ----
+
+    /// Sampled dust-lane configuration used by the unit tests below.
+    fn sample_dust() -> DustLaneConfig {
+        DustLaneConfig {
+            strength: 0.40,
+            offset: 0.10,
+            width_factor: 0.8,
+        }
+    }
+
+    /// Sampled unbarred spiral configuration used by the unit tests below.
+    /// Rotation and inclination are zero so sky-plane coordinates equal
+    /// intrinsic disk coordinates.
+    fn sample_spiral_config() -> SpiralGalaxyConfig {
+        SpiralGalaxyConfig {
+            arms: 2,
+            pitch: 0.55,
+            inclination_rad: 0.0,
+            rotation_rad: 0.0,
+            bulge_sigma: 0.06,
+            disk_scale: 0.5,
+            arm_width: 0.025,
+            arm_strength: 2.5,
+            noise_scale: 4.0,
+        }
+    }
+
+    #[test]
+    fn test_dust_lane_profile_is_finite_bounded_and_non_negative() {
+        let config = sample_spiral_config();
+        let dust = sample_dust();
+
+        for bar in [None, Some(sample_bar())] {
+            for r in [0.05, 0.1, 0.2, 0.5, 1.0] {
+                for i in 0..360 {
+                    let theta = TAU * (i as f64) / 360.0;
+                    let p = dust_lane_profile(r, theta, &config, bar, &dust);
+                    assert!(p.is_finite(), "profile not finite at r={r} theta={theta}");
+                    assert!(p >= 0.0, "profile negative at r={r} theta={theta}");
+                    assert!(p <= 1.0, "profile above 1 at r={r} theta={theta}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dust_lane_profile_reaches_one_on_offset_lane() {
+        let config = sample_spiral_config();
+        let dust = sample_dust();
+        let r = 0.3;
+
+        let lane_theta = spiral_base_theta(r, &config, None) + dust.offset;
+        let p = dust_lane_profile(r, lane_theta, &config, None, &dust);
+        assert!(
+            (p - 1.0).abs() < 1.0e-12,
+            "profile on the offset lane must be ~1: {p}"
+        );
+    }
+
+    #[test]
+    fn test_dust_lane_profile_off_lane_is_lower() {
+        let config = sample_spiral_config();
+        let dust = sample_dust();
+        let r = 0.3;
+
+        let lane_theta = spiral_base_theta(r, &config, None) + dust.offset;
+        let on_lane = dust_lane_profile(r, lane_theta, &config, None, &dust);
+
+        // Halfway between the two arm ridges (2 arms => spacing TAU/2).
+        let off_lane_theta = lane_theta + TAU / (2.0 * config.arms as f64);
+        let off_lane = dust_lane_profile(r, off_lane_theta, &config, None, &dust);
+
+        assert!(on_lane > off_lane, "off-lane profile must be lower");
+        assert!(
+            off_lane < 0.5,
+            "off-lane profile must be well below the ridge: {off_lane}"
+        );
+    }
+
+    #[test]
+    fn test_dust_lane_larger_width_factor_raises_off_lane_profile() {
+        let config = sample_spiral_config();
+        let r = 0.3;
+        // A fixed non-zero off-lane point (0.05 rad from the lane ridge).
+        let theta = spiral_base_theta(r, &config, None) + 0.10 + 0.05;
+
+        let narrow = DustLaneConfig {
+            strength: 0.40,
+            offset: 0.10,
+            width_factor: 0.5,
+        };
+        let wide = DustLaneConfig {
+            strength: 0.40,
+            offset: 0.10,
+            width_factor: 1.2,
+        };
+
+        let p_narrow = dust_lane_profile(r, theta, &config, None, &narrow);
+        let p_wide = dust_lane_profile(r, theta, &config, None, &wide);
+
+        assert!(p_wide >= p_narrow, "wider lane must not lower the profile");
+        assert!(
+            p_wide > p_narrow,
+            "wider lane must strictly raise the off-lane profile: narrow={p_narrow} wide={p_wide}"
+        );
+    }
+
+    #[test]
+    fn test_dust_offset_is_applied_exactly_once() {
+        // With offset 0 the dust lane coincides with the stellar arm 0 ridge;
+        // with a non-zero offset the stellar ridge must no longer be a dust
+        // ridge (the lane is narrow), proving the offset shifts the dust
+        // geometry exactly once instead of being applied per arm iteration or
+        // twice.
+        let config = sample_spiral_config();
+        let r = 0.3;
+        let base_theta = spiral_base_theta(r, &config, None);
+
+        let zero_offset = DustLaneConfig {
+            strength: 0.40,
+            offset: 0.0,
+            width_factor: 0.5,
+        };
+        let shifted = DustLaneConfig {
+            strength: 0.40,
+            offset: 0.20,
+            width_factor: 0.5,
+        };
+
+        let p_zero_on_arm = dust_lane_profile(r, base_theta, &config, None, &zero_offset);
+        let p_shifted_on_arm = dust_lane_profile(r, base_theta, &config, None, &shifted);
+
+        assert!(
+            (p_zero_on_arm - 1.0).abs() < 1.0e-12,
+            "zero offset must sit on the stellar ridge: {p_zero_on_arm}"
+        );
+        assert!(
+            p_shifted_on_arm < 0.5,
+            "offset must move the lane off the stellar ridge: {p_shifted_on_arm}"
+        );
+
+        // The shifted lane must sit exactly at base_theta + offset.
+        let p_shifted_on_lane = dust_lane_profile(r, base_theta + 0.20, &config, None, &shifted);
+        assert!(
+            (p_shifted_on_lane - 1.0).abs() < 1.0e-12,
+            "shifted lane must be at base_theta + offset: {p_shifted_on_lane}"
+        );
+    }
+
+    #[test]
+    fn test_barred_dust_inherits_bar_phase_alignment() {
+        // When a bar is present, the dust base phase must include the same
+        // bar_phase_offset as the stellar arms: the dust ridge of arm 0 at the
+        // bar-end radius must sit at the bar orientation plus the dust offset.
+        let config = sample_spiral_config();
+        let bar = sample_bar();
+        let dust = sample_dust();
+        let r = bar.half_length;
+
+        let expected_lane = bar.angle_rad + dust.offset;
+        let p = dust_lane_profile(r, expected_lane, &config, Some(bar), &dust);
+        assert!(
+            p > 0.99,
+            "dust lane must inherit the bar phase alignment: {p}"
+        );
+    }
+
+    #[test]
+    fn test_smoothstep_gate_bounded_and_monotonic() {
+        let inner = 0.1;
+        let outer = 0.3;
+        let steps = 64;
+
+        let mut prev = 0.0;
+        for i in 0..=steps {
+            let r = inner + (outer - inner) * (i as f64) / (steps as f64);
+            let g = smoothstep_gate(r, inner, outer);
+            assert!((0.0..=1.0).contains(&g), "gate out of [0,1]: {g}");
+            assert!(g >= prev - 1.0e-12, "gate not monotonic at r={r}");
+            prev = g;
+        }
+        assert_eq!(smoothstep_gate(inner, inner, outer), 0.0);
+        assert_eq!(smoothstep_gate(outer, inner, outer), 1.0);
+        assert_eq!(smoothstep_gate(0.0, inner, outer), 0.0);
+        assert_eq!(smoothstep_gate(1.0, inner, outer), 1.0);
+    }
+
+    #[test]
+    fn test_barred_dust_radial_gate_equals_arm_gate() {
+        let config = sample_spiral_config();
+        let bar = sample_bar();
+
+        for i in 0..128 {
+            let r = 0.05 + 0.5 * (i as f64) / 127.0;
+            assert_eq!(
+                dust_radial_gate(r, Some(bar), &config),
+                arm_gate(r, bar),
+                "barred dust gate must equal arm_gate at r={r}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unbarred_dust_radial_gate_follows_bulge_sigma_relation() {
+        let config = sample_spiral_config();
+        let inner = config.bulge_sigma;
+        let outer = 2.0 * config.bulge_sigma;
+
+        assert_eq!(dust_radial_gate(0.0, None, &config), 0.0);
+        assert_eq!(dust_radial_gate(inner * 0.5, None, &config), 0.0);
+        assert_eq!(dust_radial_gate(inner, None, &config), 0.0);
+        assert_eq!(dust_radial_gate(outer, None, &config), 1.0);
+        assert_eq!(dust_radial_gate(outer * 1.5, None, &config), 1.0);
+
+        // Smooth transition strictly between the boundaries.
+        let mid = (inner + outer) * 0.5;
+        let g_mid = dust_radial_gate(mid, None, &config);
+        assert!(
+            g_mid > 0.0 && g_mid < 1.0,
+            "mid-transition gate must be interior: {g_mid}"
+        );
+
+        // Monotonic across the transition.
+        let mut prev = 0.0;
+        for i in 0..=32 {
+            let r = inner + (outer - inner) * (i as f64) / 32.0;
+            let g = dust_radial_gate(r, None, &config);
+            assert!((0.0..=1.0).contains(&g), "gate out of [0,1]: {g}");
+            assert!(g >= prev - 1.0e-12, "gate not monotonic at r={r}");
+            prev = g;
+        }
+    }
+
+    #[test]
+    fn test_dust_tau_and_extinction_are_bounded() {
+        let config = sample_spiral_config();
+        let dust = sample_dust();
+
+        for bar in [None, Some(sample_bar())] {
+            for r in [0.05, 0.1, 0.2, 0.5, 1.0] {
+                for i in 0..120 {
+                    let theta = TAU * (i as f64) / 120.0;
+                    let tau = dust.strength
+                        * dust_lane_profile(r, theta, &config, bar, &dust)
+                        * dust_radial_gate(r, bar, &config);
+                    let extinction = (-tau).exp();
+
+                    assert!(tau.is_finite(), "tau not finite at r={r} theta={theta}");
+                    assert!(tau >= 0.0, "tau negative at r={r} theta={theta}");
+                    // tau = strength * profile * gate with profile <= 1 and
+                    // gate <= 1, so tau can never exceed the v1 strength bound.
+                    assert!(tau <= 0.55 + 1.0e-12, "tau above the v1 bound: {tau}");
+                    assert!(extinction > 0.0, "extinction must stay positive");
+                    assert!(extinction <= 1.0, "extinction above 1: {extinction}");
+                    assert!(
+                        extinction >= (-0.55_f64).exp() - 1.0e-12,
+                        "extinction below the v1 lower bound: {extinction}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_dust_attenuates_only_the_luminous_disk() {
+        // Prove, with the current private helpers/terms, that a dusty scene
+        // differs from the dustless scene only in the luminous disk
+        // contribution (disk + gated arms * clumpiness). The bulge and the
+        // stellar knots must be untouched by the extinction.
+        let config = sample_spiral_config();
+        let dust = sample_dust();
+        let noise_seed = 11_u32;
+        let coarse_noise = OpenSimplex::new(noise_seed);
+        let fine_noise = OpenSimplex::new(noise_seed.wrapping_add(1));
+
+        // Rotation and inclination are zero, so sky-plane coordinates equal
+        // intrinsic disk coordinates. r is beyond the unbarred dust gate outer
+        // boundary (2 * bulge_sigma = 0.12) so the radial gate is exactly 1,
+        // and theta sits on the dust lane so the profile is exactly 1.
+        let r = 0.30;
+        let theta = spiral_base_theta(r, &config, None) + dust.offset;
+        let x = r * theta.cos();
+        let y = r * theta.sin();
+
+        let dusty = spiral_density(x, y, &config, None, Some(dust), &coarse_noise, &fine_noise);
+        let dustless = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise);
+
+        let bulge = gaussian(r, config.bulge_sigma) * 0.30;
+        let disk = (-r / config.disk_scale).exp() * 0.035;
+        let arms = spiral_arm_density(r, theta, &config, None);
+        let coarse =
+            normalized_noise(coarse_noise.get([x * config.noise_scale, y * config.noise_scale]));
+        let fine = normalized_noise(
+            fine_noise.get([x * config.noise_scale * 5.0, y * config.noise_scale * 5.0]),
+        );
+        let clumpiness = 0.45 + 1.35 * coarse.powf(1.4);
+        // Unbarred: arm_gate_value is exactly 1.0.
+        let stellar_knots = fine.powf(8.0) * arms * 0.85;
+        let arm_clump = arms * clumpiness;
+        let luminous_disk = disk + arm_clump;
+        let tau = dust.strength
+            * dust_lane_profile(r, theta, &config, None, &dust)
+            * dust_radial_gate(r, None, &config);
+        let extinction = (-tau).exp();
+
+        let expected_dusty = bulge + luminous_disk * extinction + stellar_knots;
+        let expected_dustless = bulge + disk + arm_clump + stellar_knots;
+
+        assert!(
+            (dusty - expected_dusty).abs() < 1.0e-12,
+            "dusty density must match the luminous-disk-extinction composition: dusty={dusty} expected={expected_dusty}"
+        );
+        assert!(
+            (dustless - expected_dustless).abs() < 1.0e-12,
+            "dustless density must match the pre-dust composition: dustless={dustless} expected={expected_dustless}"
+        );
+
+        // The extinction must actually attenuate at this point.
+        assert!(
+            extinction < 1.0,
+            "test point must lie inside an attenuated lane"
+        );
+        assert!(dusty < dustless, "dust must reduce the density at the lane");
+
+        // The difference is exactly the luminous-disk attenuation.
+        let delta = dustless - dusty;
+        let expected_delta = luminous_disk * (1.0 - extinction);
+        assert!(
+            (delta - expected_delta).abs() < 1.0e-12,
+            "density difference must be exactly the luminous-disk attenuation: delta={delta} expected={expected_delta}"
+        );
+    }
+
+    #[test]
+    fn test_dusty_scene_is_deterministic_across_runs() {
+        // Seed 4 is dusty (and unbarred) under spiral/dust/v1.
+        let seed = 4_u64;
+        let a = crate::engine::ArtModel::Spiral.generate_scene(40, 20, Some(seed));
+        let b = crate::engine::ArtModel::Spiral.generate_scene(40, 20, Some(seed));
+        assert_eq!(a.density, b.density);
+    }
+
+    #[test]
+    fn test_dust_derivation_does_not_perturb_bar_or_legacy_streams() {
+        // The bar and dust feature streams are independent: deriving dust must
+        // not change the bar configuration, and neither may advance the
+        // legacy RNG.
+        let seed = 42_u64;
+        let context = GenerationContext::new(seed);
+
+        let bar_before = BarConfig::from_context(context);
+        let _dust = DustLaneConfig::from_context(context);
+        let bar_after = BarConfig::from_context(context);
+        assert_eq!(
+            bar_before, bar_after,
+            "dust derivation must not change the bar config"
+        );
+
+        let mut baseline_rng = StdRng::seed_from_u64(seed);
+        let baseline_config = SpiralGalaxyConfig::from_rng(&mut baseline_rng);
+        let baseline_noise_seed = baseline_rng.random::<u32>();
+
+        let mut isolated_rng = StdRng::seed_from_u64(seed);
+        let isolated_config = SpiralGalaxyConfig::from_rng(&mut isolated_rng);
+        let _ = BarConfig::from_context(context);
+        let _ = DustLaneConfig::from_context(context);
+        let isolated_noise_seed = isolated_rng.random::<u32>();
+
+        assert_eq!(isolated_config, baseline_config);
+        assert_eq!(isolated_noise_seed, baseline_noise_seed);
     }
 }
