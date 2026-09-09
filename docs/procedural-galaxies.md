@@ -284,6 +284,19 @@ When a bar is present, the spiral arms are radially gated between 0.65 and 1.05 
 
 At current terminal resolution a valid intrinsic bar can be visually subtle: central structure, projection, normalization, and sampling can all reduce its contrast. Bar visibility is intentionally not tuned by distorting the galaxy model; future visibility improvements belong to later sampling and rendering work.
 
+### Dust lanes (configuration-only)
+
+A subset of spiral scenes carries an optional `DustLaneConfig`. Presence and parameters are derived deterministically from the isolated `spiral/dust/v1` feature stream, so a fixed seed always produces the same dust configuration or no dust, without advancing the legacy scene RNG or the `spiral/bar/v1` stream.
+
+- **Presence**: a scene is dusty with probability 0.60; otherwise it is genuinely dustless.
+- **`strength`**: a dimensionless optical-depth (tau) amplitude in `0.25..0.55`. It is *not* a fractional attenuation depth; it is intended for a future extinction relation of the form `tau = strength * profile * radial_gate`, `extinction = exp(-tau)`.
+- **`offset`**: a signed arm-phase offset in radians, in `-0.30..0.30`. The current model has no explicit chirality or rotation-direction semantics, so the offset is not a leading/trailing statement.
+- **`width_factor`**: a factor in `0.5..1.2` intended to scale the local spiral-arm width in a future phase.
+
+These are procedural calibration ranges chosen for visual plausibility, not empirically validated astrophysical distributions.
+
+**Dust attenuation is not rendered yet.** Phase 2A only generates the configuration; the dust stream is not consumed by the density model, so the density equation above is unchanged and no rendered output differs from the pre-dust behavior.
+
 ### Noise and stellar knots
 
 Smooth analytic spirals look too artificial in a terminal. AstroFetch adds OpenSimplex noise at two scales:

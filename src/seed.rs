@@ -12,6 +12,9 @@ const FEATURE_SEED_DOMAIN_V1: &[u8] = b"astrofetch.feature-seed.v1\0";
 /// Versioned namespace reserved for the first barred-spiral implementation.
 pub const SPIRAL_BAR_V1: &str = "spiral/bar/v1";
 
+/// Versioned namespace reserved for the deterministic dust-lane configuration.
+pub const SPIRAL_DUST_V1: &str = "spiral/dust/v1";
+
 /// Seed context shared with procedural generators without exposing or advancing
 /// the legacy scene RNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +91,24 @@ mod tests {
         assert_eq!(derive_feature_seed(4, SPIRAL_BAR_V1), 0x78326439aca3a060);
         assert_eq!(derive_feature_seed(16, SPIRAL_BAR_V1), 0x9bcdc08f70035478);
         assert_eq!(derive_feature_seed(42, SPIRAL_BAR_V1), 0x13ca583ea0675dce);
+    }
+
+    #[test]
+    fn test_dust_feature_seed_fixed_anchors() {
+        assert_eq!(derive_feature_seed(0, SPIRAL_DUST_V1), 0x283688ed30ef9f76);
+        assert_eq!(derive_feature_seed(4, SPIRAL_DUST_V1), 0xc3cda9552d50d49d);
+        assert_eq!(derive_feature_seed(16, SPIRAL_DUST_V1), 0x1922363ae2281581);
+        assert_eq!(derive_feature_seed(42, SPIRAL_DUST_V1), 0x4e82cd2b7b78b452);
+    }
+
+    #[test]
+    fn test_dust_and_bar_feature_seeds_are_distinct() {
+        for base_seed in [0_u64, 4, 16, 42] {
+            assert_ne!(
+                derive_feature_seed(base_seed, SPIRAL_DUST_V1),
+                derive_feature_seed(base_seed, SPIRAL_BAR_V1)
+            );
+        }
     }
 
     #[test]

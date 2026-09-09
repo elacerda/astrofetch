@@ -4,6 +4,13 @@ All notable changes to AstroFetch will be documented in this file.
 
 Changelog tracking starts with v0.5.0.
 
+## [Unreleased]
+
+### Added
+
+- Deterministic `spiral/dust/v1` dust-lane configuration (`DustLaneConfig`) for the Spiral model.
+- Configuration is derived from an isolated versioned feature stream; it is configuration-only and produces **no rendering change** (dust attenuation is not yet integrated into the density model).
+
 ## [0.5.0] - 2026-09-09
 
 ### Added

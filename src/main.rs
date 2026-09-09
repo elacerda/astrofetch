@@ -4,6 +4,9 @@ mod bar;
 mod cli;
 mod density;
 mod display_plan;
+// Phase 2A: deterministic dust-lane configuration; not yet consumed by the density model.
+#[allow(dead_code)]
+mod dust;
 mod engine;
 mod error;
 mod galaxy;

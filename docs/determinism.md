@@ -17,6 +17,14 @@ The derivation is implemented by `derive_feature_seed` in `src/seed.rs`. The alg
 
 Feature namespaces are versioned deliberately. If a future implementation needs a different random stream for the same feature, it should opt into a new namespace such as `spiral/bar/v2` rather than silently changing unrelated feature streams.
 
+## Dust-lane feature stream
+
+`spiral/dust/v1` is an independent versioned feature stream for the deterministic dust-lane configuration (`DustLaneConfig` in `src/dust.rs`). It derives from the same `derive_feature_seed` algorithm as `spiral/bar/v1` and is isolated from it: constructing a dust config never advances the legacy scene RNG, the `spiral/bar/v1` stream, or any other feature stream.
+
+Phase 2A is configuration-only. The dust stream generates parameters (presence, strength, arm-phase offset, width factor) but is **not yet consumed by the galaxy density model**, so no rendered output changes. Dust attenuation integration belongs to a later phase and will keep drawing from this same versioned stream.
+
+The derivation is anchored for seeds 0, 4, 16, and 42 in `src/seed.rs`, and a test proves that `spiral/dust/v1` and `spiral/bar/v1` derive distinct feature seeds for the same base seed.
+
 ## Legacy Spiral checkpoint
 
 The Phase 0 baseline is `main` commit `f036c2b230dc5a1faf6f9dcb2614b12d0e7726e8` (`feat: prepare AstroFetch v0.4.0`).
