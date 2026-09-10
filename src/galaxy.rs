@@ -82,6 +82,89 @@ pub fn generate_spiral_galaxy_with_context(
     generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, Some(context))
 }
 
+/// Fixed sampling geometry of the legacy Spiral density pipeline.
+///
+/// The terminal requests `terminal_width × terminal_height` cells. The
+/// logical density field is `max(W,1) × max(H,1) * 2` because the renderer
+/// consumes two density rows per visible terminal row via half-block glyphs
+/// (1 logical sample per terminal cell horizontally, 2 vertically). The
+/// density is evaluated on a supersampled grid of
+/// `SUPERSAMPLE_FACTOR × SUPERSAMPLE_FACTOR` high-resolution samples per
+/// logical cell and reduced back to the logical dimensions by averaging.
+///
+/// Phase 3 makes this geometry explicit without changing it: the derived
+/// integer dimensions and the normalized-coordinate expression are a
+/// bit-for-bit contract with the pre-geometry pipeline. The supersample
+/// factor is deliberately modest because this is a CLI visual effect, not a
+/// scientific image pipeline, and the topology is intentionally
+/// non-configurable.
+struct SamplingGeometry {
+    terminal_width: usize,
+    terminal_height: usize,
+}
+
+impl SamplingGeometry {
+    /// Logical samples per terminal cell along x.
+    const LOGICAL_SAMPLES_X_PER_CELL: usize = 1;
+
+    /// Logical samples per terminal cell along y (half-block glyphs consume
+    /// two density rows per visible terminal row).
+    const LOGICAL_SAMPLES_Y_PER_CELL: usize = 2;
+
+    /// Isotropic supersampling factor applied to the logical field.
+    const SUPERSAMPLE_FACTOR: usize = 3;
+
+    /// Creates the geometry for a terminal of the given size.
+    fn new(terminal_width: usize, terminal_height: usize) -> Self {
+        Self {
+            terminal_width,
+            terminal_height,
+        }
+    }
+
+    /// Logical density width: `max(terminal_width, 1)`.
+    fn logical_width(&self) -> usize {
+        self.terminal_width.max(1) * Self::LOGICAL_SAMPLES_X_PER_CELL
+    }
+
+    /// Logical density height: `max(terminal_height, 1) * 2`.
+    fn logical_height(&self) -> usize {
+        self.terminal_height.max(1) * Self::LOGICAL_SAMPLES_Y_PER_CELL
+    }
+
+    /// High-resolution (supersampled) width: `logical_width * 3`.
+    fn high_width(&self) -> usize {
+        self.logical_width() * Self::SUPERSAMPLE_FACTOR
+    }
+
+    /// High-resolution (supersampled) height: `logical_height * 3`.
+    fn high_height(&self) -> usize {
+        self.logical_height() * Self::SUPERSAMPLE_FACTOR
+    }
+
+    /// Normalized x coordinate of high-resolution sample `sample_x`.
+    ///
+    /// Evaluates the exact legacy expression
+    /// `2.0 * ((i as f64 + 0.5) / n as f64 - 0.5)` with
+    /// `n = high_width()`. The expression must not be algebraically
+    /// rewritten: anchored outputs are bit-for-bit contracts on this
+    /// evaluation order.
+    fn normalized_x(&self, sample_x: usize) -> f64 {
+        normalized_coord(sample_x, self.high_width())
+    }
+
+    /// Normalized y coordinate of high-resolution sample `sample_y`.
+    ///
+    /// Evaluates the exact legacy expression
+    /// `2.0 * ((i as f64 + 0.5) / n as f64 - 0.5)` with
+    /// `n = high_height()`. The expression must not be algebraically
+    /// rewritten: anchored outputs are bit-for-bit contracts on this
+    /// evaluation order.
+    fn normalized_y(&self, sample_y: usize) -> f64 {
+        normalized_coord(sample_y, self.high_height())
+    }
+}
+
 /// Generates a spiral galaxy as a high-resolution density field.
 ///
 /// `terminal_height` is the number of terminal text rows requested by the user.
@@ -109,27 +192,25 @@ fn generate_spiral_galaxy_impl(
     // is absent and the density reduces exactly to the pre-dust Spiral model.
     let dust = context.and_then(DustLaneConfig::from_context);
 
-    let out_width = terminal_width.max(1);
-    let out_height = terminal_height.max(1) * 2;
-
-    // Supersampling before binning. This is deliberately modest because this is
-    // a CLI visual effect, not a scientific image pipeline.
-    let sample = 3;
-    let high_width = out_width * sample;
-    let high_height = out_height * sample;
+    // The sampling geometry owns the legacy dimension chain:
+    //   terminal W×H
+    //     -> logical max(W,1) × max(H,1)*2
+    //     -> supersampled logical_width*3 × logical_height*3
+    //     -> average reduction back to the logical dimensions.
+    let geometry = SamplingGeometry::new(terminal_width, terminal_height);
 
     let noise_seed = rng.random::<u32>();
     let coarse_noise = OpenSimplex::new(noise_seed);
     let fine_noise = OpenSimplex::new(noise_seed.wrapping_add(1));
 
-    let high = DensityMap::from_fn(high_width, high_height, |sx, sy| {
-        let x = normalized_coord(sx, high_width);
-        let y = normalized_coord(sy, high_height);
+    let high = DensityMap::from_fn(geometry.high_width(), geometry.high_height(), |sx, sy| {
+        let x = geometry.normalized_x(sx);
+        let y = geometry.normalized_y(sy);
 
         spiral_density(x, y, &config, bar, dust, &coarse_noise, &fine_noise)
     });
 
-    high.downsample_average(out_width, out_height)
+    high.downsample_average(geometry.logical_width(), geometry.logical_height())
 }
 
 fn normalized_coord(i: usize, n: usize) -> f64 {
@@ -1414,5 +1495,162 @@ mod tests {
 
         assert_eq!(isolated_config, baseline_config);
         assert_eq!(isolated_noise_seed, baseline_noise_seed);
+    }
+
+    // ---- Phase 3: explicit sampling geometry ----
+
+    #[test]
+    fn test_sampling_geometry_dimensions_match_legacy_chain() {
+        // Pin the fixed sampling topology: 1×2 logical samples per terminal
+        // cell and an isotropic 3× supersample. These are compile-time
+        // constants, not runtime configuration.
+        assert_eq!(SamplingGeometry::LOGICAL_SAMPLES_X_PER_CELL, 1);
+        assert_eq!(SamplingGeometry::LOGICAL_SAMPLES_Y_PER_CELL, 2);
+        assert_eq!(SamplingGeometry::SUPERSAMPLE_FACTOR, 3);
+
+        for (terminal_width, terminal_height) in
+            [(0, 0), (1, 1), (0, 7), (5, 0), (40, 20), (101, 33)]
+        {
+            let geometry = SamplingGeometry::new(terminal_width, terminal_height);
+
+            assert_eq!(
+                geometry.logical_width(),
+                terminal_width.max(1),
+                "logical width for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.logical_height(),
+                terminal_height.max(1) * 2,
+                "logical height for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.high_width(),
+                geometry.logical_width() * 3,
+                "high width for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.high_height(),
+                geometry.logical_height() * 3,
+                "high height for ({terminal_width},{terminal_height})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sampling_geometry_normalized_coordinates_match_legacy_expression() {
+        // The geometry must invoke the exact legacy normalized-coordinate
+        // expression, `2.0 * ((i as f64 + 0.5) / n as f64 - 0.5)`, with the
+        // high-resolution extent of each axis. Bit-exact anchors are compared
+        // via `to_bits`; no algebraically rearranged formula is used, and no
+        // symmetry property is asserted (it is not bit-for-bit guaranteed).
+        let geometry = SamplingGeometry::new(40, 20);
+        let high_width = geometry.high_width();
+        let high_height = geometry.high_height();
+
+        for i in [0usize, 1, high_width / 2, high_width - 2, high_width - 1] {
+            let expected = 2.0 * ((i as f64 + 0.5) / high_width as f64 - 0.5);
+            assert_eq!(
+                geometry.normalized_x(i).to_bits(),
+                expected.to_bits(),
+                "normalized_x({i}) must match the legacy expression at n={high_width}"
+            );
+        }
+
+        for j in [0usize, 1, high_height / 2, high_height - 2, high_height - 1] {
+            let expected = 2.0 * ((j as f64 + 0.5) / high_height as f64 - 0.5);
+            assert_eq!(
+                geometry.normalized_y(j).to_bits(),
+                expected.to_bits(),
+                "normalized_y({j}) must match the legacy expression at n={high_height}"
+            );
+        }
+
+        // A non-square case where the axis extents differ, so each axis is
+        // proven to use its own high dimension.
+        let non_square = SamplingGeometry::new(7, 3);
+        assert_ne!(
+            non_square.high_width(),
+            non_square.high_height(),
+            "test case must have distinct axis extents"
+        );
+
+        for i in [
+            0usize,
+            non_square.high_width() / 2,
+            non_square.high_width() - 1,
+        ] {
+            let expected = 2.0 * ((i as f64 + 0.5) / non_square.high_width() as f64 - 0.5);
+            assert_eq!(
+                non_square.normalized_x(i).to_bits(),
+                expected.to_bits(),
+                "normalized_x({i}) must use the x high dimension"
+            );
+        }
+
+        for j in [
+            0usize,
+            non_square.high_height() / 2,
+            non_square.high_height() - 1,
+        ] {
+            let expected = 2.0 * ((j as f64 + 0.5) / non_square.high_height() as f64 - 0.5);
+            assert_eq!(
+                non_square.normalized_y(j).to_bits(),
+                expected.to_bits(),
+                "normalized_y({j}) must use the y high dimension"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sampling_geometry_edge_dimensions_through_generation() {
+        // The direct generator must keep the legacy output dimensions for
+        // degenerate terminal sizes: logical width max(W,1), logical height
+        // max(H,1) * 2.
+        for (terminal_width, terminal_height, expected) in
+            [(0usize, 0usize, (1, 2)), (0, 5, (1, 10)), (5, 0, (5, 2))]
+        {
+            let mut rng = StdRng::seed_from_u64(7);
+            let map = generate_spiral_galaxy(terminal_width, terminal_height, &mut rng);
+            assert_eq!(
+                (map.width, map.height),
+                expected,
+                "output dimensions for ({terminal_width},{terminal_height})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sampling_geometry_downsamples_exact_3x3_blocks() {
+        // The high-resolution grid is exactly 3×3 samples per logical cell,
+        // so each logical cell must average exactly one 3×3 block. Fill each
+        // block with a distinct small integer constant (exact in f64) and
+        // verify the downsampled value, proving the geometry chooses the same
+        // 3×3 source bins for each logical cell.
+        let geometry = SamplingGeometry::new(2, 2);
+        let high_width = geometry.high_width();
+        let high_height = geometry.high_height();
+
+        let mut high = DensityMap::new(high_width, high_height);
+        for y in 0..high_height {
+            for x in 0..high_width {
+                let block = ((x / 3) + (y / 3) * 10) as f64;
+                high.set(x, y, block);
+            }
+        }
+
+        let logical = high.downsample_average(geometry.logical_width(), geometry.logical_height());
+        assert_eq!(logical.width, geometry.logical_width());
+        assert_eq!(logical.height, geometry.logical_height());
+
+        for oy in 0..logical.height {
+            for ox in 0..logical.width {
+                let expected = (ox + oy * 10) as f64;
+                assert_eq!(
+                    logical.get(ox, oy),
+                    expected,
+                    "logical cell ({ox},{oy}) must average exactly one 3×3 block"
+                );
+            }
+        }
     }
 }

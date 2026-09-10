@@ -11,6 +11,10 @@ Changelog tracking starts with v0.5.0.
 - Deterministic `spiral/dust/v1` dust-lane configuration (`DustLaneConfig`) for the Spiral model, derived from an isolated versioned feature stream without advancing the legacy scene RNG.
 - Dust-lane extinction for the Spiral model: the dust configuration is now consumed as a deterministic multiplicative attenuation of the luminous disk (disk plus gated arms times clumpiness) using `tau = strength * profile * radial_gate` and `extinction = exp(-tau)`. The bulge, stellar bar, and stellar knots are not attenuated. Dustless scenes keep the exact pre-dust density expression.
 
+### Changed
+
+- Made the Spiral sampling geometry explicit (`SamplingGeometry` in `src/galaxy.rs`): terminal W×H -> logical W×2H (1×2 logical samples per terminal cell) -> 3× supersampling -> average reduction back to W×2H. Renderer-preserving: existing outputs remain bit-for-bit identical.
+
 ## [0.5.0] - 2026-09-09
 
 ### Added

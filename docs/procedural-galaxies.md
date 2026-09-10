@@ -113,6 +113,28 @@ The values are interpreted as relative brightness or density. They are later nor
 
 The spiral model generates the field at a higher internal sampling resolution and then downsamples by averaging. This reduces aliasing and helps preserve smooth structures in a very small terminal canvas.
 
+### Spiral sampling geometry
+
+The Spiral model evaluates the density field on a fixed, non-configurable
+sampling geometry (made explicit in Phase 3, which is renderer-preserving:
+all existing outputs remain bit-for-bit identical):
+
+```text
+terminal W×H
+  -> logical max(W,1) × max(H,1)×2
+  -> supersampled logical_width×3 × logical_height×3
+  -> average reduction back to the logical W×2H field
+```
+
+- The terminal requests `W × H` cells.
+- The logical density field is `W × 2H`: 1 logical sample per terminal cell
+  horizontally and 2 vertically (the renderer consumes two density rows per
+  visible terminal row via half-block glyphs).
+- The density is evaluated on a `3×` supersampled grid (3 high-resolution
+  samples per logical cell on each axis).
+- The supersampled field is reduced back to the logical `W × 2H` size by
+  averaging 3×3 blocks.
+
 ## Terminal constraints
 
 A terminal cell is not a square pixel. AstroFetch compensates partly by generating galaxy density maps at twice the requested terminal height. The renderer then collapses two vertical density samples into one visible terminal row using Unicode block characters.
