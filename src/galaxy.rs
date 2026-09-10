@@ -1,6 +1,7 @@
 use crate::bar::BarConfig;
 use crate::density::DensityMap;
 use crate::dust::DustLaneConfig;
+use crate::render::topology::CellSamplingShape;
 use crate::seed::GenerationContext;
 use noise::{NoiseFn, OpenSimplex};
 use rand::rngs::StdRng;
@@ -59,13 +60,22 @@ impl SpiralGalaxyConfig {
 /// Production scene generation uses [`generate_spiral_galaxy_with_context`].
 /// This wrapper remains for focused density tests that predate feature-specific
 /// seed namespaces; no optional feature should depend on this context-free path.
+///
+/// The sampling shape is fixed to `CellSamplingShape::HALF_BLOCK`, the
+/// production topology.
 #[cfg(test)]
 pub fn generate_spiral_galaxy(
     terminal_width: usize,
     terminal_height: usize,
     rng: &mut StdRng,
 ) -> DensityMap {
-    generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, None)
+    generate_spiral_galaxy_impl(
+        terminal_width,
+        terminal_height,
+        rng,
+        None,
+        CellSamplingShape::HALF_BLOCK,
+    )
 }
 
 /// Generates a spiral galaxy with explicit access to the base scene seed.
@@ -73,63 +83,101 @@ pub fn generate_spiral_galaxy(
 /// `GenerationContext` does not replace or advance the legacy RNG. It exists so
 /// Phase 1 and later optional morphology can derive isolated feature streams
 /// without perturbing the existing Spiral configuration or OpenSimplex seed.
+///
+/// The sampling shape is fixed to `CellSamplingShape::HALF_BLOCK`, the
+/// production topology; shape-aware generation is available through
+/// [`generate_spiral_galaxy_with_shape`].
 pub fn generate_spiral_galaxy_with_context(
     terminal_width: usize,
     terminal_height: usize,
     rng: &mut StdRng,
     context: GenerationContext,
 ) -> DensityMap {
-    generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, Some(context))
+    generate_spiral_galaxy_impl(
+        terminal_width,
+        terminal_height,
+        rng,
+        Some(context),
+        CellSamplingShape::HALF_BLOCK,
+    )
 }
 
-/// Fixed sampling geometry of the legacy Spiral density pipeline.
+/// Generates a spiral galaxy with an explicit cell sampling shape.
+///
+/// Internal shape-aware entry point (Phase 5A). The production path always
+/// uses `CellSamplingShape::HALF_BLOCK`; this function exists so tests can
+/// exercise `CellSamplingShape::QUADRANT` directly. The shape affects only
+/// the sampling dimensions: for a fixed seed the RNG stream (Spiral
+/// configuration, bar, dust, and noise draws) is identical regardless of
+/// shape, and the output is deterministic for a given seed, terminal size,
+/// and shape.
+///
+/// Currently exercised only by tests: the production scene path selects
+/// `HALF_BLOCK` via [`generate_spiral_galaxy_with_context`]. The quadrant
+/// renderer (Phase 5B) will select `QUADRANT` here.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn generate_spiral_galaxy_with_shape(
+    terminal_width: usize,
+    terminal_height: usize,
+    rng: &mut StdRng,
+    context: GenerationContext,
+    shape: CellSamplingShape,
+) -> DensityMap {
+    generate_spiral_galaxy_impl(terminal_width, terminal_height, rng, Some(context), shape)
+}
+
+/// Fixed sampling geometry of the Spiral density pipeline.
 ///
 /// The terminal requests `terminal_width × terminal_height` cells. The
-/// logical density field is `max(W,1) × max(H,1) * 2` because the renderer
-/// consumes two density rows per visible terminal row via half-block glyphs
-/// (1 logical sample per terminal cell horizontally, 2 vertically). The
-/// density is evaluated on a supersampled grid of
+/// logical density field is `max(W,1) × shape.columns()` by
+/// `max(H,1) × shape.rows()`: the production `HALF_BLOCK` shape (1×2)
+/// gives the legacy `W × 2H` field because the renderer consumes two
+/// density rows per visible terminal row via half-block glyphs (1 logical
+/// sample per terminal cell horizontally, 2 vertically), while the
+/// `QUADRANT` shape (2×2) gives `2W × 2H` for the future quadrant
+/// renderer. The density is evaluated on a supersampled grid of
 /// `SUPERSAMPLE_FACTOR × SUPERSAMPLE_FACTOR` high-resolution samples per
 /// logical cell and reduced back to the logical dimensions by averaging.
 ///
-/// Phase 3 makes this geometry explicit without changing it: the derived
-/// integer dimensions and the normalized-coordinate expression are a
-/// bit-for-bit contract with the pre-geometry pipeline. The supersample
-/// factor is deliberately modest because this is a CLI visual effect, not a
-/// scientific image pipeline, and the topology is intentionally
-/// non-configurable.
+/// Phase 3 made this geometry explicit without changing it; Phase 5A makes
+/// it shape-aware. The production path always uses
+/// `CellSamplingShape::HALF_BLOCK`, so the derived integer dimensions and
+/// the normalized-coordinate expression remain a bit-for-bit contract with
+/// the pre-geometry pipeline. The supersample factor is deliberately modest
+/// because this is a CLI visual effect, not a scientific image pipeline,
+/// and the topology is intentionally non-configurable from the CLI.
 struct SamplingGeometry {
     terminal_width: usize,
     terminal_height: usize,
+    shape: CellSamplingShape,
 }
 
 impl SamplingGeometry {
-    /// Logical samples per terminal cell along x.
-    const LOGICAL_SAMPLES_X_PER_CELL: usize = 1;
-
-    /// Logical samples per terminal cell along y (half-block glyphs consume
-    /// two density rows per visible terminal row).
-    const LOGICAL_SAMPLES_Y_PER_CELL: usize = 2;
-
     /// Isotropic supersampling factor applied to the logical field.
     const SUPERSAMPLE_FACTOR: usize = 3;
 
-    /// Creates the geometry for a terminal of the given size.
-    fn new(terminal_width: usize, terminal_height: usize) -> Self {
+    /// Creates the geometry for a terminal of the given size and sampling
+    /// shape.
+    fn for_terminal(
+        terminal_width: usize,
+        terminal_height: usize,
+        shape: CellSamplingShape,
+    ) -> Self {
         Self {
             terminal_width,
             terminal_height,
+            shape,
         }
     }
 
-    /// Logical density width: `max(terminal_width, 1)`.
+    /// Logical density width: `max(terminal_width, 1) * shape.columns()`.
     fn logical_width(&self) -> usize {
-        self.terminal_width.max(1) * Self::LOGICAL_SAMPLES_X_PER_CELL
+        self.terminal_width.max(1) * self.shape.columns()
     }
 
-    /// Logical density height: `max(terminal_height, 1) * 2`.
+    /// Logical density height: `max(terminal_height, 1) * shape.rows()`.
     fn logical_height(&self) -> usize {
-        self.terminal_height.max(1) * Self::LOGICAL_SAMPLES_Y_PER_CELL
+        self.terminal_height.max(1) * self.shape.rows()
     }
 
     /// High-resolution (supersampled) width: `logical_width * 3`.
@@ -165,16 +213,20 @@ impl SamplingGeometry {
     }
 }
 
-/// Generates a spiral galaxy as a high-resolution density field.
+/// Generates a spiral galaxy as a density field at the shape's logical
+/// dimensions.
 ///
-/// `terminal_height` is the number of terminal text rows requested by the user.
-/// The returned map has twice that height because the renderer consumes two
-/// density rows per visible terminal row via half-block glyphs.
+/// `terminal_width`/`terminal_height` are the terminal cells requested by
+/// the user. The returned map has `max(W,1) * shape.columns()` by
+/// `max(H,1) * shape.rows()` dimensions: for the production `HALF_BLOCK`
+/// shape that is the legacy `W × 2H` field (the renderer consumes two
+/// density rows per visible terminal row via half-block glyphs).
 fn generate_spiral_galaxy_impl(
     terminal_width: usize,
     terminal_height: usize,
     rng: &mut StdRng,
     context: Option<GenerationContext>,
+    shape: CellSamplingShape,
 ) -> DensityMap {
     let config = SpiralGalaxyConfig::from_rng(rng);
 
@@ -192,12 +244,14 @@ fn generate_spiral_galaxy_impl(
     // is absent and the density reduces exactly to the pre-dust Spiral model.
     let dust = context.and_then(DustLaneConfig::from_context);
 
-    // The sampling geometry owns the legacy dimension chain:
+    // The sampling geometry owns the dimension chain:
     //   terminal W×H
-    //     -> logical max(W,1) × max(H,1)*2
+    //     -> logical max(W,1)*shape.columns() × max(H,1)*shape.rows()
     //     -> supersampled logical_width*3 × logical_height*3
     //     -> average reduction back to the logical dimensions.
-    let geometry = SamplingGeometry::new(terminal_width, terminal_height);
+    // The production shape is HALF_BLOCK (1×2), which reproduces the legacy
+    // W×2H logical field and 3W×6H supersampled field bit-for-bit.
+    let geometry = SamplingGeometry::for_terminal(terminal_width, terminal_height, shape);
 
     let noise_seed = rng.random::<u32>();
     let coarse_noise = OpenSimplex::new(noise_seed);
@@ -1501,17 +1555,22 @@ mod tests {
 
     #[test]
     fn test_sampling_geometry_dimensions_match_legacy_chain() {
-        // Pin the fixed sampling topology: 1×2 logical samples per terminal
-        // cell and an isotropic 3× supersample. These are compile-time
-        // constants, not runtime configuration.
-        assert_eq!(SamplingGeometry::LOGICAL_SAMPLES_X_PER_CELL, 1);
-        assert_eq!(SamplingGeometry::LOGICAL_SAMPLES_Y_PER_CELL, 2);
+        // Pin the production sampling topology: the HALF_BLOCK shape (1×2
+        // logical samples per terminal cell) and an isotropic 3×
+        // supersample. These are compile-time constants, not runtime
+        // configuration.
+        assert_eq!(CellSamplingShape::HALF_BLOCK.columns(), 1);
+        assert_eq!(CellSamplingShape::HALF_BLOCK.rows(), 2);
         assert_eq!(SamplingGeometry::SUPERSAMPLE_FACTOR, 3);
 
         for (terminal_width, terminal_height) in
             [(0, 0), (1, 1), (0, 7), (5, 0), (40, 20), (101, 33)]
         {
-            let geometry = SamplingGeometry::new(terminal_width, terminal_height);
+            let geometry = SamplingGeometry::for_terminal(
+                terminal_width,
+                terminal_height,
+                CellSamplingShape::HALF_BLOCK,
+            );
 
             assert_eq!(
                 geometry.logical_width(),
@@ -1543,7 +1602,7 @@ mod tests {
         // high-resolution extent of each axis. Bit-exact anchors are compared
         // via `to_bits`; no algebraically rearranged formula is used, and no
         // symmetry property is asserted (it is not bit-for-bit guaranteed).
-        let geometry = SamplingGeometry::new(40, 20);
+        let geometry = SamplingGeometry::for_terminal(40, 20, CellSamplingShape::HALF_BLOCK);
         let high_width = geometry.high_width();
         let high_height = geometry.high_height();
 
@@ -1567,7 +1626,7 @@ mod tests {
 
         // A non-square case where the axis extents differ, so each axis is
         // proven to use its own high dimension.
-        let non_square = SamplingGeometry::new(7, 3);
+        let non_square = SamplingGeometry::for_terminal(7, 3, CellSamplingShape::HALF_BLOCK);
         assert_ne!(
             non_square.high_width(),
             non_square.high_height(),
@@ -1626,7 +1685,7 @@ mod tests {
         // block with a distinct small integer constant (exact in f64) and
         // verify the downsampled value, proving the geometry chooses the same
         // 3×3 source bins for each logical cell.
-        let geometry = SamplingGeometry::new(2, 2);
+        let geometry = SamplingGeometry::for_terminal(2, 2, CellSamplingShape::HALF_BLOCK);
         let high_width = geometry.high_width();
         let high_height = geometry.high_height();
 
@@ -1658,19 +1717,171 @@ mod tests {
 
     #[test]
     fn test_half_block_topology_cross_checks_sampling_geometry() {
-        // The production topology abstraction must agree with the fixed
-        // Spiral sampling geometry. This cross-check lives in the galaxy
-        // test module on purpose: `SamplingGeometry` stays private here,
-        // so the generator abstraction is not widened for testing.
-        use crate::render::topology::CellSamplingShape;
+        // The production topology abstraction must agree with the Spiral
+        // sampling geometry: the geometry's logical dimensions must derive
+        // exactly from the HALF_BLOCK shape. This cross-check lives in the
+        // galaxy test module on purpose: `SamplingGeometry` stays private
+        // here, so the generator abstraction is not widened for testing.
+        let shape = CellSamplingShape::HALF_BLOCK;
+        let terminal_width = 40;
+        let terminal_height = 20;
+        let geometry = SamplingGeometry::for_terminal(terminal_width, terminal_height, shape);
 
         assert_eq!(
-            CellSamplingShape::HALF_BLOCK.columns(),
-            SamplingGeometry::LOGICAL_SAMPLES_X_PER_CELL
+            geometry.logical_width(),
+            terminal_width.max(1) * shape.columns()
         );
         assert_eq!(
-            CellSamplingShape::HALF_BLOCK.rows(),
-            SamplingGeometry::LOGICAL_SAMPLES_Y_PER_CELL
+            geometry.logical_height(),
+            terminal_height.max(1) * shape.rows()
         );
+    }
+
+    // ---- Phase 5A: shape-aware Spiral sampling ----
+
+    #[test]
+    fn test_sampling_geometry_quadrant_dimensions() {
+        // The QUADRANT shape (2×2) must produce the future quadrant
+        // dimension chain: logical 2W×2H and supersampled 6W×6H, with the
+        // same max(1) edge behavior as HALF_BLOCK.
+        for (terminal_width, terminal_height) in
+            [(0, 0), (1, 1), (0, 7), (5, 0), (40, 20), (101, 33)]
+        {
+            let geometry = SamplingGeometry::for_terminal(
+                terminal_width,
+                terminal_height,
+                CellSamplingShape::QUADRANT,
+            );
+
+            assert_eq!(
+                geometry.logical_width(),
+                terminal_width.max(1) * 2,
+                "logical width for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.logical_height(),
+                terminal_height.max(1) * 2,
+                "logical height for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.high_width(),
+                geometry.logical_width() * 3,
+                "high width for ({terminal_width},{terminal_height})"
+            );
+            assert_eq!(
+                geometry.high_height(),
+                geometry.logical_height() * 3,
+                "high height for ({terminal_width},{terminal_height})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sampling_geometry_quadrant_normalized_coordinates() {
+        // QUADRANT normalized coordinates must use the exact same frozen
+        // expression, `2.0 * ((i as f64 + 0.5) / n as f64 - 0.5)`, evaluated
+        // with the QUADRANT high dimensions. Bit-exact via `to_bits`.
+        let geometry = SamplingGeometry::for_terminal(40, 20, CellSamplingShape::QUADRANT);
+        let high_width = geometry.high_width();
+        let high_height = geometry.high_height();
+
+        assert_eq!(high_width, 40 * 2 * 3);
+        assert_eq!(high_height, 20 * 2 * 3);
+
+        for i in [0usize, 1, high_width / 2, high_width - 2, high_width - 1] {
+            let expected = 2.0 * ((i as f64 + 0.5) / high_width as f64 - 0.5);
+            assert_eq!(
+                geometry.normalized_x(i).to_bits(),
+                expected.to_bits(),
+                "normalized_x({i}) must match the frozen expression at n={high_width}"
+            );
+        }
+
+        for j in [0usize, 1, high_height / 2, high_height - 2, high_height - 1] {
+            let expected = 2.0 * ((j as f64 + 0.5) / high_height as f64 - 0.5);
+            assert_eq!(
+                geometry.normalized_y(j).to_bits(),
+                expected.to_bits(),
+                "normalized_y({j}) must match the frozen expression at n={high_height}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_spiral_quadrant_generation_dimensions() {
+        // Shape-aware QUADRANT generation must return a 2W×2H DensityMap,
+        // with the same max(1) edge behavior as the production HALF_BLOCK
+        // path.
+        for (terminal_width, terminal_height, expected) in [
+            (0usize, 0usize, (2, 2)),
+            (0, 5, (2, 10)),
+            (5, 0, (10, 2)),
+            (30, 15, (60, 30)),
+        ] {
+            let mut rng = StdRng::seed_from_u64(7);
+            let map = generate_spiral_galaxy_with_shape(
+                terminal_width,
+                terminal_height,
+                &mut rng,
+                GenerationContext::new(7),
+                CellSamplingShape::QUADRANT,
+            );
+            assert_eq!(
+                (map.width, map.height),
+                expected,
+                "QUADRANT output dimensions for ({terminal_width},{terminal_height})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_spiral_quadrant_generation_is_deterministic() {
+        // Same seed + W/H + QUADRANT must produce a bit-identical
+        // DensityMap across repeated runs.
+        for seed in [4_u64, 16, 42] {
+            let a = generate_spiral_galaxy_with_shape(
+                30,
+                15,
+                &mut StdRng::seed_from_u64(seed),
+                GenerationContext::new(seed),
+                CellSamplingShape::QUADRANT,
+            );
+            let b = generate_spiral_galaxy_with_shape(
+                30,
+                15,
+                &mut StdRng::seed_from_u64(seed),
+                GenerationContext::new(seed),
+                CellSamplingShape::QUADRANT,
+            );
+            assert_eq!(
+                a, b,
+                "QUADRANT density must be deterministic for seed {seed}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_generate_scene_matches_shape_aware_half_block() {
+        // The legacy generate_scene path (production HALF_BLOCK) must be
+        // equivalent to the new shape-aware HALF_BLOCK path for
+        // representative fixed seeds: unbarred (4), barred (16), and
+        // barred+dusty (42).
+        for seed in [4_u64, 16, 42] {
+            let legacy = crate::engine::ArtModel::Spiral.generate_scene(30, 15, Some(seed));
+
+            let mut rng = StdRng::seed_from_u64(seed);
+            let shape_aware = generate_spiral_galaxy_with_shape(
+                30,
+                15,
+                &mut rng,
+                GenerationContext::new(seed),
+                CellSamplingShape::HALF_BLOCK,
+            );
+
+            assert_eq!(
+                legacy.density, shape_aware,
+                "generate_scene (HALF_BLOCK) must equal the shape-aware HALF_BLOCK path for seed {seed}"
+            );
+        }
     }
 }

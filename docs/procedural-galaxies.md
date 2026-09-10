@@ -116,24 +116,33 @@ The spiral model generates the field at a higher internal sampling resolution an
 ### Spiral sampling geometry
 
 The Spiral model evaluates the density field on a fixed, non-configurable
-sampling geometry (made explicit in Phase 3, which is renderer-preserving:
-all existing outputs remain bit-for-bit identical):
+sampling geometry (`SamplingGeometry` in `src/galaxy.rs`). Phase 3 made the
+geometry explicit without changing it; Phase 5A made it shape-aware: the
+logical dimensions now derive from the cell sampling shape
+(`CellSamplingShape`), and the production path always uses the `HALF_BLOCK`
+shape, so all existing outputs remain bit-for-bit identical:
 
 ```text
 terminal W×H
-  -> logical max(W,1) × max(H,1)×2
+  -> logical max(W,1) × max(H,1)×2        (HALF_BLOCK, production)
   -> supersampled logical_width×3 × logical_height×3
   -> average reduction back to the logical W×2H field
 ```
 
 - The terminal requests `W × H` cells.
-- The logical density field is `W × 2H`: 1 logical sample per terminal cell
-  horizontally and 2 vertically (the renderer consumes two density rows per
-  visible terminal row via half-block glyphs).
+- The production `HALF_BLOCK` shape (1×2) gives the legacy logical field
+  `W × 2H`: 1 logical sample per terminal cell horizontally and 2
+  vertically (the renderer consumes two density rows per visible terminal
+  row via half-block glyphs), and the supersampled field `3W × 6H`.
+- The `QUADRANT` shape (2×2) gives the future quadrant dimensions: logical
+  `2W × 2H` and supersampled `6W × 6H` (approximately double the sampling
+  evaluations of `HALF_BLOCK`). It is available to the Spiral generator and
+  to tests, but no production renderer consumes it yet and it is not
+  user-selectable; the quadrant renderer integration comes next (Phase 5B).
 - The density is evaluated on a `3×` supersampled grid (3 high-resolution
   samples per logical cell on each axis).
-- The supersampled field is reduced back to the logical `W × 2H` size by
-  averaging 3×3 blocks.
+- The supersampled field is reduced back to the logical size by averaging
+  3×3 blocks.
 
 ### Terminal-cell topology
 
@@ -143,16 +152,19 @@ topology abstraction (`CellSamplingShape` in `src/render/topology.rs`):
 - **Current production topology**: 1×2 — one logical sample horizontally
   and two vertically per terminal cell (the half-block contract).
 - **Future quadrant topology**: 2×2 — four logical samples per terminal
-  cell. It is defined and tested, but not yet consumed by production
-  rendering.
+  cell. It is defined, tested, and available to the Spiral generator, but
+  not yet consumed by production rendering.
 - Subcell ordering is row-major: top-left, top-right, bottom-left,
   bottom-right (TL, TR, BL, BR), with offsets (0,0), (1,0), (0,1), (1,1).
 - A subcell `(sx, sy)` of terminal cell `(cx, cy)` maps to the logical
   sample `(cx × columns + sx, cy × rows + sy)`.
 
-Phase 4 defines and tests this topology only; production rendering and
-density generation remain unchanged. Phase 5 will integrate the 2×2
-quadrant topology into the renderers.
+Phase 5A makes Spiral generation shape-aware: the generator derives its
+logical dimensions from the shape, and the production path uses
+`HALF_BLOCK`, so production rendering and all existing outputs remain
+bit-for-bit unchanged. `QUADRANT` is available to the generator (and to
+tests) but is not yet consumed by any renderer and is not user-selectable;
+the quadrant renderer integration comes next (Phase 5B).
 
 ## Terminal constraints
 
