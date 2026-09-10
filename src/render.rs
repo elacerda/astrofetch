@@ -6,6 +6,8 @@ mod profile;
 mod shade;
 mod starfield;
 mod stretch;
+// Phase 4: terminal-cell sampling topology (1×2 half-block, 2×2 quadrant).
+pub(crate) mod topology;
 
 pub use ascii::render_ascii;
 pub use color::ColorPalette;

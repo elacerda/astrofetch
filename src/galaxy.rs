@@ -1653,4 +1653,24 @@ mod tests {
             }
         }
     }
+
+    // ---- Phase 4: terminal-cell topology cross-check ----
+
+    #[test]
+    fn test_half_block_topology_cross_checks_sampling_geometry() {
+        // The production topology abstraction must agree with the fixed
+        // Spiral sampling geometry. This cross-check lives in the galaxy
+        // test module on purpose: `SamplingGeometry` stays private here,
+        // so the generator abstraction is not widened for testing.
+        use crate::render::topology::CellSamplingShape;
+
+        assert_eq!(
+            CellSamplingShape::HALF_BLOCK.columns(),
+            SamplingGeometry::LOGICAL_SAMPLES_X_PER_CELL
+        );
+        assert_eq!(
+            CellSamplingShape::HALF_BLOCK.rows(),
+            SamplingGeometry::LOGICAL_SAMPLES_Y_PER_CELL
+        );
+    }
 }

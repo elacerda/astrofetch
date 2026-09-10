@@ -135,6 +135,25 @@ terminal W×H
 - The supersampled field is reduced back to the logical `W × 2H` size by
   averaging 3×3 blocks.
 
+### Terminal-cell topology
+
+The mapping from terminal cells to logical density samples is an explicit
+topology abstraction (`CellSamplingShape` in `src/render/topology.rs`):
+
+- **Current production topology**: 1×2 — one logical sample horizontally
+  and two vertically per terminal cell (the half-block contract).
+- **Future quadrant topology**: 2×2 — four logical samples per terminal
+  cell. It is defined and tested, but not yet consumed by production
+  rendering.
+- Subcell ordering is row-major: top-left, top-right, bottom-left,
+  bottom-right (TL, TR, BL, BR), with offsets (0,0), (1,0), (0,1), (1,1).
+- A subcell `(sx, sy)` of terminal cell `(cx, cy)` maps to the logical
+  sample `(cx × columns + sx, cy × rows + sy)`.
+
+Phase 4 defines and tests this topology only; production rendering and
+density generation remain unchanged. Phase 5 will integrate the 2×2
+quadrant topology into the renderers.
+
 ## Terminal constraints
 
 A terminal cell is not a square pixel. AstroFetch compensates partly by generating galaxy density maps at twice the requested terminal height. The renderer then collapses two vertical density samples into one visible terminal row using Unicode block characters.

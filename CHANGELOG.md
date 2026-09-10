@@ -13,6 +13,7 @@ Changelog tracking starts with v0.5.0.
 
 ### Changed
 
+- Introduced the terminal-cell sampling topology abstraction (`CellSamplingShape` and `Quadrant` in `src/render/topology.rs`): the current 1×2 half-block shape, the future 2×2 quadrant shape, row-major TL/TR/BL/BR subcell ordering, and the terminal-cell -> logical-density index mapping. Internal renderer-preserving preparation: production rendering, density generation, and all visual outputs remain bit-for-bit unchanged; the 2×2 topology is defined and tested only.
 - Made the Spiral sampling geometry explicit (`SamplingGeometry` in `src/galaxy.rs`): terminal W×H -> logical W×2H (1×2 logical samples per terminal cell) -> 3× supersampling -> average reduction back to W×2H. Renderer-preserving: existing outputs remain bit-for-bit identical.
 
 ## [0.5.0] - 2026-09-09
