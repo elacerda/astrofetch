@@ -1,4 +1,4 @@
-//! Pure 2×2 quadrant renderer (Phase 5B.2).
+//! 2×2 quadrant renderer (Phases 5B.2-6B).
 //!
 //! Converts a prepared logical density canvas of `2W × 2H` samples into
 //! `W` terminal cells × `H` terminal rows of Unicode quadrant glyphs.
@@ -14,13 +14,20 @@
 //! abstraction (`CellSamplingShape::QUADRANT` / `Quadrant`), not from
 //! ad-hoc coordinate arithmetic.
 //!
-//! This module provides two renderers:
-//! - `render_quadrant` (Phase 5B.2): pure glyphs, no ANSI;
-//! - `render_quadrant_colored` (Phase 6A): the same geometry with a
-//!   foreground-only color channel.
+//! This module provides three renderers:
+//! - `render_quadrant` (Phase 5B.2): pure no-color primitive — glyphs
+//!   only, no ANSI, no stars;
+//! - `render_quadrant_colored` (Phase 6A): pure colored primitive — the
+//!   same geometry with a foreground-only color channel, no stars;
+//! - `render_quadrant_with_stars` (Phase 6B): the application-level
+//!   star-aware renderer used by the `--renderer quadrant` path.
 //!
-//! Neither renderer injects background stars, and both are deterministic
-//! from `canvas + threshold` alone (no hidden seed).
+//! The pure primitives intentionally remain star-free reference and
+//! compatibility functions. The star-aware renderer adds deterministic
+//! sparse background stars only to completely empty cells; stars are
+//! uncolored, and foreground galaxy intensity keeps the Phase 6A
+//! max-visible-subcell rule. All renderers are deterministic from their
+//! inputs (no hidden seed).
 //!
 //! Visibility uses the same per-subcell rule as the half-block renderer:
 //! a subcell is visible iff its value is finite, strictly positive, and
@@ -29,6 +36,7 @@
 use crate::render::ansi::AnsiForegroundLine;
 use crate::render::color::{galaxy_foreground_ansi, ColorPalette};
 use crate::render::topology::{CellSamplingShape, Quadrant};
+use crate::render::{star_field_seed, star_glyph_for_local_density};
 
 /// Quadrant glyph table indexed by the 4-bit visibility mask.
 ///
@@ -98,6 +106,11 @@ fn visibility_mask(tl: f64, tr: f64, bl: f64, br: f64, threshold: f64) -> u8 {
 ///
 /// The output is deterministic: the same canvas and threshold always
 /// produce identical lines, with no RNG, stars, or ANSI sequences.
+///
+/// Phase 6B note: the application-level Quadrant path now routes through
+/// `render_quadrant_with_stars`. This pure primitive is retained as the
+/// frozen Phase-5B reference (star-free) and is exercised by tests only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_quadrant(canvas: &[Vec<f64>], threshold: f64) -> Vec<String> {
     let shape = CellSamplingShape::QUADRANT;
     let terminal_width = canvas.first().map_or(0, Vec::len).div_ceil(shape.columns());
@@ -160,6 +173,11 @@ fn max_visible_density(values: [f64; 4], threshold: f64) -> Option<f64> {
 /// Edge behavior (empty canvas, missing subcells, terminal dimensions)
 /// matches `render_quadrant`. The output is deterministic: the same
 /// canvas, threshold, and palette always produce identical lines.
+///
+/// Phase 6B note: the application-level Quadrant path now routes through
+/// `render_quadrant_with_stars`. This pure primitive is retained as the
+/// frozen Phase-6A reference (star-free) and is exercised by tests only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_quadrant_colored(
     canvas: &[Vec<f64>],
     threshold: f64,
@@ -190,6 +208,99 @@ pub(crate) fn render_quadrant_colored(
                     line.push_styled(glyph, galaxy_foreground_ansi(palette, max_visible));
                 }
                 None => line.push_plain(glyph),
+            }
+        }
+        lines.push(line.finish());
+    }
+
+    lines
+}
+
+/// Renders a `2W × 2H` logical density canvas into `W × H` terminal cells of
+/// quadrant glyphs with deterministic sparse background stars (Phase 6B).
+///
+/// Geometry is identical to `render_quadrant` / `render_quadrant_colored`:
+/// each terminal cell's glyph is chosen exclusively from the 4-bit visibility
+/// mask via `QUADRANT_GLYPHS`. The only addition is a background-star overlay
+/// on visually-empty cells (mask == 0), using the exact same deterministic
+/// star decision as the existing galaxy renderers
+/// (`star_glyph_for_local_density`). No separate Quadrant-specific probability
+/// or glyph distribution is introduced.
+///
+/// For each terminal cell:
+/// - mask != 0: render exactly `QUADRANT_GLYPHS[mask]`. When `colors_enabled`,
+///   the glyph is styled with `galaxy_foreground_ansi(palette, max_visible)`
+///   where `max_visible` is the maximum density among VISIBLE subcells only
+///   (the exact Phase-6A semantic). When colors are disabled, the glyph is
+///   emitted plainly. A star is NEVER rendered for a non-empty cell.
+/// - mask == 0: compute one local density as the direct four-subcell
+///   generalization of the two-half star suppression calculation,
+///   `tl.max(tr).max(bl).max(br)`, and query
+///   `star_glyph_for_local_density(cell_x, cell_y, local_density, threshold,
+///   star_seed)`. `Some(star)` is emitted plainly (uncolored); `None` emits a
+///   plain space.
+///
+/// Stars remain uncolored even when galaxy color is enabled, and no ANSI
+/// background-color sequence is ever emitted. The star seed is computed once
+/// per render via `star_field_seed(canvas)`.
+///
+/// The output is deterministic: the same canvas, threshold, `colors_enabled`,
+/// and palette always produce identical lines (no RNG).
+pub(crate) fn render_quadrant_with_stars(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+) -> Vec<String> {
+    let shape = CellSamplingShape::QUADRANT;
+    let terminal_width = canvas.first().map_or(0, Vec::len).div_ceil(shape.columns());
+    let terminal_height = canvas.len().div_ceil(shape.rows());
+    let star_seed = star_field_seed(canvas);
+    let mut lines = Vec::with_capacity(terminal_height);
+
+    for cell_y in 0..terminal_height {
+        let mut line = AnsiForegroundLine::with_capacity(terminal_width * 8);
+        for cell_x in 0..terminal_width {
+            let mut values = [0.0f64; 4];
+            for (bit, quadrant) in Quadrant::ALL.iter().enumerate() {
+                let (sub_x, sub_y) = quadrant.offset();
+                let (logical_x, logical_y) = shape.logical_index(cell_x, cell_y, sub_x, sub_y);
+                values[bit] = canvas
+                    .get(logical_y)
+                    .and_then(|row| row.get(logical_x))
+                    .copied()
+                    .unwrap_or(0.0);
+            }
+            let mask = visibility_mask(values[0], values[1], values[2], values[3], threshold);
+            if mask != 0 {
+                let glyph = QUADRANT_GLYPHS[mask as usize];
+                if colors_enabled {
+                    // Phase-6A semantic: color comes from the max of the
+                    // VISIBLE subcells only. mask != 0 guarantees at least one
+                    // visible subcell, so this is always Some in practice.
+                    match max_visible_density(values, threshold) {
+                        Some(max_visible) => {
+                            line.push_styled(glyph, galaxy_foreground_ansi(palette, max_visible));
+                        }
+                        None => line.push_plain(glyph),
+                    }
+                } else {
+                    line.push_plain(glyph);
+                }
+            } else {
+                // Visually empty cell: the four-subcell generalization of the
+                // two-half star suppression local density (f64::max semantics).
+                let local_density = values[0].max(values[1]).max(values[2]).max(values[3]);
+                match star_glyph_for_local_density(
+                    cell_x,
+                    cell_y,
+                    local_density,
+                    threshold,
+                    star_seed,
+                ) {
+                    Some(star) => line.push_plain(star),
+                    None => line.push_plain(' '),
+                }
             }
         }
         lines.push(line.finish());
@@ -638,5 +749,328 @@ mod tests {
         // Stripping the ANSI SGR sequences must leave exactly the pure output.
         let stripped: Vec<String> = colored.iter().map(|line| strip_ansi_sgr(line)).collect();
         assert_eq!(stripped, pure);
+    }
+
+    // ===== Phase 6B: star-aware renderer tests =====
+
+    /// Test-local helper: parses a rendered line and returns, for each visible
+    /// character, whether it was emitted in a styled (ANSI foreground active)
+    /// or plain context. This lets the tests verify star color behavior (stars
+    /// must always be plain) and style transitions without depending on the
+    /// exact color values.
+    fn char_styles(line: &str) -> Vec<(char, bool)> {
+        let chars: Vec<char> = line.chars().collect();
+        let mut result = Vec::new();
+        let mut styled = false;
+        let mut i = 0;
+        while i < chars.len() {
+            let ch = chars[i];
+            if ch == '\x1b' && i + 1 < chars.len() && chars[i + 1] == '[' {
+                i += 2; // consume ESC [
+                let mut seq = String::new();
+                while i < chars.len() {
+                    seq.push(chars[i]);
+                    i += 1;
+                    if seq.ends_with('m') {
+                        break;
+                    }
+                }
+                styled = seq != "0m";
+            } else {
+                result.push((ch, styled));
+                i += 1;
+            }
+        }
+        result
+    }
+
+    /// Repeated star-aware renders are byte-identical, in both color and
+    /// no-color modes (no RNG).
+    #[test]
+    fn test_with_stars_deterministic_output() {
+        let canvas = vec![
+            vec![0.0, 0.5, 0.9, 0.1, 0.0, 0.0, 0.0, 0.0],
+            vec![0.5, 0.0, 0.1, 0.9, 0.0, 0.0, 0.0, 0.0],
+            vec![0.9, 0.1, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0],
+            vec![0.1, 0.9, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ];
+        let no1 = render_quadrant_with_stars(&canvas, 0.2, false, ColorPalette::Nebula);
+        let no2 = render_quadrant_with_stars(&canvas, 0.2, false, ColorPalette::Nebula);
+        assert_eq!(no1, no2);
+        assert_eq!(no1.join("\n").as_bytes(), no2.join("\n").as_bytes());
+
+        let col1 = render_quadrant_with_stars(&canvas, 0.2, true, ColorPalette::Nebula);
+        let col2 = render_quadrant_with_stars(&canvas, 0.2, true, ColorPalette::Nebula);
+        assert_eq!(col1, col2);
+        assert_eq!(col1.join("\n").as_bytes(), col2.join("\n").as_bytes());
+    }
+
+    /// A non-empty cell (mask != 0) always renders its exact quadrant glyph and
+    /// is never replaced by a star; an empty cell (mask == 0) renders a star or
+    /// a space, never a quadrant glyph.
+    #[test]
+    fn test_with_stars_never_replaces_nonempty_glyph() {
+        let visible = 1.0;
+        let hidden = 0.0;
+        let threshold = 0.1;
+        // One 2x2 block per mask, row-major mask order 0..16 (4x4 cells).
+        let mut canvas: Vec<Vec<f64>> = Vec::new();
+        for mask_row in 0..4 {
+            for y in 0..2 {
+                let mut row = Vec::new();
+                for mask_col in 0..4 {
+                    let mask = (mask_row * 4 + mask_col) as u8;
+                    for x in 0..2 {
+                        let bit = if y == 0 { x } else { x + 2 };
+                        let value = if mask & (1 << bit) != 0 {
+                            visible
+                        } else {
+                            hidden
+                        };
+                        row.push(value);
+                    }
+                }
+                canvas.push(row);
+            }
+        }
+        let result = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+        assert_eq!(result.len(), 4);
+        for (row, line) in result.iter().enumerate() {
+            assert_eq!(line.chars().count(), 4);
+            for col in 0..4 {
+                let mask = (row * 4 + col) as u8;
+                let ch = line.chars().nth(col).unwrap();
+                if mask != 0 {
+                    assert_eq!(
+                        ch, QUADRANT_GLYPHS[mask as usize],
+                        "non-empty cell ({col},{row}) mask {mask:04b} must render its glyph"
+                    );
+                    assert!(
+                        !matches!(ch, '.' | '*' | '+'),
+                        "non-empty cell ({col},{row}) must not render a star"
+                    );
+                } else {
+                    assert!(
+                        matches!(ch, ' ' | '.' | '*' | '+'),
+                        "empty cell ({col},{row}) must render a star or space, got {ch:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Star-aware empty cells agree exactly with `star_glyph_for_local_density`
+    /// using the same x, y, local_density (0.0 for an empty cell), threshold,
+    /// and star_seed.
+    #[test]
+    fn test_with_stars_empty_cells_match_helper() {
+        let (w, h) = (12usize, 8usize);
+        let canvas: Vec<Vec<f64>> = (0..2 * h).map(|_| vec![0.0f64; 2 * w]).collect();
+        let threshold = 0.5;
+        let seed = star_field_seed(&canvas);
+        let result = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+        assert_eq!(result.len(), h);
+        for (cy, line) in result.iter().enumerate() {
+            for (cx, ch) in line.chars().enumerate() {
+                let expected = star_glyph_for_local_density(cx, cy, 0.0, threshold, seed);
+                match expected {
+                    Some(star) => assert_eq!(ch, star, "cell ({cx},{cy})"),
+                    None => assert_eq!(ch, ' ', "cell ({cx},{cy})"),
+                }
+            }
+        }
+    }
+
+    /// Star presence is deterministic: every star the renderer emits is at a
+    /// coordinate the helper also selects, and at least one star exists.
+    #[test]
+    fn test_with_stars_star_presence_deterministic() {
+        let (w, h) = (40usize, 20usize);
+        let canvas: Vec<Vec<f64>> = (0..2 * h).map(|_| vec![0.0f64; 2 * w]).collect();
+        let threshold = 0.5;
+        let seed = star_field_seed(&canvas);
+        let result = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+        let mut star_count = 0;
+        for (cy, line) in result.iter().enumerate() {
+            for (cx, ch) in line.chars().enumerate() {
+                if matches!(ch, '.' | '*' | '+') {
+                    star_count += 1;
+                    assert_eq!(
+                        star_glyph_for_local_density(cx, cy, 0.0, threshold, seed),
+                        Some(ch),
+                        "star at ({cx},{cy}) not confirmed by helper"
+                    );
+                }
+            }
+        }
+        assert!(star_count > 0, "expected at least one deterministic star");
+    }
+
+    /// A visually-empty cell whose local density exceeds threshold * 0.35 is
+    /// suppressed to a space, even at a coordinate that would otherwise emit a
+    /// star. The coordinate is found deterministically by scanning.
+    #[test]
+    fn test_with_stars_faint_density_suppression() {
+        let threshold = 0.5;
+        let faint = 0.3; // invisible (< threshold) but > threshold * 0.35
+        let (w, h) = (20usize, 14usize);
+
+        for cy in 0..h {
+            for cx in 0..w {
+                let mut canvas = vec![vec![0.0f64; 2 * w]; 2 * h];
+                canvas[2 * cy][2 * cx] = faint;
+                canvas[2 * cy][2 * cx + 1] = faint;
+                canvas[2 * cy + 1][2 * cx] = faint;
+                canvas[2 * cy + 1][2 * cx + 1] = faint;
+                let seed = star_field_seed(&canvas);
+                // Would this coordinate emit a star if it were empty?
+                if star_glyph_for_local_density(cx, cy, 0.0, threshold, seed).is_some() {
+                    let result =
+                        render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+                    let ch = result[cy].chars().nth(cx).unwrap();
+                    assert_eq!(
+                        ch, ' ',
+                        "faint-density cell ({cx},{cy}) must be suppressed to a space"
+                    );
+                    assert_eq!(
+                        star_glyph_for_local_density(cx, cy, faint, threshold, seed),
+                        None,
+                        "faint local density must suppress the star"
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("expected to find a suppressible star coordinate");
+    }
+
+    /// Color behavior: stars remain plain/uncolored, styled galaxy cells are
+    /// styled, both transition directions are correct, and no background ANSI
+    /// is emitted.
+    #[test]
+    fn test_with_stars_color_behavior() {
+        let (w, h) = (40usize, 20usize);
+        let mut canvas = vec![vec![0.0f64; 2 * w]; 2 * h];
+        // Checkerboard of full galaxy cells (density 0.5) and empty cells, so
+        // stars (in empty cells) are always adjacent to styled galaxy cells.
+        for cy in 0..h {
+            for cx in 0..w {
+                if (cx + cy) % 2 == 0 {
+                    canvas[2 * cy][2 * cx] = 0.5;
+                    canvas[2 * cy][2 * cx + 1] = 0.5;
+                    canvas[2 * cy + 1][2 * cx] = 0.5;
+                    canvas[2 * cy + 1][2 * cx + 1] = 0.5;
+                }
+            }
+        }
+        let threshold = 0.1;
+        let result = render_quadrant_with_stars(&canvas, threshold, true, ColorPalette::Nebula);
+        assert_eq!(result.len(), h);
+
+        // No background ANSI.
+        for line in &result {
+            assert!(!line.contains("48;5;"), "background escape found: {line:?}");
+        }
+
+        let mut star_count = 0;
+        let mut galaxy_count = 0;
+        for (cy, line) in result.iter().enumerate() {
+            let styles = char_styles(line);
+            assert_eq!(styles.len(), w, "line {cy} char count mismatch");
+            for (cx, (ch, is_styled)) in styles.iter().enumerate() {
+                if matches!(ch, '.' | '*' | '+') {
+                    star_count += 1;
+                    assert!(!is_styled, "star at ({cx},{cy}) must be plain/uncolored");
+                } else if *ch != ' ' {
+                    galaxy_count += 1;
+                    assert!(*is_styled, "galaxy cell at ({cx},{cy}) must be styled");
+                }
+            }
+        }
+        assert!(star_count > 0, "expected at least one star");
+        assert!(galaxy_count > 0, "expected at least one styled galaxy cell");
+
+        // Verify both transition directions occur and are correct.
+        let mut galaxy_to_star = false;
+        let mut star_to_galaxy = false;
+        for line in &result {
+            let styles = char_styles(line);
+            for i in 0..styles.len().saturating_sub(1) {
+                let (ch1, s1) = (styles[i].0, styles[i].1);
+                let (ch2, s2) = (styles[i + 1].0, styles[i + 1].1);
+                let star1 = matches!(ch1, '.' | '*' | '+');
+                let star2 = matches!(ch2, '.' | '*' | '+');
+                let gal1 = ch1 != ' ' && !star1;
+                let gal2 = ch2 != ' ' && !star2;
+                if gal1 && s1 && star2 && !s2 {
+                    galaxy_to_star = true;
+                }
+                if star1 && !s1 && gal2 && s2 {
+                    star_to_galaxy = true;
+                }
+            }
+        }
+        assert!(
+            galaxy_to_star,
+            "expected a styled-galaxy -> star transition"
+        );
+        assert!(
+            star_to_galaxy,
+            "expected a star -> styled-galaxy transition"
+        );
+    }
+
+    /// Geometry/color identity: stripping the ANSI color channel from the
+    /// colored star-aware output must reproduce the no-color star-aware output
+    /// exactly (color adds intensity only; it never changes the glyph or the
+    /// star overlay).
+    #[test]
+    fn test_with_stars_geometry_identity() {
+        let (w, h) = (40usize, 20usize);
+        let mut canvas = vec![vec![0.0f64; 2 * w]; 2 * h];
+        for cy in 0..h {
+            for cx in 0..w {
+                if (cx * 3 + cy * 5) % 4 == 0 {
+                    canvas[2 * cy][2 * cx] = 0.9;
+                    canvas[2 * cy][2 * cx + 1] = 0.7;
+                    canvas[2 * cy + 1][2 * cx] = 0.5;
+                    canvas[2 * cy + 1][2 * cx + 1] = 0.3;
+                }
+            }
+        }
+        let threshold = 0.1;
+        let no_color = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+        let colored = render_quadrant_with_stars(&canvas, threshold, true, ColorPalette::Nebula);
+        assert!(
+            colored.join("\n").contains('\x1b'),
+            "colored output must carry ANSI"
+        );
+        let stripped: Vec<String> = colored.iter().map(|line| strip_ansi_sgr(line)).collect();
+        assert_eq!(stripped, no_color);
+    }
+
+    /// Pure primitive isolation: the frozen Phase-5B/6A reference renderers
+    /// remain star-free. An empty canvas produces spaces only, even where the
+    /// star-aware renderer would emit stars.
+    #[test]
+    fn test_pure_primitives_remain_star_free() {
+        let (w, h) = (40usize, 20usize);
+        let canvas: Vec<Vec<f64>> = (0..2 * h).map(|_| vec![0.0f64; 2 * w]).collect();
+        let pure = render_quadrant(&canvas, 0.5);
+        assert_eq!(pure.len(), h);
+        for line in &pure {
+            assert_eq!(line.chars().count(), w);
+            assert!(
+                line.chars().all(|c| c == ' '),
+                "pure renderer must be star-free: {line:?}"
+            );
+        }
+        let pure_colored = render_quadrant_colored(&canvas, 0.5, ColorPalette::Nebula);
+        for line in &pure_colored {
+            assert!(
+                line.chars().all(|c| c == ' '),
+                "pure colored renderer must be star-free: {line:?}"
+            );
+        }
     }
 }

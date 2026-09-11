@@ -14,7 +14,7 @@ pub(crate) mod topology;
 pub use ascii::render_ascii;
 pub use color::ColorPalette;
 pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
-pub(crate) use quadrant::{render_quadrant, render_quadrant_colored};
+pub(crate) use quadrant::render_quadrant_with_stars;
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
@@ -211,8 +211,51 @@ pub(super) fn star_glyph_for_cell(
     threshold: f64,
     seed: u64,
 ) -> Option<char> {
+    // Historical two-half local-density calculation: the maximum of the two
+    // vertical samples this renderer consumes for the terminal cell.
     let local_density = top.max(bottom);
+    star_glyph_for_local_density(x, y, local_density, threshold, seed)
+}
 
+/// Returns the deterministic background-star glyph for a terminal cell given
+/// an already-computed local density.
+///
+/// This is the single shared star decision used by every galaxy renderer
+/// (HalfBlock, Shade, Ascii, and the star-aware Quadrant renderer). It is
+/// topology-agnostic: the caller computes `local_density` as the maximum of
+/// the subcell densities the renderer samples for that terminal cell (two
+/// vertical halves for the 1×2 renderers, four subcells for the 2×2
+/// quadrant renderer) and passes it here.
+///
+/// The decision is fully deterministic (no RNG):
+/// - If `local_density > threshold * 0.35`, no star is emitted. This is the
+///   local-density suppression gate: a cell close enough to visible galaxy
+///   structure would lose a faint star, so it is left empty.
+/// - Otherwise, a hash of `(x, y, seed)` selects the glyph tier:
+///     - `r < 0.0004` => `+` (bright, very rare)
+///     - `r < 0.0022` => `*` (medium, rare)
+///     - `r < 0.0132` => `.` (faint, common)
+///     - otherwise    => no star
+///
+/// The probability constants, glyph thresholds, and the `hash_cell` /
+/// `hash_to_unit` primitives are unchanged from the historical behavior.
+///
+/// # Arguments
+/// - `x`, `y`: terminal-cell coordinates.
+/// - `local_density`: maximum sampled density for the cell (raw value, same
+///   units as the canvas densities).
+/// - `threshold`: the galaxy visibility threshold (same units as the canvas).
+/// - `seed`: the star-field seed for the canvas (`star_field_seed`).
+///
+/// # Returns
+/// `Some(glyph)` for a star (`+`, `*`, or `.`), or `None` for no star.
+pub(super) fn star_glyph_for_local_density(
+    x: usize,
+    y: usize,
+    local_density: f64,
+    threshold: f64,
+    seed: u64,
+) -> Option<char> {
     // Do not draw background stars over visible galaxy structure.
     // A star should never replace either visible galaxy half.
     if local_density > threshold * 0.35 {

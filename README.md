@@ -124,9 +124,12 @@ Renderer behavior:
   channel: glyph geometry remains determined by the 2×2 visibility mask,
   one foreground intensity per cell is derived from the maximum visible
   subcell density, and the terminal background color is intentionally not
-  used. Effective no-color mode preserves the pure glyph output. It is not
-  visually calibrated yet, and `auto` never selects it. Other models return
-  a clear error instead of falling back.
+  used. Deterministic sparse background stars are rendered in completely
+  empty cells only, using the existing hash-based star convention; stars
+  are uncolored, and effective no-color rendering remains ANSI-free. The
+  0.26 occupancy has not yet been separately recalibrated, and `auto`
+  never selects it. Other models return a clear error instead of falling
+  back.
 
 Quadrant renderer behavior:
 

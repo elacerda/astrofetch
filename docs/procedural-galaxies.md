@@ -506,21 +506,32 @@ Uses ASCII characters ordered by intensity:
 The experimental `--renderer quadrant` option renders a Spiral galaxy with
 the 2×2 quadrant topology: each terminal cell owns four logical subcells
 (TL, TR, BL, BR) and one of 16 Unicode quadrant/half/full-block glyphs is
-selected by the 4-bit visibility mask of those subcells.
+selected by the 4-bit visibility mask of those subcells. The
+application-level path also overlays deterministic sparse background stars
+on completely empty cells (mask == 0).
 
-Current limitations (by design, for this phase):
+Current scope (by design, for this phase):
 
 - **Spiral only**: explicit `--renderer quadrant` with any other model is a
   clear CLI error; there is no silent fallback.
 - **Foreground-only color**: color is supported, but only as a
   foreground-only ANSI channel. Glyph geometry remains determined by the
   2×2 visibility mask; one foreground intensity per cell is derived from
-  the maximum visible subcell density, and the terminal background color
-  is intentionally not used. Effective no-color mode preserves the pure
-  Phase-5B glyph output.
-- **Not visually calibrated**: the glyph mapping is deterministic and
-  tested, but the output has not been visually accepted yet.
-- **No background stars** in the Quadrant output.
+  the maximum visible subcell density (the Phase-6A max-visible rule), and
+  the terminal background color is intentionally not used. Effective
+  no-color rendering remains ANSI-free (glyphs plus uncolored stars).
+- **Background stars**: deterministic sparse background stars are rendered
+  only in completely empty cells, using the existing deterministic
+  hash-based galaxy-star convention (no new RNG stream); stars remain
+  uncolored even when galaxy color is enabled.
+- **Star-free reference primitives**: the pure `render_quadrant` and
+  `render_quadrant_colored` primitives intentionally remain star-free
+  reference and compatibility functions (frozen Phase-5B/6A behavior,
+  exercised by tests only).
+- **Visually accepted, not yet anchored**: the output has been visually
+  accepted, but permanent Quadrant visual anchors have not yet been
+  established and the 0.26 occupancy has not yet been separately
+  recalibrated.
 
 ### Galaxy renderer sampling
 
@@ -529,7 +540,7 @@ All three galaxy renderers consume the same prepared density and reuse the same 
 - **HalfBlock** evaluates the top and bottom samples independently and renders `▀`, `▄`, `█`, or a space.
 - **Shade** collapses the pair with `max(top, bottom)` and maps the threshold-relative intensity to `░`, `▒`, `▓`, or `█`.
 - **ASCII** also collapses the pair with `max(top, bottom)` and maps the threshold-relative intensity to its ASCII palette.
-- **Background stars** are considered only when no visible galaxy glyph occupies the terminal cell and the shared local-density guard permits them.
+- **Background stars** are considered only when no visible galaxy glyph occupies the terminal cell and the shared local-density guard permits them. The experimental Quadrant renderer reuses the same policy for its completely empty cells.
 
 ## ANSI color
 

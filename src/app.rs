@@ -5,8 +5,8 @@ use crate::error::AppError;
 use crate::layout::compose_layout;
 use crate::render::topology::CellSamplingShape;
 use crate::render::{
-    prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks, render_quadrant,
-    render_quadrant_colored, render_shades, render_starfield, sampling_shape_for, ColorPalette,
+    prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks,
+    render_quadrant_with_stars, render_shades, render_starfield, sampling_shape_for, ColorPalette,
     EffectiveRenderer, PreparedDensity, RenderProfile,
 };
 use crate::system::{
@@ -420,11 +420,12 @@ impl App {
             }
             (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Quadrant) => {
                 let canvas = density.into_rows();
-                if colors_enabled && terminal.colors_enabled() {
-                    Ok(render_quadrant_colored(&canvas, threshold, palette))
-                } else {
-                    Ok(render_quadrant(&canvas, threshold))
-                }
+                Ok(render_quadrant_with_stars(
+                    &canvas,
+                    threshold,
+                    colors_enabled && terminal.colors_enabled(),
+                    palette,
+                ))
             }
             // Internal mismatch - should never happen if resolve_effective_renderer is correct
             (PreparedDensity::Starfield { .. }, _) => Err(AppError::Render(
@@ -1314,7 +1315,10 @@ mod tests {
         let canvas = density.into_rows();
         assert_eq!(canvas.len(), 40);
         assert_eq!(canvas[0].len(), 80);
-        assert_eq!(lines, render_quadrant(&canvas, threshold));
+        assert_eq!(
+            lines,
+            render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula)
+        );
     }
 
     #[test]
@@ -1372,15 +1376,15 @@ mod tests {
         let canvas = density.into_rows();
         assert_eq!(
             lines,
-            render_quadrant_colored(&canvas, threshold, ColorPalette::Nebula)
+            render_quadrant_with_stars(&canvas, threshold, true, ColorPalette::Nebula)
         );
     }
 
     #[test]
-    fn test_render_art_quadrant_terminal_colors_disabled_uses_pure_renderer() {
+    fn test_render_art_quadrant_terminal_colors_disabled_uses_star_aware_renderer() {
         // App-level color state is enabled (no --no-color), but the terminal
-        // reports colors disabled: the effective color state is false, so
-        // the pure no-color renderer must be used.
+        // reports colors disabled: the effective color state is false, so the
+        // star-aware no-color renderer must be used (stars are uncolored).
         let app = build_test_app_pipeline(
             ArtModel::Spiral,
             RendererChoice::Quadrant,
@@ -1411,7 +1415,10 @@ mod tests {
             panic!("Spiral + Quadrant must use galaxy density preparation");
         };
         let canvas = density.into_rows();
-        assert_eq!(lines, render_quadrant(&canvas, threshold));
+        assert_eq!(
+            lines,
+            render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula)
+        );
         assert!(!lines.join("\n").contains('\x1b'));
     }
 
@@ -1429,6 +1436,60 @@ mod tests {
             .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
             .unwrap();
         assert!(!lines.join("\n").contains('\x1b'));
+    }
+
+    /// Effective no-color application output: contains no ANSI and still
+    /// includes the deterministic star overlay (matches the star-aware
+    /// no-color renderer, which emits stars on visually-empty cells).
+    #[test]
+    fn test_render_art_quadrant_no_color_star_overlay() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let lines = app
+            .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+            .unwrap();
+
+        // No ANSI in the effective no-color output.
+        assert!(
+            !lines.join("\n").contains('\x1b'),
+            "no-color output must be ANSI-free"
+        );
+
+        // Structural check: the pipeline equals the star-aware no-color
+        // renderer applied to the QUADRANT-prepared density.
+        let resolved = EngineModel::Spiral.resolve_scene(Some(4));
+        let density = EngineModel::Spiral.generate_density(
+            &resolved,
+            40,
+            20,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let profile =
+            RenderProfile::for_model_and_renderer(EngineModel::Spiral, EffectiveRenderer::Quadrant);
+        let prepared = prepare_density_with_shape(
+            density,
+            profile,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let PreparedDensity::Galaxy { density, threshold } = prepared else {
+            panic!("Spiral + Quadrant must use galaxy density preparation");
+        };
+        let canvas = density.into_rows();
+        let expected = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+        assert_eq!(lines, expected);
+
+        // The deterministic star overlay must actually be present for this seed.
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains('.') || joined.contains('*') || joined.contains('+'),
+            "expected the deterministic star overlay in the no-color output"
+        );
     }
 
     #[test]
