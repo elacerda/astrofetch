@@ -92,7 +92,7 @@ model-specific default:
   - `ascii` → ASCII
 
 - **Experimental Quadrant renderer** (`--renderer quadrant`):
-  - `--model spiral` → Quadrant (requires `--no-color`)
+  - `--model spiral` → Quadrant (color supported: foreground-only ANSI)
   - `--model elliptical` / `--model cluster` / `--model starfield` → clear
     CLI error (Quadrant currently supports Spiral only)
   - `--model random` → clear CLI error, rejected **before** random model
@@ -146,8 +146,8 @@ terminal W×H
 - The `QUADRANT` shape (2×2) gives the quadrant dimensions: logical
   `2W × 2H` and supersampled `6W × 6H` (approximately double the sampling
   evaluations of `HALF_BLOCK`). It is consumed by the experimental
-  `--renderer quadrant` path for the Spiral model (no-color only); every
-  other production path uses `HALF_BLOCK`.
+  `--renderer quadrant` path for the Spiral model (color supported:
+  foreground-only ANSI); every other production path uses `HALF_BLOCK`.
 - The density is evaluated on a `3×` supersampled grid (3 high-resolution
   samples per logical cell on each axis).
 - The supersampled field is reduced back to the logical size by averaging
@@ -162,7 +162,7 @@ topology abstraction (`CellSamplingShape` in `src/render/topology.rs`):
   and two vertically per terminal cell (the half-block contract).
 - **Quadrant topology**: 2×2 — four logical samples per terminal cell.
   Consumed by the experimental `--renderer quadrant` path for the Spiral
-  model (no-color only).
+  model (color supported: foreground-only ANSI).
 - Subcell ordering is row-major: top-left, top-right, bottom-left,
   bottom-right (TL, TR, BL, BR), with offsets (0,0), (1,0), (0,1), (1,1).
 - A subcell `(sx, sy)` of terminal cell `(cx, cy)` maps to the logical
@@ -172,7 +172,7 @@ Phase 5A made Spiral generation shape-aware: the generator derives its
 logical dimensions from the shape. The default production path uses
 `HALF_BLOCK`, so production rendering and all existing outputs remain
 bit-for-bit unchanged. `QUADRANT` is consumed only by the experimental
-`--renderer quadrant` path for the Spiral model (no-color only).
+`--renderer quadrant` path for the Spiral model (color supported: foreground-only ANSI).
 
 ## Terminal constraints
 
@@ -512,8 +512,12 @@ Current limitations (by design, for this phase):
 
 - **Spiral only**: explicit `--renderer quadrant` with any other model is a
   clear CLI error; there is no silent fallback.
-- **No-color only**: the renderer has no ANSI semantics yet, so color
-  output must be disabled (`--no-color`).
+- **Foreground-only color**: color is supported, but only as a
+  foreground-only ANSI channel. Glyph geometry remains determined by the
+  2×2 visibility mask; one foreground intensity per cell is derived from
+  the maximum visible subcell density, and the terminal background color
+  is intentionally not used. Effective no-color mode preserves the pure
+  Phase-5B glyph output.
 - **Not visually calibrated**: the glyph mapping is deterministic and
   tested, but the output has not been visually accepted yet.
 - **No background stars** in the Quadrant output.

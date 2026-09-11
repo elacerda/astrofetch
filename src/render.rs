@@ -3,7 +3,7 @@ mod ascii;
 mod color;
 mod hash;
 mod profile;
-// Phase 5B.2/5B.3: pure 2×2 quadrant renderer, wired into App/CLI (Spiral only, no-color only).
+// Phase 5B.2/5B.3: 2×2 quadrant renderer, wired into App/CLI (Spiral only; Phase 6A adds foreground color).
 pub(crate) mod quadrant;
 mod shade;
 mod starfield;
@@ -14,7 +14,7 @@ pub(crate) mod topology;
 pub use ascii::render_ascii;
 pub use color::ColorPalette;
 pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
-pub(crate) use quadrant::render_quadrant;
+pub(crate) use quadrant::{render_quadrant, render_quadrant_colored};
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
@@ -52,7 +52,7 @@ pub enum EffectiveRenderer {
     Shade,
     /// ASCII renderer (ASCII characters .:-=+*#%@).
     Ascii,
-    /// Experimental 2×2 quadrant renderer (Spiral only, no-color only).
+    /// Experimental 2×2 quadrant renderer (Spiral only).
     Quadrant,
 }
 

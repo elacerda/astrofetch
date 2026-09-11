@@ -6,8 +6,8 @@ use crate::layout::compose_layout;
 use crate::render::topology::CellSamplingShape;
 use crate::render::{
     prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks, render_quadrant,
-    render_shades, render_starfield, sampling_shape_for, ColorPalette, EffectiveRenderer,
-    PreparedDensity, RenderProfile,
+    render_quadrant_colored, render_shades, render_starfield, sampling_shape_for, ColorPalette,
+    EffectiveRenderer, PreparedDensity, RenderProfile,
 };
 use crate::system::{
     get_disk_detail_fields, get_display_field_order, CollectionProfile, SystemSnapshot,
@@ -245,11 +245,12 @@ impl App {
     ///    shape), concretizing the seed exactly once. Every other renderer
     ///    keeps the legacy `generate_scene` path bit-for-bit unchanged.
     /// 3. `sampling_shape_for` selects the terminal-cell sampling shape.
-    /// 4. Quadrant is no-color only: reject while effective color output is
-    ///    enabled (the application's effective color state, not the raw flag).
-    /// 5. Prepare the density with the shape-matching occupancy semantics
+    /// 4. Prepare the density with the shape-matching occupancy semantics
     ///    (HALF_BLOCK keeps the legacy preparation call).
-    /// 6. `render_prepared_density` dispatches to the effective renderer.
+    /// 5. `render_prepared_density` dispatches to the effective renderer;
+    ///    Quadrant uses the foreground-color renderer while effective color
+    ///    output is enabled (the application's effective color state, not
+    ///    the raw flag), and the pure renderer otherwise.
     fn render_art(
         &self,
         terminal: &Terminal,
@@ -287,12 +288,6 @@ impl App {
                 CellSamplingShape::HALF_BLOCK,
             )
         };
-
-        if effective_renderer == EffectiveRenderer::Quadrant && colors_enabled {
-            return Err(AppError::Cli(
-                "the quadrant renderer currently requires --no-color".to_string(),
-            ));
-        }
 
         let profile = RenderProfile::for_model_and_renderer(resolved_model, effective_renderer);
         // HALF_BLOCK keeps the legacy preparation call bit-for-bit; only
@@ -424,10 +419,12 @@ impl App {
                 ))
             }
             (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Quadrant) => {
-                // Experimental no-color-only renderer; the color gate in
-                // `render_art` rejects Quadrant while color output is on.
                 let canvas = density.into_rows();
-                Ok(render_quadrant(&canvas, threshold))
+                if colors_enabled && terminal.colors_enabled() {
+                    Ok(render_quadrant_colored(&canvas, threshold, palette))
+                } else {
+                    Ok(render_quadrant(&canvas, threshold))
+                }
             }
             // Internal mismatch - should never happen if resolve_effective_renderer is correct
             (PreparedDensity::Starfield { .. }, _) => Err(AppError::Render(
@@ -1321,7 +1318,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_art_quadrant_requires_no_color() {
+    fn test_render_art_quadrant_with_colors_succeeds() {
         let app = build_test_app_pipeline(
             ArtModel::Spiral,
             RendererChoice::Quadrant,
@@ -1330,16 +1327,92 @@ mod tests {
             true,
         );
         let terminal = Terminal::with_colors(true, true);
-        let result = app.render_art(&terminal, true, EngineModel::Spiral, 40, 20);
-        match result {
-            Err(AppError::Cli(msg)) => {
-                assert!(
-                    msg.contains("--no-color"),
-                    "error should mention --no-color: {msg}"
-                );
-            }
-            other => panic!("Quadrant with colors enabled must be a Cli error, got {other:?}"),
-        }
+        let lines = app
+            .render_art(&terminal, true, EngineModel::Spiral, 40, 20)
+            .unwrap_or_else(|err| panic!("Quadrant with colors enabled should render: {err}"));
+        assert_eq!(lines.len(), 20);
+        // The colored path must actually emit foreground ANSI sequences.
+        assert!(lines.join("\n").contains('\x1b'));
+    }
+
+    #[test]
+    fn test_render_art_spiral_quadrant_colored_pipeline_matches_direct_renderer() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            false,
+            true,
+        );
+        let terminal = Terminal::with_colors(true, true);
+        let lines = app
+            .render_art(&terminal, true, EngineModel::Spiral, 40, 20)
+            .unwrap();
+
+        // Structural check: the colored pipeline must equal the colored
+        // renderer applied to the 2W x 2H density prepared with QUADRANT
+        // occupancy.
+        let resolved = EngineModel::Spiral.resolve_scene(Some(4));
+        let density = EngineModel::Spiral.generate_density(
+            &resolved,
+            40,
+            20,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let profile =
+            RenderProfile::for_model_and_renderer(EngineModel::Spiral, EffectiveRenderer::Quadrant);
+        let prepared = prepare_density_with_shape(
+            density,
+            profile,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let PreparedDensity::Galaxy { density, threshold } = prepared else {
+            panic!("Spiral + Quadrant must use galaxy density preparation");
+        };
+        let canvas = density.into_rows();
+        assert_eq!(
+            lines,
+            render_quadrant_colored(&canvas, threshold, ColorPalette::Nebula)
+        );
+    }
+
+    #[test]
+    fn test_render_art_quadrant_terminal_colors_disabled_uses_pure_renderer() {
+        // App-level color state is enabled (no --no-color), but the terminal
+        // reports colors disabled: the effective color state is false, so
+        // the pure no-color renderer must be used.
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            false,
+            true,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let lines = app
+            .render_art(&terminal, true, EngineModel::Spiral, 40, 20)
+            .unwrap();
+
+        let resolved = EngineModel::Spiral.resolve_scene(Some(4));
+        let density = EngineModel::Spiral.generate_density(
+            &resolved,
+            40,
+            20,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let profile =
+            RenderProfile::for_model_and_renderer(EngineModel::Spiral, EffectiveRenderer::Quadrant);
+        let prepared = prepare_density_with_shape(
+            density,
+            profile,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let PreparedDensity::Galaxy { density, threshold } = prepared else {
+            panic!("Spiral + Quadrant must use galaxy density preparation");
+        };
+        let canvas = density.into_rows();
+        assert_eq!(lines, render_quadrant(&canvas, threshold));
+        assert!(!lines.join("\n").contains('\x1b'));
     }
 
     #[test]

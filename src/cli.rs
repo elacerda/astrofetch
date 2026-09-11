@@ -50,7 +50,7 @@ pub enum RendererChoice {
     HalfBlock,
     /// Use ASCII characters (.:-=+*#%@) for any model.
     Ascii,
-    /// Experimental 2×2 quadrant renderer (Spiral only, requires --no-color).
+    /// Experimental 2×2 quadrant renderer (Spiral only).
     Quadrant,
 }
 
