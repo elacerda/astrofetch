@@ -110,6 +110,7 @@ astrofetch --renderer auto      # Default: HalfBlock for galaxies, dedicated ren
 astrofetch --renderer half-block
 astrofetch --renderer shade
 astrofetch --renderer ascii
+astrofetch --renderer quadrant  # Experimental: Spiral only, requires --no-color
 ```
 
 Renderer behavior:
@@ -118,6 +119,16 @@ Renderer behavior:
 - `half-block`: Use Unicode upper/lower half-block characters (▄▀█) for any model.
 - `shade`: Use Unicode density characters (░▒▓█) for any model.
 - `ascii`: Use ASCII characters (.:-=+*#%@) for any model. Maximum portability.
+- `quadrant`: Experimental 2×2 quadrant renderer. Currently supported for
+  the `spiral` model only and requires `--no-color`. It is not visually
+  calibrated yet, and `auto` never selects it. Other models return a clear
+  error instead of falling back.
+
+Quadrant renderer behavior:
+
+```bash
+astrofetch --logo-only --model spiral --renderer quadrant --no-color --seed 4
+```
 
 Starfield renderer behavior:
 

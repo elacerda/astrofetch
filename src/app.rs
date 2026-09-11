@@ -1,11 +1,13 @@
 use crate::cli::{Args, ArtModel, Command, RendererChoice};
 use crate::display_plan::{DisplayPlanner, OutputMode, PlannerRequest};
-use crate::engine::{ArtModel as EngineModel, GeneratedScene};
+use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::layout::compose_layout;
+use crate::render::topology::CellSamplingShape;
 use crate::render::{
-    prepare_density, render_ascii, render_half_blocks, render_shades, render_starfield,
-    ColorPalette, EffectiveRenderer, PreparedDensity, RenderProfile,
+    prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks, render_quadrant,
+    render_shades, render_starfield, sampling_shape_for, ColorPalette, EffectiveRenderer,
+    PreparedDensity, RenderProfile,
 };
 use crate::system::{
     get_disk_detail_fields, get_display_field_order, CollectionProfile, SystemSnapshot,
@@ -163,27 +165,12 @@ impl App {
             _ => unreachable!(),
         };
 
-        let GeneratedScene {
-            resolved_model: engine_resolved,
-            density,
-            ..
-        } = engine_model.generate_scene(art_width, art_height, self.args.seed);
-
-        let effective_renderer =
-            Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
-
-        let profile: RenderProfile =
-            RenderProfile::for_model_and_renderer(engine_resolved, effective_renderer);
-        let prepared = prepare_density(density, profile);
-
-        let effective_palette = resolve_color_palette(self.args.palette);
-
-        let art_lines = Self::render_prepared_density(
-            prepared,
-            effective_renderer,
-            colors_enabled,
+        let art_lines = self.render_art(
             terminal,
-            effective_palette,
+            colors_enabled,
+            engine_model,
+            art_width,
+            art_height,
         )?;
 
         terminal.print_lines(&art_lines)?;
@@ -227,27 +214,12 @@ impl App {
             _ => unreachable!(),
         };
 
-        let GeneratedScene {
-            resolved_model: engine_resolved,
-            density,
-            ..
-        } = engine_model.generate_scene(art_width, art_height, self.args.seed);
-
-        let effective_renderer =
-            Self::resolve_effective_renderer(self.args.renderer, engine_resolved)?;
-
-        let profile: RenderProfile =
-            RenderProfile::for_model_and_renderer(engine_resolved, effective_renderer);
-        let prepared = prepare_density(density, profile);
-
-        let effective_palette = resolve_color_palette(self.args.palette);
-
-        let art_lines = Self::render_prepared_density(
-            prepared,
-            effective_renderer,
-            colors_enabled,
+        let art_lines = self.render_art(
             terminal,
-            effective_palette,
+            colors_enabled,
+            engine_model,
+            art_width,
+            art_height,
         )?;
 
         match display_plan {
@@ -261,13 +233,97 @@ impl App {
         Ok(())
     }
 
+    /// Shared art pipeline for logo-only and combined output.
+    ///
+    /// Resolution order (Phase 5B.3):
+    /// 1. Reject `random + quadrant` before scene resolution, so an explicit
+    ///    Quadrant request never succeeds or fails by chance of the random
+    ///    model draw.
+    /// 2. Resolve the scene and the effective renderer. The experimental
+    ///    Quadrant path uses the Phase 5B.1 split engine API
+    ///    (`resolve_scene` -> `generate_density` at the QUADRANT sampling
+    ///    shape), concretizing the seed exactly once. Every other renderer
+    ///    keeps the legacy `generate_scene` path bit-for-bit unchanged.
+    /// 3. `sampling_shape_for` selects the terminal-cell sampling shape.
+    /// 4. Quadrant is no-color only: reject while effective color output is
+    ///    enabled (the application's effective color state, not the raw flag).
+    /// 5. Prepare the density with the shape-matching occupancy semantics
+    ///    (HALF_BLOCK keeps the legacy preparation call).
+    /// 6. `render_prepared_density` dispatches to the effective renderer.
+    fn render_art(
+        &self,
+        terminal: &Terminal,
+        colors_enabled: bool,
+        engine_model: EngineModel,
+        art_width: usize,
+        art_height: usize,
+    ) -> Result<Vec<String>, AppError> {
+        if engine_model == EngineModel::Random && self.args.renderer == RendererChoice::Quadrant {
+            return Err(AppError::Cli(
+                "the quadrant renderer cannot be combined with the random model; choose a concrete model (e.g. --model spiral)".to_string(),
+            ));
+        }
+
+        let (resolved_model, density, effective_renderer, shape) = if self.args.renderer
+            == RendererChoice::Quadrant
+        {
+            // Split path: the concrete seed from resolve_scene is
+            // preserved and never re-rolled.
+            let resolved = engine_model.resolve_scene(self.args.seed);
+            let effective_renderer =
+                Self::resolve_effective_renderer(self.args.renderer, resolved.resolved_model)?;
+            let shape = sampling_shape_for(resolved.resolved_model, effective_renderer);
+            let density = engine_model.generate_density(&resolved, art_width, art_height, shape);
+            (resolved.resolved_model, density, effective_renderer, shape)
+        } else {
+            // Legacy path: unchanged for every existing renderer.
+            let scene = engine_model.generate_scene(art_width, art_height, self.args.seed);
+            let effective_renderer =
+                Self::resolve_effective_renderer(self.args.renderer, scene.resolved_model)?;
+            (
+                scene.resolved_model,
+                scene.density,
+                effective_renderer,
+                CellSamplingShape::HALF_BLOCK,
+            )
+        };
+
+        if effective_renderer == EffectiveRenderer::Quadrant && colors_enabled {
+            return Err(AppError::Cli(
+                "the quadrant renderer currently requires --no-color".to_string(),
+            ));
+        }
+
+        let profile = RenderProfile::for_model_and_renderer(resolved_model, effective_renderer);
+        // HALF_BLOCK keeps the legacy preparation call bit-for-bit; only
+        // QUADRANT goes through the shape-aware preparation.
+        let prepared = if shape == CellSamplingShape::QUADRANT {
+            prepare_density_with_shape(density, profile, shape)
+        } else {
+            prepare_density(density, profile)
+        };
+        let effective_palette = resolve_color_palette(self.args.palette);
+
+        Self::render_prepared_density(
+            prepared,
+            effective_renderer,
+            colors_enabled,
+            terminal,
+            effective_palette,
+        )
+    }
+
     /// Resolves the effective renderer based on the requested renderer choice and resolved model.
     ///
-    /// Every explicit renderer choice works with every concrete model:
+    /// Every explicit renderer choice works with every concrete model, with
+    /// the exception of the experimental Quadrant renderer, which currently
+    /// supports Spiral only:
     /// - Galaxy models (Spiral, Elliptical, Cluster) with Auto → HalfBlock
     /// - Galaxy models with HalfBlock → HalfBlock
     /// - Galaxy models with Shade → Shade
     /// - Galaxy models with Ascii → Ascii
+    /// - Spiral with Quadrant → Quadrant
+    /// - Elliptical/Cluster/Starfield with Quadrant → Cli error (unsupported)
     /// - Starfield with Auto → Starfield
     /// - Starfield with HalfBlock → HalfBlock
     /// - Starfield with Shade → Shade
@@ -283,28 +339,46 @@ impl App {
             (EngineModel::Spiral, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
             (EngineModel::Spiral, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
             (EngineModel::Spiral, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Spiral, RendererChoice::Quadrant) => Ok(EffectiveRenderer::Quadrant),
             (EngineModel::Elliptical, RendererChoice::Auto) => Ok(EffectiveRenderer::HalfBlock),
             (EngineModel::Elliptical, RendererChoice::HalfBlock) => {
                 Ok(EffectiveRenderer::HalfBlock)
             }
             (EngineModel::Elliptical, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
             (EngineModel::Elliptical, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Elliptical, RendererChoice::Quadrant) => {
+                Err(Self::quadrant_unsupported_model_error())
+            }
             (EngineModel::Cluster, RendererChoice::Auto) => Ok(EffectiveRenderer::HalfBlock),
             (EngineModel::Cluster, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
             (EngineModel::Cluster, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
             (EngineModel::Cluster, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Cluster, RendererChoice::Quadrant) => {
+                Err(Self::quadrant_unsupported_model_error())
+            }
 
             // Starfield model
             (EngineModel::Starfield, RendererChoice::Auto) => Ok(EffectiveRenderer::Starfield),
             (EngineModel::Starfield, RendererChoice::HalfBlock) => Ok(EffectiveRenderer::HalfBlock),
             (EngineModel::Starfield, RendererChoice::Shade) => Ok(EffectiveRenderer::Shade),
             (EngineModel::Starfield, RendererChoice::Ascii) => Ok(EffectiveRenderer::Ascii),
+            (EngineModel::Starfield, RendererChoice::Quadrant) => {
+                Err(Self::quadrant_unsupported_model_error())
+            }
 
             // Random model should be resolved before this function is called
             (EngineModel::Random, _) => Err(AppError::Render(
                 "unresolved Random model reached renderer selection (internal error)".to_string(),
             )),
         }
+    }
+
+    /// Clear error for an explicit `--renderer quadrant` on a model that the
+    /// experimental Quadrant renderer does not support yet.
+    fn quadrant_unsupported_model_error() -> AppError {
+        AppError::Cli(
+            "the quadrant renderer currently supports the spiral model only; use --model spiral with --renderer quadrant".to_string(),
+        )
     }
 
     /// Renders prepared density using the effective renderer.
@@ -348,6 +422,12 @@ impl App {
                     colors_enabled && terminal.colors_enabled(),
                     palette,
                 ))
+            }
+            (PreparedDensity::Galaxy { density, threshold }, EffectiveRenderer::Quadrant) => {
+                // Experimental no-color-only renderer; the color gate in
+                // `render_art` rejects Quadrant while color output is on.
+                let canvas = density.into_rows();
+                Ok(render_quadrant(&canvas, threshold))
             }
             // Internal mismatch - should never happen if resolve_effective_renderer is correct
             (PreparedDensity::Starfield { .. }, _) => Err(AppError::Render(
@@ -462,6 +542,37 @@ mod tests {
                 disk_details: false,
                 layout: LayoutChoice::Auto,
                 renderer: RendererChoice::Auto,
+                palette: crate::cli::PaletteChoice::Auto,
+                no_update_check: false,
+            },
+            terminal: Terminal {
+                is_tty: colors_enabled,
+                colors_enabled,
+            },
+        }
+    }
+
+    fn build_test_app_pipeline(
+        model: ArtModel,
+        renderer: RendererChoice,
+        seed: Option<u64>,
+        no_color: bool,
+        colors_enabled: bool,
+    ) -> App {
+        App {
+            args: Args {
+                command: None,
+                model,
+                width: None,
+                height: None,
+                seed,
+                no_color,
+                logo_only: false,
+                info_only: false,
+                compact: false,
+                disk_details: false,
+                layout: LayoutChoice::Auto,
+                renderer,
                 palette: crate::cli::PaletteChoice::Auto,
                 no_update_check: false,
             },
@@ -792,6 +903,50 @@ mod tests {
         assert!(matches!(result, Err(AppError::Render(_))));
     }
 
+    #[test]
+    fn test_resolve_effective_renderer_spiral_quadrant() {
+        let result = App::resolve_effective_renderer(RendererChoice::Quadrant, EngineModel::Spiral);
+        assert_eq!(result.unwrap(), EffectiveRenderer::Quadrant);
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_quadrant_unsupported_models_error() {
+        for model in [
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+            EngineModel::Starfield,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::Quadrant, model);
+            match result {
+                Err(AppError::Cli(msg)) => {
+                    assert!(
+                        msg.contains("quadrant"),
+                        "error should mention quadrant: {msg}"
+                    );
+                    assert!(msg.contains("spiral"), "error should mention spiral: {msg}");
+                }
+                other => panic!("{model:?} + Quadrant must be a clear Cli error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_effective_renderer_auto_never_selects_quadrant() {
+        for model in [
+            EngineModel::Spiral,
+            EngineModel::Elliptical,
+            EngineModel::Cluster,
+            EngineModel::Starfield,
+        ] {
+            let result = App::resolve_effective_renderer(RendererChoice::Auto, model).unwrap();
+            assert_ne!(
+                result,
+                EffectiveRenderer::Quadrant,
+                "Auto must never select Quadrant for {model:?}"
+            );
+        }
+    }
+
     // ===== render_prepared_density tests =====
 
     #[test]
@@ -1062,6 +1217,215 @@ mod tests {
         let result = App::render_prepared_density(
             prepared,
             EffectiveRenderer::Ascii,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
+        assert!(matches!(result, Err(AppError::Render(_))));
+    }
+
+    // ===== Phase 5B.3: Quadrant App integration =====
+
+    #[test]
+    fn test_render_art_random_quadrant_rejected_before_resolution() {
+        // Seeds that resolve to different concrete models (frozen Random
+        // table: 4 -> Spiral, 16 -> Cluster, 42 -> Starfield) must all fail
+        // identically, proving the rejection happens before scene resolution.
+        for seed in [Some(4_u64), Some(16), Some(42)] {
+            let app = build_test_app_pipeline(
+                ArtModel::Random,
+                RendererChoice::Quadrant,
+                seed,
+                true,
+                false,
+            );
+            let terminal = Terminal::with_colors(true, false);
+            let result = app.render_art(&terminal, false, EngineModel::Random, 40, 20);
+            match result {
+                Err(AppError::Cli(msg)) => {
+                    assert!(
+                        msg.contains("random"),
+                        "error should mention the random model: {msg}"
+                    );
+                }
+                other => panic!(
+                    "Random + Quadrant with seed {seed:?} must be a clear Cli error, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_art_random_existing_renderers_unchanged() {
+        // Random with the existing renderers must still resolve and render.
+        for renderer in [
+            RendererChoice::Auto,
+            RendererChoice::HalfBlock,
+            RendererChoice::Shade,
+            RendererChoice::Ascii,
+        ] {
+            let app = build_test_app_pipeline(ArtModel::Random, renderer, Some(42), true, false);
+            let terminal = Terminal::with_colors(true, false);
+            let lines = app
+                .render_art(&terminal, false, EngineModel::Random, 40, 20)
+                .unwrap_or_else(|err| panic!("Random + {renderer:?} should render: {err}"));
+            assert_eq!(lines.len(), 20);
+        }
+    }
+
+    #[test]
+    fn test_render_art_spiral_quadrant_pipeline_dimensions() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let lines = app
+            .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+            .unwrap();
+
+        // Output is exactly W x H terminal cells.
+        assert_eq!(lines.len(), 20);
+        for line in &lines {
+            assert_eq!(line.chars().count(), 40);
+        }
+
+        // Structural check: the pipeline must equal the pure renderer applied
+        // to the 2W x 2H density prepared with QUADRANT occupancy.
+        let resolved = EngineModel::Spiral.resolve_scene(Some(4));
+        let density = EngineModel::Spiral.generate_density(
+            &resolved,
+            40,
+            20,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        assert_eq!((density.width, density.height), (80, 40));
+
+        let profile =
+            RenderProfile::for_model_and_renderer(EngineModel::Spiral, EffectiveRenderer::Quadrant);
+        let prepared = prepare_density_with_shape(
+            density,
+            profile,
+            crate::render::topology::CellSamplingShape::QUADRANT,
+        );
+        let PreparedDensity::Galaxy { density, threshold } = prepared else {
+            panic!("Spiral + Quadrant must use galaxy density preparation");
+        };
+        let canvas = density.into_rows();
+        assert_eq!(canvas.len(), 40);
+        assert_eq!(canvas[0].len(), 80);
+        assert_eq!(lines, render_quadrant(&canvas, threshold));
+    }
+
+    #[test]
+    fn test_render_art_quadrant_requires_no_color() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            false,
+            true,
+        );
+        let terminal = Terminal::with_colors(true, true);
+        let result = app.render_art(&terminal, true, EngineModel::Spiral, 40, 20);
+        match result {
+            Err(AppError::Cli(msg)) => {
+                assert!(
+                    msg.contains("--no-color"),
+                    "error should mention --no-color: {msg}"
+                );
+            }
+            other => panic!("Quadrant with colors enabled must be a Cli error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_render_art_quadrant_no_color_succeeds() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(4),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let lines = app
+            .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+            .unwrap();
+        assert!(!lines.join("\n").contains('\x1b'));
+    }
+
+    #[test]
+    fn test_render_art_existing_renderers_unaffected_by_color_gate() {
+        for renderer in [
+            RendererChoice::Auto,
+            RendererChoice::HalfBlock,
+            RendererChoice::Shade,
+            RendererChoice::Ascii,
+        ] {
+            let app = build_test_app_pipeline(ArtModel::Spiral, renderer, Some(4), false, true);
+            let terminal = Terminal::with_colors(true, true);
+            let lines = app
+                .render_art(&terminal, true, EngineModel::Spiral, 40, 20)
+                .unwrap_or_else(|err| {
+                    panic!("Spiral + {renderer:?} with colors should render: {err}")
+                });
+            assert_eq!(lines.len(), 20);
+        }
+    }
+
+    #[test]
+    fn test_render_art_spiral_quadrant_deterministic() {
+        let terminal = Terminal::with_colors(true, false);
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Quadrant,
+            Some(42),
+            true,
+            false,
+        );
+        let first = app
+            .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+            .unwrap();
+        let second = app
+            .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.join("\n").as_bytes(), second.join("\n").as_bytes());
+    }
+
+    #[test]
+    fn test_render_prepared_density_galaxy_quadrant_succeeds() {
+        let canvas = vec![vec![1.0, 1.0, 1.0, 0.0], vec![0.0, 0.0, 1.0, 0.0]];
+        let prepared = PreparedDensity::Galaxy {
+            density: DensityMap::from_rows(canvas).unwrap(),
+            threshold: 0.1,
+        };
+        let terminal = Terminal::with_colors(true, false);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Quadrant,
+            false,
+            &terminal,
+            ColorPalette::Nebula,
+        );
+        // Cell 0: TL+TR visible -> 0b0011 '▀'; cell 1: TL+BL visible -> 0b0101 '▌'
+        assert_eq!(result.unwrap(), vec!["▀▌"]);
+    }
+
+    #[test]
+    fn test_render_prepared_density_starfield_quadrant_error() {
+        let canvas = vec![vec![0.0, 0.04, 0.10, 0.20]];
+        let prepared = PreparedDensity::Starfield {
+            density: DensityMap::from_rows(canvas).unwrap(),
+        };
+        let terminal = Terminal::with_colors(true, false);
+        let result = App::render_prepared_density(
+            prepared,
+            EffectiveRenderer::Quadrant,
             false,
             &terminal,
             ColorPalette::Nebula,

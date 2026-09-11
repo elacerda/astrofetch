@@ -3,7 +3,7 @@ mod ascii;
 mod color;
 mod hash;
 mod profile;
-// Phase 5B.2: pure 2×2 quadrant renderer (internal; App/CLI wiring in 5B.3).
+// Phase 5B.2/5B.3: pure 2×2 quadrant renderer, wired into App/CLI (Spiral only, no-color only).
 pub(crate) mod quadrant;
 mod shade;
 mod starfield;
@@ -13,11 +13,14 @@ pub(crate) mod topology;
 
 pub use ascii::render_ascii;
 pub use color::ColorPalette;
-pub use profile::{prepare_density, PreparedDensity, RenderProfile};
+pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
+pub(crate) use quadrant::render_quadrant;
 pub use shade::render_shades;
 pub use starfield::render_starfield;
 
+use crate::engine::ArtModel;
 use crate::render::ansi::AnsiHalfBlockLine;
+use crate::render::topology::CellSamplingShape;
 use color::{galaxy_background_ansi, galaxy_foreground_ansi};
 use hash::{hash_cell, hash_to_unit};
 
@@ -35,6 +38,10 @@ pub(super) fn glyph_for_half_block(top_visible: bool, bottom_visible: bool) -> c
 }
 
 /// Renderer effectively used after model and renderer choice resolution.
+///
+/// Every variant is only produced for a model that already supports it:
+/// `App::resolve_effective_renderer` rejects unsupported combinations
+/// before an `EffectiveRenderer` value exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectiveRenderer {
     /// Starfield dedicated renderer.
@@ -45,6 +52,28 @@ pub enum EffectiveRenderer {
     Shade,
     /// ASCII renderer (ASCII characters .:-=+*#%@).
     Ascii,
+    /// Experimental 2×2 quadrant renderer (Spiral only, no-color only).
+    Quadrant,
+}
+
+/// Maps a resolved model and effective renderer to the terminal-cell
+/// sampling shape used for density generation and preparation.
+///
+/// Semantics:
+/// - `Spiral + Quadrant` -> `CellSamplingShape::QUADRANT` (logical 2W×2H);
+/// - every other valid model/renderer combination -> `CellSamplingShape::HALF_BLOCK`.
+///
+/// `ArtModel::Random` must never reach this function: the App resolves the
+/// model before renderer selection, and `App::resolve_effective_renderer`
+/// rejects invalid renderer/model combinations earlier.
+pub fn sampling_shape_for(model: ArtModel, renderer: EffectiveRenderer) -> CellSamplingShape {
+    match (model, renderer) {
+        (ArtModel::Spiral, EffectiveRenderer::Quadrant) => CellSamplingShape::QUADRANT,
+        (ArtModel::Random, _) => {
+            panic!("Random model should be resolved before sampling shape selection")
+        }
+        _ => CellSamplingShape::HALF_BLOCK,
+    }
 }
 
 /// Renderiza o mapa de densidade usando caracteres de bloco Unicode meio a meio.
@@ -230,6 +259,52 @@ mod tests {
 
     // Constant for default palette (Nebula) in tests
     const DEFAULT_PALETTE: ColorPalette = ColorPalette::Nebula;
+
+    // ===== sampling_shape_for tests =====
+
+    #[test]
+    fn test_sampling_shape_spiral_quadrant_is_quadrant() {
+        assert_eq!(
+            sampling_shape_for(ArtModel::Spiral, EffectiveRenderer::Quadrant),
+            CellSamplingShape::QUADRANT
+        );
+    }
+
+    #[test]
+    fn test_sampling_shape_all_other_valid_pairs_are_half_block() {
+        let models = [
+            ArtModel::Spiral,
+            ArtModel::Elliptical,
+            ArtModel::Cluster,
+            ArtModel::Starfield,
+        ];
+        let renderers = [
+            EffectiveRenderer::HalfBlock,
+            EffectiveRenderer::Shade,
+            EffectiveRenderer::Ascii,
+            EffectiveRenderer::Starfield,
+        ];
+        for model in models {
+            for renderer in renderers {
+                assert_eq!(
+                    sampling_shape_for(model, renderer),
+                    CellSamplingShape::HALF_BLOCK,
+                    "{model:?} + {renderer:?} must keep HALF_BLOCK"
+                );
+            }
+        }
+        // Spiral with the non-quadrant renderers also stays HALF_BLOCK.
+        assert_eq!(
+            sampling_shape_for(ArtModel::Spiral, EffectiveRenderer::HalfBlock),
+            CellSamplingShape::HALF_BLOCK
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Random model should be resolved before sampling shape selection")]
+    fn test_sampling_shape_random_is_rejected() {
+        let _ = sampling_shape_for(ArtModel::Random, EffectiveRenderer::HalfBlock);
+    }
 
     #[test]
     fn test_deterministic_render() {

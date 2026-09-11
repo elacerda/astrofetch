@@ -28,7 +28,7 @@ seeded RNG
   -> normalization (exactly once)
   -> contrast stretch (exactly once)
   -> threshold / render policy
-  -> renderer (HalfBlock, Shade, ASCII, or Starfield)
+  -> renderer (HalfBlock, Shade, ASCII, Starfield, or experimental Quadrant)
   -> palette selection
   -> optional ANSI color
 ```
@@ -66,17 +66,18 @@ After the requested model is resolved to a concrete model, the effective rendere
 
 ### Resolved model renderer matrix
 
-| Resolved model | Auto      | HalfBlock    | Shade        | ASCII     |
-| -------------- | --------- | ------------ | ------------ | --------- |
-| Spiral         | HalfBlock | HalfBlock    | Shade        | ASCII     |
-| Elliptical     | HalfBlock | HalfBlock    | Shade        | ASCII     |
-| Cluster        | HalfBlock | HalfBlock    | Shade        | ASCII     |
-| Starfield      | Starfield | HalfBlock    | Shade        | ASCII     |
+| Resolved model | Auto      | HalfBlock    | Shade        | ASCII     | Quadrant (experimental) |
+| -------------- | --------- | ------------ | ------------ | --------- | ----------------------- |
+| Spiral         | HalfBlock | HalfBlock    | Shade        | ASCII     | Quadrant                |
+| Elliptical     | HalfBlock | HalfBlock    | Shade        | ASCII     | error (unsupported)     |
+| Cluster        | HalfBlock | HalfBlock    | Shade        | ASCII     | error (unsupported)     |
+| Starfield      | Starfield | HalfBlock    | Shade        | ASCII     | error (unsupported)     |
 
 ### Compatibility rules
 
-Every explicit renderer choice works with every concrete model. `auto` keeps
-the model-specific default:
+Every explicit renderer choice works with every concrete model, with the
+exception of the experimental Quadrant renderer. `auto` keeps the
+model-specific default:
 
 - **Galaxy models** (Spiral, Elliptical, Cluster):
   - `auto` → HalfBlock
@@ -89,6 +90,14 @@ the model-specific default:
   - `half-block` → HalfBlock
   - `shade` → Shade
   - `ascii` → ASCII
+
+- **Experimental Quadrant renderer** (`--renderer quadrant`):
+  - `--model spiral` → Quadrant (requires `--no-color`)
+  - `--model elliptical` / `--model cluster` / `--model starfield` → clear
+    CLI error (Quadrant currently supports Spiral only)
+  - `--model random` → clear CLI error, rejected **before** random model
+    resolution so the request never succeeds or fails by chance
+  - `auto` never selects Quadrant
 
 ### Random model resolution
 
@@ -134,11 +143,11 @@ terminal W×H
   `W × 2H`: 1 logical sample per terminal cell horizontally and 2
   vertically (the renderer consumes two density rows per visible terminal
   row via half-block glyphs), and the supersampled field `3W × 6H`.
-- The `QUADRANT` shape (2×2) gives the future quadrant dimensions: logical
+- The `QUADRANT` shape (2×2) gives the quadrant dimensions: logical
   `2W × 2H` and supersampled `6W × 6H` (approximately double the sampling
-  evaluations of `HALF_BLOCK`). It is available to the Spiral generator and
-  to tests, but no production renderer consumes it yet and it is not
-  user-selectable; the quadrant renderer integration comes next (Phase 5B).
+  evaluations of `HALF_BLOCK`). It is consumed by the experimental
+  `--renderer quadrant` path for the Spiral model (no-color only); every
+  other production path uses `HALF_BLOCK`.
 - The density is evaluated on a `3×` supersampled grid (3 high-resolution
   samples per logical cell on each axis).
 - The supersampled field is reduced back to the logical size by averaging
@@ -151,20 +160,19 @@ topology abstraction (`CellSamplingShape` in `src/render/topology.rs`):
 
 - **Current production topology**: 1×2 — one logical sample horizontally
   and two vertically per terminal cell (the half-block contract).
-- **Future quadrant topology**: 2×2 — four logical samples per terminal
-  cell. It is defined, tested, and available to the Spiral generator, but
-  not yet consumed by production rendering.
+- **Quadrant topology**: 2×2 — four logical samples per terminal cell.
+  Consumed by the experimental `--renderer quadrant` path for the Spiral
+  model (no-color only).
 - Subcell ordering is row-major: top-left, top-right, bottom-left,
   bottom-right (TL, TR, BL, BR), with offsets (0,0), (1,0), (0,1), (1,1).
 - A subcell `(sx, sy)` of terminal cell `(cx, cy)` maps to the logical
   sample `(cx × columns + sx, cy × rows + sy)`.
 
-Phase 5A makes Spiral generation shape-aware: the generator derives its
-logical dimensions from the shape, and the production path uses
+Phase 5A made Spiral generation shape-aware: the generator derives its
+logical dimensions from the shape. The default production path uses
 `HALF_BLOCK`, so production rendering and all existing outputs remain
-bit-for-bit unchanged. `QUADRANT` is available to the generator (and to
-tests) but is not yet consumed by any renderer and is not user-selectable;
-the quadrant renderer integration comes next (Phase 5B).
+bit-for-bit unchanged. `QUADRANT` is consumed only by the experimental
+`--renderer quadrant` path for the Spiral model (no-color only).
 
 ## Terminal constraints
 
@@ -492,6 +500,25 @@ Uses ASCII characters ordered by intensity:
 ```text
 . : - = + * # % @
 ```
+
+### Quadrant renderer (experimental)
+
+The experimental `--renderer quadrant` option renders a Spiral galaxy with
+the 2×2 quadrant topology: each terminal cell owns four logical subcells
+(TL, TR, BL, BR) and one of 16 Unicode quadrant/half/full-block glyphs is
+selected by the 4-bit visibility mask of those subcells.
+
+Current limitations (by design, for this phase):
+
+- **Spiral only**: explicit `--renderer quadrant` with any other model is a
+  clear CLI error; there is no silent fallback.
+- **No-color only**: the renderer has no ANSI semantics yet, so color
+  output must be disabled (`--no-color`).
+- **Not visually calibrated**: the glyph mapping is deterministic and
+  tested, but the output has not been visually accepted yet.
+- **No background stars** in the Quadrant output.
+
+### Galaxy renderer sampling
 
 All three galaxy renderers consume the same prepared density and reuse the same deterministic background-star policy, but they sample each vertical pair differently:
 

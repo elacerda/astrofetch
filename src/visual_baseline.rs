@@ -35,6 +35,9 @@ fn spiral_no_color_render_signature(seed: u64, renderer: EffectiveRenderer) -> u
         EffectiveRenderer::Shade => render_shades(&rows, threshold, false, ColorPalette::Nebula),
         EffectiveRenderer::Ascii => render_ascii(&rows, threshold, false, ColorPalette::Nebula),
         EffectiveRenderer::Starfield => panic!("Spiral baseline does not use Starfield renderer"),
+        EffectiveRenderer::Quadrant => {
+            panic!("Spiral baseline does not use the Quadrant renderer in this checkpoint")
+        }
     };
 
     hash_terminal_lines(&lines)

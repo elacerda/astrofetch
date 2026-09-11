@@ -50,6 +50,8 @@ pub enum RendererChoice {
     HalfBlock,
     /// Use ASCII characters (.:-=+*#%@) for any model.
     Ascii,
+    /// Experimental 2×2 quadrant renderer (Spiral only, requires --no-color).
+    Quadrant,
 }
 
 /// Seleção de paleta de cores para arte ASCII.
@@ -291,6 +293,28 @@ mod tests {
     fn test_renderer_choice_ascii() {
         let args = Args::try_parse_from(["astrofetch", "--renderer", "ascii"]).unwrap();
         assert_eq!(args.renderer, RendererChoice::Ascii);
+    }
+
+    #[test]
+    fn test_renderer_choice_quadrant() {
+        let args = Args::try_parse_from(["astrofetch", "--renderer", "quadrant"]).unwrap();
+        assert_eq!(args.renderer, RendererChoice::Quadrant);
+    }
+
+    #[test]
+    fn test_renderer_choice_quadrant_composes_with_spiral_and_no_color() {
+        let args = Args::try_parse_from([
+            "astrofetch",
+            "--model",
+            "spiral",
+            "--renderer",
+            "quadrant",
+            "--no-color",
+        ])
+        .unwrap();
+        assert!(matches!(args.model, ArtModel::Spiral));
+        assert_eq!(args.renderer, RendererChoice::Quadrant);
+        assert!(args.no_color);
     }
 
     #[test]

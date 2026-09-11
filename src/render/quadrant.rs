@@ -35,7 +35,6 @@ use crate::render::topology::{CellSamplingShape, Quadrant};
 ///
 /// The table is the authoritative mask→glyph mapping; entries are pinned
 /// by `test_glyph_table_pins_all_16_masks` (character and code point).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const QUADRANT_GLYPHS: [char; 16] = [
     ' ', // 0b0000 empty
     '▘', // 0b0001 U+2598 QUADRANT UPPER LEFT
@@ -94,7 +93,6 @@ fn visibility_mask(tl: f64, tr: f64, bl: f64, br: f64, threshold: f64) -> u8 {
 ///
 /// The output is deterministic: the same canvas and threshold always
 /// produce identical lines, with no RNG, stars, or ANSI sequences.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_quadrant(canvas: &[Vec<f64>], threshold: f64) -> Vec<String> {
     let shape = CellSamplingShape::QUADRANT;
     let terminal_width = canvas.first().map_or(0, Vec::len).div_ceil(shape.columns());
