@@ -1,5 +1,6 @@
 use crate::density::DensityMap;
-use crate::galaxy::generate_spiral_galaxy_with_context;
+use crate::galaxy::generate_spiral_galaxy_with_shape;
+use crate::render::topology::CellSamplingShape;
 use crate::seed::GenerationContext;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -29,6 +30,20 @@ pub struct GeneratedScene {
     pub density: DensityMap,
 }
 
+/// Pedido de cena resolvido: seed concreto + modelo concreto.
+///
+/// Representação interna (Phase 5B.1) que separa a resolução do pedido da
+/// geração de densidade. O seed é concretizado exatamente uma vez, na
+/// resolução; a geração de densidade sempre consome este seed concreto e
+/// nunca re-roda `rand::random`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedScene {
+    /// O modelo concreto a gerar (nunca Random).
+    pub resolved_model: ArtModel,
+    /// O seed concreto compartilhado pela resolução e pela geração.
+    pub seed: u64,
+}
+
 impl ArtModel {
     /// Resolve o modelo solicitado para um modelo concreto.
     ///
@@ -49,31 +64,48 @@ impl ArtModel {
         }
     }
 
-    /// Gera uma cena com metadados preservados.
+    /// Resolve um pedido de cena em um seed concreto e um modelo concreto.
     ///
-    /// O fluxo de RNG é explícito:
-    /// 1. Um RNG é criado com o seed para selecionar o modelo concreto.
-    /// 2. Um novo RNG é criado com o mesmo seed para gerar a cena.
-    /// 3. O seed base é passado separadamente como contexto para features isoladas.
-    ///
-    /// Isso preserva o comportamento determinístico existente sem obrigar novas
-    /// features a consumir o stream de RNG legado.
-    pub fn generate_scene(&self, width: usize, height: usize, seed: Option<u64>) -> GeneratedScene {
+    /// Este é o único ponto onde `Option<u64>` vira seed concreto:
+    /// `seed.unwrap_or_else(rand::random)` acontece exatamente uma vez por
+    /// pedido de cena. O RNG de seleção é semeado com esse seed concreto e
+    /// usado apenas para a resolução do modelo; ele nunca é compartilhado
+    /// com a geração de densidade.
+    pub fn resolve_scene(&self, seed: Option<u64>) -> ResolvedScene {
         let seed = seed.unwrap_or_else(rand::random);
         let mut selection_rng = StdRng::seed_from_u64(seed);
         let resolved_model = self.resolve(&mut selection_rng);
 
-        // Cria um novo RNG com o mesmo seed para geração da cena
-        // Isso garante que o estado do RNG não seja afetado pela seleção do modelo
-        let mut generation_rng = StdRng::seed_from_u64(seed);
-        let generation_context = GenerationContext::new(seed);
+        ResolvedScene {
+            resolved_model,
+            seed,
+        }
+    }
+
+    /// Gera o mapa de densidade de um pedido de cena já resolvido.
+    ///
+    /// O RNG de geração e o `GenerationContext` são criados a partir de
+    /// `resolved.seed`, de forma independente do RNG de seleção usado em
+    /// [`ArtModel::resolve_scene`]. O `shape` é encaminhado apenas ao
+    /// gerador de Spiral; os demais modelos mantêm a geometria legada fixa.
+    pub fn generate_density(
+        &self,
+        resolved: &ResolvedScene,
+        width: usize,
+        height: usize,
+        shape: CellSamplingShape,
+    ) -> DensityMap {
+        // Cria um novo RNG com o mesmo seed concreto para geração da cena.
+        // Isso garante que o estado do RNG não seja afetado pela seleção do modelo.
+        let mut generation_rng = StdRng::seed_from_u64(resolved.seed);
+        let generation_context = GenerationContext::new(resolved.seed);
 
         let width = width.max(1);
         let height = height.max(1);
         let render_height = height * 2;
 
-        // resolved_model nunca será Random porque resolve() já o remove
-        let density = match resolved_model {
+        // resolved_model nunca será Random porque resolve_scene() já o remove
+        match resolved.resolved_model {
             ArtModel::Starfield => {
                 let canvas = generate_starfield(width, render_height, &mut generation_rng);
                 DensityMap::from_rows(canvas).unwrap()
@@ -81,11 +113,12 @@ impl ArtModel {
             ArtModel::Elliptical => {
                 generate_elliptical_density(width, render_height, &mut generation_rng)
             }
-            ArtModel::Spiral => generate_spiral_galaxy_with_context(
+            ArtModel::Spiral => generate_spiral_galaxy_with_shape(
                 width,
                 height,
                 &mut generation_rng,
                 generation_context,
+                shape,
             ),
             ArtModel::Cluster => {
                 let canvas = generate_cluster(width, render_height, &mut generation_rng);
@@ -96,12 +129,32 @@ impl ArtModel {
                 // escolhe um modelo concreto. Se isso acontecer, é um bug.
                 panic!("Internal error: Random model should have been resolved")
             }
-        };
+        }
+    }
+
+    /// Gera uma cena com metadados preservados.
+    ///
+    /// O fluxo de RNG é explícito:
+    /// 1. Um RNG é criado com o seed para selecionar o modelo concreto.
+    /// 2. Um novo RNG é criado com o mesmo seed para gerar a cena.
+    /// 3. O seed base é passado separadamente como contexto para features isoladas.
+    ///
+    /// Isso preserva o comportamento determinístico existente sem obrigar novas
+    /// features a consumir o stream de RNG legado.
+    ///
+    /// Caminho legado compatível: resolve o pedido via
+    /// [`ArtModel::resolve_scene`] e gera a densidade via
+    /// [`ArtModel::generate_density`] com a topologia de produção
+    /// `CellSamplingShape::HALF_BLOCK`.
+    pub fn generate_scene(&self, width: usize, height: usize, seed: Option<u64>) -> GeneratedScene {
+        let resolved = self.resolve_scene(seed);
+        let density =
+            self.generate_density(&resolved, width, height, CellSamplingShape::HALF_BLOCK);
 
         GeneratedScene {
             requested_model: *self,
-            resolved_model,
-            seed,
+            resolved_model: resolved.resolved_model,
+            seed: resolved.seed,
             density,
         }
     }
@@ -423,5 +476,149 @@ mod tests {
             .into_rows();
         assert_eq!(canvas.len(), 30);
         assert_eq!(canvas[0].len(), 30);
+    }
+
+    // ---- Phase 5B.1: split de resolução de cena x geração de densidade ----
+
+    /// Tabela congelada pré-refator: resolução de `ArtModel::Random` para
+    /// seeds representativos, capturada da implementação legada de
+    /// `generate_scene` antes do split 5B.1.
+    const RANDOM_RESOLUTION_FREEZE: &[(u64, ArtModel)] = &[
+        (0, ArtModel::Cluster),
+        (1, ArtModel::Cluster),
+        (4, ArtModel::Spiral),
+        (7, ArtModel::Elliptical),
+        (16, ArtModel::Cluster),
+        (42, ArtModel::Starfield),
+        (100, ArtModel::Cluster),
+        (999, ArtModel::Spiral),
+        (12345, ArtModel::Spiral),
+    ];
+
+    #[test]
+    fn test_resolve_scene_fixed_seed_model_resolution() {
+        // Random: deve bater com a tabela congelada pré-refator.
+        for &(seed, expected) in RANDOM_RESOLUTION_FREEZE {
+            let resolved = ArtModel::Random.resolve_scene(Some(seed));
+            assert_eq!(
+                resolved.resolved_model, expected,
+                "Random seed {seed} deve resolver como o algoritmo legado"
+            );
+            assert_eq!(resolved.seed, seed);
+        }
+
+        // Modelos concretos: resolução é identidade e preserva o seed.
+        for model in [
+            ArtModel::Elliptical,
+            ArtModel::Spiral,
+            ArtModel::Cluster,
+            ArtModel::Starfield,
+        ] {
+            for &(seed, _) in RANDOM_RESOLUTION_FREEZE {
+                let resolved = model.resolve_scene(Some(seed));
+                assert_eq!(resolved.resolved_model, model, "{model:?} seed {seed}");
+                assert_eq!(resolved.seed, seed);
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_scene_equals_resolve_plus_density() {
+        // Para todos os modelos (incluindo Random) e seeds representativos,
+        // o wrapper legado deve ser igual a resolve_scene +
+        // generate_density(HALF_BLOCK), comparando metadados e densidade.
+        for model in [
+            ArtModel::Random,
+            ArtModel::Elliptical,
+            ArtModel::Spiral,
+            ArtModel::Cluster,
+            ArtModel::Starfield,
+        ] {
+            for &(seed, _) in RANDOM_RESOLUTION_FREEZE {
+                let legacy = model.generate_scene(30, 15, Some(seed));
+
+                let resolved = model.resolve_scene(Some(seed));
+                let density =
+                    model.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+
+                assert_eq!(legacy.requested_model, model, "{model:?} seed {seed}");
+                assert_eq!(
+                    legacy.resolved_model, resolved.resolved_model,
+                    "{model:?} seed {seed}"
+                );
+                assert_eq!(legacy.seed, resolved.seed, "{model:?} seed {seed}");
+                assert_eq!(legacy.density, density, "{model:?} seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_scene_none_concretizes_seed_once() {
+        // Um pedido resolvido a partir de None carrega um seed concreto, e
+        // re-resolver com esse seed capturado reproduz o mesmo pedido.
+        let resolved = ArtModel::Random.resolve_scene(None);
+        let re_resolved = ArtModel::Random.resolve_scene(Some(resolved.seed));
+        assert_eq!(re_resolved, resolved);
+
+        // A geração a partir do pedido resolvido é reproduzível e não
+        // re-concretiza o seed (a API só aceita seed concreto).
+        let density_a =
+            ArtModel::Random.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+        let density_b =
+            ArtModel::Random.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+        assert_eq!(density_a, density_b);
+
+        // E bate com o caminho legado dirigido pelo seed capturado.
+        let legacy = ArtModel::Random.generate_scene(30, 15, Some(resolved.seed));
+        assert_eq!(legacy.resolved_model, resolved.resolved_model);
+        assert_eq!(legacy.density, density_a);
+    }
+
+    #[test]
+    fn test_spiral_half_block_split_bit_identical() {
+        // O caminho split deve permanecer bit-a-bit idêntico ao
+        // generate_scene legado para os seeds congelados da Phase 5A
+        // (unbarred 4, barred 16, barred+dusty 42).
+        for seed in [4_u64, 16, 42] {
+            let legacy = ArtModel::Spiral.generate_scene(30, 15, Some(seed));
+            let resolved = ArtModel::Spiral.resolve_scene(Some(seed));
+            let density =
+                ArtModel::Spiral.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+            assert_eq!(legacy.density, density, "seed {seed}");
+            assert_eq!(density.width, 30);
+            assert_eq!(density.height, 30);
+        }
+    }
+
+    #[test]
+    fn test_non_spiral_split_preserves_geometry_and_rng() {
+        // Starfield/Elliptical/Cluster mantêm a geometria legada W×2H e a
+        // saída determinística pelo caminho split; o shape não os afeta.
+        for model in [ArtModel::Starfield, ArtModel::Elliptical, ArtModel::Cluster] {
+            let legacy = model.generate_scene(30, 15, Some(42));
+            let resolved = model.resolve_scene(Some(42));
+            let density = model.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+            assert_eq!(density.width, 30, "{model:?}");
+            assert_eq!(density.height, 30, "{model:?}"); // height * 2
+            assert_eq!(legacy.density, density, "{model:?}");
+
+            // Em 5B.1 a geometria não-Spiral não consome QUADRANT.
+            let quadrant = model.generate_density(&resolved, 30, 15, CellSamplingShape::QUADRANT);
+            assert_eq!(quadrant, density, "{model:?} deve ignorar shape em 5B.1");
+        }
+    }
+
+    #[test]
+    fn test_generate_density_forwards_shape_to_spiral() {
+        // Prova em nível de engine de que generate_density encaminha o shape
+        // ao gerador de Spiral: QUADRANT produz o campo 2W×2H. Sem render.
+        let resolved = ArtModel::Spiral.resolve_scene(Some(42));
+        let quadrant =
+            ArtModel::Spiral.generate_density(&resolved, 30, 15, CellSamplingShape::QUADRANT);
+        assert_eq!((quadrant.width, quadrant.height), (60, 30));
+
+        let half =
+            ArtModel::Spiral.generate_density(&resolved, 30, 15, CellSamplingShape::HALF_BLOCK);
+        assert_eq!((half.width, half.height), (30, 30));
     }
 }

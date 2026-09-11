@@ -57,9 +57,10 @@ impl SpiralGalaxyConfig {
 
 /// Generates a spiral galaxy using the legacy RNG-only entry point.
 ///
-/// Production scene generation uses [`generate_spiral_galaxy_with_context`].
-/// This wrapper remains for focused density tests that predate feature-specific
-/// seed namespaces; no optional feature should depend on this context-free path.
+/// Production scene generation uses [`generate_spiral_galaxy_with_shape`]
+/// with `CellSamplingShape::HALF_BLOCK`. This wrapper remains for focused
+/// density tests that predate feature-specific seed namespaces; no optional
+/// feature should depend on this context-free path.
 ///
 /// The sampling shape is fixed to `CellSamplingShape::HALF_BLOCK`, the
 /// production topology.
@@ -87,6 +88,11 @@ pub fn generate_spiral_galaxy(
 /// The sampling shape is fixed to `CellSamplingShape::HALF_BLOCK`, the
 /// production topology; shape-aware generation is available through
 /// [`generate_spiral_galaxy_with_shape`].
+///
+/// The engine density-generation path (Phase 5B.1) consumes
+/// [`generate_spiral_galaxy_with_shape`] directly, so this wrapper is now
+/// exercised only by tests.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn generate_spiral_galaxy_with_context(
     terminal_width: usize,
     terminal_height: usize,
@@ -112,10 +118,9 @@ pub fn generate_spiral_galaxy_with_context(
 /// shape, and the output is deterministic for a given seed, terminal size,
 /// and shape.
 ///
-/// Currently exercised only by tests: the production scene path selects
-/// `HALF_BLOCK` via [`generate_spiral_galaxy_with_context`]. The quadrant
-/// renderer (Phase 5B) will select `QUADRANT` here.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The engine density-generation path (Phase 5B.1) consumes this function,
+/// selecting `HALF_BLOCK` for the legacy scene path. The quadrant renderer
+/// (Phase 5B) will select `QUADRANT` here.
 pub fn generate_spiral_galaxy_with_shape(
     terminal_width: usize,
     terminal_height: usize,
