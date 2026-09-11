@@ -3,6 +3,8 @@ mod ascii;
 mod color;
 mod hash;
 mod profile;
+// Phase 5B.2: pure 2×2 quadrant renderer (internal; App/CLI wiring in 5B.3).
+pub(crate) mod quadrant;
 mod shade;
 mod starfield;
 mod stretch;

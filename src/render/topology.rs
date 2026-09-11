@@ -24,17 +24,16 @@
 //! Phase 5A makes Spiral generation shape-aware: the generator derives its
 //! logical dimensions from `CellSamplingShape`, and the production path
 //! always uses `HALF_BLOCK`, so existing outputs remain bit-for-bit
-//! unchanged. `QUADRANT` is available to the generator (and to tests) but
-//! no production renderer consumes it yet; the quadrant renderer
-//! integration comes in Phase 5B. Until then, `Quadrant` and the 2×2-only
-//! helpers are referenced only by tests, so dead-code warnings are
-//! suppressed for non-test builds on those items only.
+//! unchanged. Phase 5B.2 consumes `QUADRANT`, `Quadrant`, and
+//! `logical_index` from the pure quadrant renderer and the shape-aware
+//! target-occupancy preparation. A few 2×2-only helpers are still
+//! referenced only by tests, so dead-code warnings are suppressed for
+//! non-test builds on those items only.
 
 /// Named subcell positions of a 2×2 terminal cell, in row-major order.
 ///
 /// Carries only positional information; no glyph or visibility semantics
 /// are attached here.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Quadrant {
     /// Top-left subcell, offset (0, 0).
@@ -47,7 +46,6 @@ pub(crate) enum Quadrant {
     BottomRight,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Quadrant {
     /// All quadrants in row-major order: TL, TR, BL, BR.
     pub(crate) const ALL: [Quadrant; 4] = [
@@ -69,6 +67,7 @@ impl Quadrant {
 
     /// Returns the quadrant for a valid 2×2 subcell offset, or `None` for
     /// offsets outside the 2×2 set.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn from_offset(offset: (usize, usize)) -> Option<Quadrant> {
         match offset {
             (0, 0) => Some(Quadrant::TopLeft),
@@ -108,7 +107,6 @@ impl CellSamplingShape {
     };
 
     /// Future quadrant topology: 2×2.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const QUADRANT: Self = Self {
         columns: 2,
         rows: 2,
@@ -125,13 +123,11 @@ impl CellSamplingShape {
     }
 
     /// Total logical samples per terminal cell (`columns * rows`).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn subcells(&self) -> usize {
         self.columns * self.rows
     }
 
     /// Subcell offsets `(sx, sy)` in row-major order: TL, TR, BL, BR.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn subcell_offsets(&self) -> Vec<(usize, usize)> {
         let mut offsets = Vec::with_capacity(self.subcells());
         for sy in 0..self.rows {
@@ -144,7 +140,6 @@ impl CellSamplingShape {
 
     /// Maps terminal cell `(cell_x, cell_y)` and subcell `(sub_x, sub_y)`
     /// to the global logical density index `(logical_x, logical_y)`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn logical_index(
         &self,
         cell_x: usize,

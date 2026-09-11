@@ -5,6 +5,7 @@
 use crate::density::DensityMap;
 use crate::engine::ArtModel;
 use crate::render::stretch::{apply_gamma_stretch, StretchType};
+use crate::render::topology::CellSamplingShape;
 use crate::render::EffectiveRenderer;
 
 /// Normalization strategy for density maps.
@@ -137,7 +138,31 @@ pub enum PreparedDensity {
 ///
 /// * Starfield models: no normalization, no stretch, no threshold.
 /// * Galaxy models: robust normalization, stretch, and target-occupancy threshold.
+///
+/// This is the legacy HALF_BLOCK preparation path; it must remain
+/// behaviorally identical to the baseline implementation.
 pub fn prepare_density(density: DensityMap, profile: RenderProfile) -> PreparedDensity {
+    prepare_density_with_shape(density, profile, CellSamplingShape::HALF_BLOCK)
+}
+
+/// Prepares density for rendering based on the profile and the terminal-cell
+/// sampling shape.
+///
+/// Normalization and stretch are shape-independent; only the
+/// target-occupancy threshold depends on how logical samples aggregate into
+/// terminal cells:
+///
+/// * `CellSamplingShape::HALF_BLOCK`: dispatches to the legacy
+///   vertical-pair target-occupancy implementation, unchanged.
+/// * `CellSamplingShape::QUADRANT`: uses the four-subcell maximum per
+///   terminal cell, then the same quantile algorithm.
+///
+/// Phase 5B.2 keeps this crate-internal: no App/CLI consumer yet.
+pub fn prepare_density_with_shape(
+    density: DensityMap,
+    profile: RenderProfile,
+    shape: CellSamplingShape,
+) -> PreparedDensity {
     match profile.preparation {
         PreparationKind::Starfield => {
             // Starfield: no processing, preserve raw values
@@ -147,7 +172,8 @@ pub fn prepare_density(density: DensityMap, profile: RenderProfile) -> PreparedD
             // Galaxy models: apply robust normalization and stretch
             let normalized = normalize_robust_map(&density, profile.normalization);
             let stretched = apply_stretch_to_density(&normalized, profile.stretch);
-            let threshold = compute_target_occupancy_threshold(&stretched, profile.threshold);
+            let threshold =
+                compute_target_occupancy_threshold_for_shape(&stretched, profile.threshold, shape);
             PreparedDensity::Galaxy {
                 density: stretched,
                 threshold,
@@ -290,6 +316,91 @@ fn compute_target_occupancy_threshold(density: &DensityMap, strategy: ThresholdS
             let idx = ((n - 1) as f64 * quantile).round() as usize;
 
             pair_maxima[idx.min(n - 1)]
+        }
+    }
+}
+
+/// Dispatches target-occupancy threshold computation by sampling shape.
+///
+/// `HALF_BLOCK` keeps the legacy vertical-pair implementation untouched
+/// (including its top-unclamped/bottom-clamped quirk). Any other shape uses
+/// the quadrant four-subcell implementation.
+fn compute_target_occupancy_threshold_for_shape(
+    density: &DensityMap,
+    strategy: ThresholdStrategy,
+    shape: CellSamplingShape,
+) -> f64 {
+    if shape == CellSamplingShape::HALF_BLOCK {
+        compute_target_occupancy_threshold(density, strategy)
+    } else {
+        compute_quadrant_occupancy_threshold(density, strategy)
+    }
+}
+
+/// Collects one sanitized maximum per terminal cell for the 2×2 quadrant
+/// shape, in row-major terminal-cell order.
+///
+/// Subcell coordinates come from `CellSamplingShape::QUADRANT.logical_index`;
+/// subcells outside the density bounds (odd width/height) read as `0.0`.
+/// Each maximum is sanitized exactly like the legacy pair maxima:
+/// non-finite or negative results become `0.0`.
+fn quadrant_cell_maxima(density: &DensityMap) -> Vec<f64> {
+    let shape = CellSamplingShape::QUADRANT;
+    let terminal_width = density.width.div_ceil(shape.columns());
+    let terminal_height = density.height.div_ceil(shape.rows());
+
+    let mut cell_maxima: Vec<f64> = Vec::with_capacity(terminal_width * terminal_height);
+
+    for cell_y in 0..terminal_height {
+        for cell_x in 0..terminal_width {
+            let mut cell_value: f64 = 0.0;
+            for (sub_x, sub_y) in shape.subcell_offsets() {
+                let (logical_x, logical_y) = shape.logical_index(cell_x, cell_y, sub_x, sub_y);
+                let value = if logical_x < density.width && logical_y < density.height {
+                    density.get(logical_x, logical_y)
+                } else {
+                    0.0
+                };
+                cell_value = cell_value.max(value);
+            }
+            // Sanitize non-finite or negative values to zero
+            let sanitized = if !cell_value.is_finite() || cell_value < 0.0 {
+                0.0
+            } else {
+                cell_value
+            };
+            cell_maxima.push(sanitized);
+        }
+    }
+
+    cell_maxima
+}
+
+/// Computes the target-occupancy threshold from quadrant four-subcell maxima.
+///
+/// Only the cell aggregation differs from the legacy vertical-pair
+/// implementation: one `max(TL, TR, BL, BR)` per terminal cell. The finite
+/// handling, `total_cmp` sorting, quantile calculation, round/index behavior,
+/// and fallback are identical.
+fn compute_quadrant_occupancy_threshold(density: &DensityMap, strategy: ThresholdStrategy) -> f64 {
+    match strategy {
+        ThresholdStrategy::Dedicated => 0.0, // Not used for Starfield
+        ThresholdStrategy::TargetOccupancy(target) => {
+            let mut cell_maxima = quadrant_cell_maxima(density);
+
+            if cell_maxima.is_empty() {
+                return 0.0;
+            }
+
+            // Sort deterministically with f64::total_cmp
+            cell_maxima.sort_by(f64::total_cmp);
+
+            // Choose threshold near quantile (1.0 - target)
+            let n = cell_maxima.len();
+            let quantile = (1.0 - target).clamp(0.0, 1.0);
+            let idx = ((n - 1) as f64 * quantile).round() as usize;
+
+            cell_maxima[idx.min(n - 1)]
         }
     }
 }
@@ -1157,6 +1268,246 @@ mod tests {
                 "{:?} with seed {} has visible_occupancy {:.4} outside range [{:.2}, {:.2}]",
                 m.model, m.seed, m.visible_occupancy, m.min_occ, m.max_occ
             );
+        }
+    }
+
+    // ===== Phase 5B.2: topology-aware occupancy =====
+
+    /// A 4×4 map (2×2 terminal cells) with known four-subcell maxima.
+    ///
+    /// ```text
+    /// y=0: [0.1, 0.2, 0.5, 0.6]
+    /// y=1: [0.3, 0.7, 0.9, 0.0]
+    /// y=2: [0.0, 0.0, 0.0, 0.0]
+    /// y=3: [0.0, 0.0, 0.0, 0.0]
+    /// ```
+    fn make_quadrant_test_map() -> DensityMap {
+        let mut density = DensityMap::new(4, 4);
+        let row0 = [0.1, 0.2, 0.5, 0.6];
+        let row1 = [0.3, 0.7, 0.9, 0.0];
+        for x in 0..4 {
+            density.set(x, 0, row0[x]);
+            density.set(x, 1, row1[x]);
+        }
+        density
+    }
+
+    /// HALF_BLOCK compatibility gate: the shape-aware path with
+    /// `CellSamplingShape::HALF_BLOCK` must produce exactly the same
+    /// normalized/stretched density and threshold as the legacy
+    /// `prepare_density` path (bitwise, via `to_bits`).
+    #[test]
+    fn test_half_block_shape_path_matches_legacy_exactly() {
+        let profile = RenderProfile::for_model(ArtModel::Spiral);
+        let maps: Vec<DensityMap> = vec![
+            DensityMap::new(10, 10),         // all zero
+            make_density_with_known_pairs(), // odd height (5 rows)
+            make_quadrant_test_map(),        // even 4×4
+            {
+                // NaN, negative, and >1.0 values
+                let mut density = DensityMap::new(4, 4);
+                density.set(0, 0, f64::NAN);
+                density.set(1, 0, -0.5);
+                density.set(2, 0, 2.0);
+                density.set(3, 0, 0.25);
+                density.set(0, 1, f64::INFINITY);
+                density.set(1, 1, 0.5);
+                density.set(2, 1, 0.75);
+                density.set(3, 1, 0.0);
+                density
+            },
+        ];
+
+        for density in maps {
+            let legacy = prepare_density(density.clone(), profile);
+            let shaped =
+                prepare_density_with_shape(density, profile, CellSamplingShape::HALF_BLOCK);
+
+            match (legacy, shaped) {
+                (
+                    PreparedDensity::Galaxy {
+                        density: legacy_density,
+                        threshold: legacy_threshold,
+                    },
+                    PreparedDensity::Galaxy {
+                        density: shaped_density,
+                        threshold: shaped_threshold,
+                    },
+                ) => {
+                    assert_eq!(
+                        legacy_density.data, shaped_density.data,
+                        "HALF_BLOCK shape path must keep the exact density"
+                    );
+                    assert_eq!(
+                        legacy_threshold.to_bits(),
+                        shaped_threshold.to_bits(),
+                        "HALF_BLOCK shape path must keep the exact threshold bits"
+                    );
+                }
+                (legacy, shaped) => {
+                    panic!("Expected Galaxy variants, got {legacy:?} / {shaped:?}");
+                }
+            }
+        }
+    }
+
+    /// The shape-aware HALF_BLOCK threshold must equal the legacy
+    /// `compute_target_occupancy_threshold` directly (non-circular check),
+    /// including the top-unclamped/bottom-clamped quirk for values > 1.0.
+    #[test]
+    fn test_half_block_clamp_quirk_preserved() {
+        // Bottom row value 1.5 must be clamped to 1.0 before the pair max.
+        let mut density = DensityMap::new(2, 2);
+        density.set(0, 0, 0.5);
+        density.set(1, 0, 0.1);
+        density.set(0, 1, 1.5);
+        density.set(1, 1, 0.2);
+
+        let strategy = ThresholdStrategy::TargetOccupancy(0.26);
+
+        // Legacy: pairs max(0.5, 1.5.clamp(0,1)=1.0)=1.0 and max(0.1, 0.2)=0.2
+        // sorted [0.2, 1.0], n=2, idx = round(1 * 0.74) = 1 -> 1.0
+        let legacy = compute_target_occupancy_threshold(&density, strategy);
+        let shaped = compute_target_occupancy_threshold_for_shape(
+            &density,
+            strategy,
+            CellSamplingShape::HALF_BLOCK,
+        );
+
+        assert_eq!(
+            legacy.to_bits(),
+            1.0f64.to_bits(),
+            "legacy quirk must clamp bottom"
+        );
+        assert_eq!(
+            legacy.to_bits(),
+            shaped.to_bits(),
+            "HALF_BLOCK dispatch must be unchanged"
+        );
+
+        // The quadrant aggregation sees the unclamped 1.5, proving the two
+        // paths are genuinely different implementations.
+        let quadrant = compute_quadrant_occupancy_threshold(&density, strategy);
+        assert_eq!(quadrant.to_bits(), 1.5f64.to_bits());
+    }
+
+    /// QUADRANT occupancy: one maximum per terminal cell, in row-major
+    /// terminal-cell order.
+    #[test]
+    fn test_quadrant_cell_maxima_row_major() {
+        let density = make_quadrant_test_map();
+
+        // Cell (0,0): max(0.1, 0.2, 0.3, 0.7) = 0.7
+        // Cell (1,0): max(0.5, 0.6, 0.9, 0.0) = 0.9
+        // Cell (0,1): 0.0
+        // Cell (1,1): 0.0
+        assert_eq!(quadrant_cell_maxima(&density), vec![0.7, 0.9, 0.0, 0.0]);
+    }
+
+    /// QUADRANT occupancy: expected quantile threshold on a known map, and
+    /// the result must differ from the vertical-pair (HALF_BLOCK) threshold
+    /// on the same map.
+    #[test]
+    fn test_quadrant_occupancy_threshold_known_map() {
+        let density = make_quadrant_test_map();
+        let strategy = ThresholdStrategy::TargetOccupancy(0.26);
+
+        // Quadrant maxima sorted: [0.0, 0.0, 0.7, 0.9]
+        // n=4, quantile 0.74, idx = round(3 * 0.74) = round(2.22) = 2 -> 0.7
+        let quadrant = compute_quadrant_occupancy_threshold(&density, strategy);
+        assert_eq!(quadrant.to_bits(), 0.7f64.to_bits());
+
+        // Legacy vertical pairs on the same map:
+        // y=0: max(0.1,0.3)=0.3, max(0.2,0.7)=0.7, max(0.5,0.9)=0.9, max(0.6,0.0)=0.6
+        // y=2: 0.0, 0.0, 0.0, 0.0
+        // sorted [0.0, 0.0, 0.0, 0.0, 0.3, 0.6, 0.7, 0.9]
+        // n=8, idx = round(7 * 0.74) = round(5.18) = 5 -> 0.6
+        let legacy = compute_target_occupancy_threshold(&density, strategy);
+        assert_eq!(legacy.to_bits(), 0.6f64.to_bits());
+
+        assert_ne!(
+            quadrant.to_bits(),
+            legacy.to_bits(),
+            "four-sample maximum must differ from vertical-pair maximum here"
+        );
+    }
+
+    /// QUADRANT occupancy: all-zero map falls back to threshold 0.0.
+    #[test]
+    fn test_quadrant_occupancy_all_zero_map() {
+        let density = DensityMap::new(8, 6);
+        let strategy = ThresholdStrategy::TargetOccupancy(0.26);
+        let threshold = compute_quadrant_occupancy_threshold(&density, strategy);
+        assert_eq!(threshold, 0.0);
+    }
+
+    /// QUADRANT occupancy: non-finite and negative subcells sanitize to 0.0
+    /// exactly like the legacy pair maxima.
+    #[test]
+    fn test_quadrant_occupancy_non_finite_sanitized() {
+        let mut density = DensityMap::new(4, 4);
+        // Cell (0,0): NaN, +inf, negative, 0.5 -> sanitized 0.0
+        density.set(0, 0, f64::NAN);
+        density.set(1, 0, f64::INFINITY);
+        density.set(0, 1, -1.0);
+        density.set(1, 1, 0.5);
+        // Cell (1,0): 0.8
+        density.set(2, 0, 0.8);
+        density.set(3, 0, 0.6);
+        density.set(2, 1, 0.8);
+        density.set(3, 1, 0.6);
+        // Cell (0,1): 0.4
+        density.set(0, 2, 0.4);
+        density.set(1, 2, 0.4);
+        density.set(0, 3, 0.4);
+        density.set(1, 3, 0.4);
+        // Cell (1,1): 0.0
+
+        assert_eq!(quadrant_cell_maxima(&density), vec![0.0, 0.8, 0.4, 0.0]);
+
+        // sorted [0.0, 0.0, 0.4, 0.8], n=4, idx = round(3 * 0.74) = 2 -> 0.4
+        let strategy = ThresholdStrategy::TargetOccupancy(0.26);
+        let threshold = compute_quadrant_occupancy_threshold(&density, strategy);
+        assert_eq!(threshold.to_bits(), 0.4f64.to_bits());
+    }
+
+    /// QUADRANT occupancy through the full shape-aware preparation pipeline.
+    #[test]
+    fn test_prepare_density_with_shape_quadrant_pipeline() {
+        let density = make_quadrant_test_map();
+        let profile = RenderProfile::for_model(ArtModel::Spiral);
+
+        let prepared = prepare_density_with_shape(density, profile, CellSamplingShape::QUADRANT);
+        match prepared {
+            PreparedDensity::Galaxy { density, threshold } => {
+                // Pipeline wiring: normalized -> stretched -> quadrant threshold.
+                let normalized = normalize_robust_map(&density, profile.normalization);
+                let stretched = apply_stretch_to_density(&normalized, profile.stretch);
+                let expected_threshold =
+                    compute_quadrant_occupancy_threshold(&stretched, profile.threshold);
+                assert_eq!(threshold.to_bits(), expected_threshold.to_bits());
+                // Dimensions are preserved by the preparation.
+                assert_eq!((density.width, density.height), (4, 4));
+            }
+            PreparedDensity::Starfield { .. } => panic!("Expected Galaxy variant"),
+        }
+    }
+
+    /// Starfield preparation is shape-independent: raw values preserved.
+    #[test]
+    fn test_prepare_density_with_shape_starfield_ignores_shape() {
+        let mut density = DensityMap::new(4, 4);
+        density.set(0, 0, 0.3);
+        density.set(3, 3, 0.7);
+        let profile = RenderProfile::for_model(ArtModel::Starfield);
+
+        let prepared =
+            prepare_density_with_shape(density.clone(), profile, CellSamplingShape::QUADRANT);
+        match prepared {
+            PreparedDensity::Starfield { density: raw } => {
+                assert_eq!(raw.data, density.data);
+            }
+            PreparedDensity::Galaxy { .. } => panic!("Expected Starfield variant"),
         }
     }
 }
