@@ -127,9 +127,9 @@ Renderer behavior:
   used. Deterministic sparse background stars are rendered in completely
   empty cells only, using the existing hash-based star convention; stars
   are uncolored, and effective no-color rendering remains ANSI-free. The
-  0.26 occupancy has not yet been separately recalibrated, and `auto`
-  never selects it. Other models return a clear error instead of falling
-  back.
+  0.26 target occupancy was calibrated in Phase 6C and deliberately
+  retained, and `auto` never selects it. Other models return a clear
+  error instead of falling back.
 
 Quadrant renderer behavior:
 

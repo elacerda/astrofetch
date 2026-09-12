@@ -528,10 +528,44 @@ Current scope (by design, for this phase):
   `render_quadrant_colored` primitives intentionally remain star-free
   reference and compatibility functions (frozen Phase-5B/6A behavior,
   exercised by tests only).
-- **Visually accepted, not yet anchored**: the output has been visually
-  accepted, but permanent Quadrant visual anchors have not yet been
-  established and the 0.26 occupancy has not yet been separately
-  recalibrated.
+- **Visually accepted through Phase 6C, not yet anchored**: the output
+  has been visually accepted through Phase 6C (occupancy calibration),
+  but permanent Quadrant visual anchors remain deferred to Phase 6D.
+- **Occupancy calibrated (Phase 6C)**: the 0.26 target occupancy was
+  deliberately retained; see the calibration record below.
+
+#### Phase 6C occupancy calibration
+
+The Quadrant renderer reuses the Spiral model's 0.26 target occupancy.
+Phase 6C calibration confirmed that value deliberately rather than by
+default:
+
+- **What 0.26 means**: it is a target fraction of *non-empty terminal
+  cells*, selected as the quantile `(1.0 - 0.26)` over per-cell
+  `max(TL, TR, BL, BR)` values — not a fraction of visible subcells.
+  It is a target, not a guarantee: ties at the selected threshold can
+  make the realized fraction differ. In the measured calibration cases
+  the realized terminal-cell occupancy was approximately 26.1%.
+- **Occupancy direction**: a *lower* target (e.g. 0.24) raises the
+  quantile `(1.0 - target)`, raises the selected threshold, and reduces
+  visible terminal cells/subcells (trims faint edges, less ink); a
+  *higher* target (e.g. 0.28) lowers the threshold and adds faint edges
+  (more ink). 0.26 is the retained middle value.
+- **Measurements** (40×20, seeds 0, 1, 4, 7, 16, 42, 137, 2026):
+  realized terminal-cell occupancy was approximately 0.26125, and
+  Quadrant visible-subcell fractions ranged approximately 0.157–0.209.
+  Seeds 4, 16, and 42 were less or similarly inked at the subcell level
+  than their HalfBlock outputs, and Quadrant retained a meaningful
+  partial-mask population in dense cases.
+- **Dense seed 42**: its dense core also appears in HalfBlock, so it is
+  morphology-driven rather than a Quadrant occupancy defect.
+- **Representative morphologies**: seed 137 (dispersed) and seed 2026
+  (dense-core) both render acceptably at 0.26.
+- **Conclusion**: no topology-specific occupancy target is required;
+  the Phase 6A foreground color and Phase 6B background stars resolved
+  the two main perceptual gaps without occupancy retuning. Quadrant is
+  visually accepted through Phase 6C; permanent visual anchors remain
+  deferred to Phase 6D, and `auto` still never selects Quadrant.
 
 ### Galaxy renderer sampling
 
