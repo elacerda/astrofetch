@@ -576,6 +576,44 @@ default:
   anchors were captured in Phase 6D, and `auto` still never selects
   Quadrant.
 
+#### Phase 6E: Auto default decision
+
+Phase 6E evaluated whether Spiral `auto` should switch from HalfBlock to
+Quadrant. Decision: `auto` remains HalfBlock for Spiral for now. This is
+a deliberate product and backward-compatibility decision, not a
+renderer-correctness limitation.
+
+Rationale:
+
+- Quadrant is mature: deterministic, calibrated (Phase 6C), and
+  permanently anchored (Phase 6D).
+- The Quadrant cost is about 2× the density evaluations, but the
+  measured default wall-clock overhead is only about +2–3 ms at 40×20;
+  performance is not the blocker.
+- Quadrant is currently Spiral-only. CI proves code and test
+  portability on Linux, macOS, and Windows, not real terminal or font
+  rendering quality. HalfBlock already depends on Unicode Block
+  Elements, so incremental Quadrant compatibility risk is expected to be
+  small, but no universal font coverage for all quadrant glyphs is
+  claimed.
+- Changing `auto` would immediately and visibly change the default
+  Spiral output — glyph topology, per-seed rendering, and color
+  semantics — in a tool commonly used on shell startup, where default
+  visual stability matters.
+- One opt-in release of Quadrant provides real-world terminal and font
+  exposure before any possible default change.
+
+Reconsideration is possible after at least one release of opt-in
+Quadrant exposure with no meaningful compatibility reports, and/or after
+Quadrant support expands beyond Spiral, followed by an explicit
+announced default-change decision. This record does not commit to any
+future `auto` change.
+
+Phase 6 is complete with Quadrant as a production-capable opt-in
+renderer. The "experimental" label is retained as the current project
+status; HalfBlock remains the Spiral default and its compatibility
+guarantees are unchanged.
+
 ### Galaxy renderer sampling
 
 All three galaxy renderers consume the same prepared density and reuse the same deterministic background-star policy, but they sample each vertical pair differently:
