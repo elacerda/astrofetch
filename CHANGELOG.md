@@ -6,17 +6,98 @@ Changelog tracking starts with v0.5.0.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-14
+
+The first stable release. It introduces the opt-in 2×2 Quadrant renderer
+for Spiral galaxies and deterministic dust lanes for the Spiral model,
+built on a shape-aware sampling and scene-resolution architecture.
+
 ### Added
 
-- Experimental `--renderer quadrant` option: a 2×2 quadrant renderer that maps each terminal cell's four logical subcells (TL, TR, BL, BR) to one of 16 Unicode quadrant glyphs. Currently supported for the `spiral` model only. Color is supported via a foreground-only ANSI channel: glyph geometry remains determined by the 2×2 visibility mask, one foreground intensity per cell is derived from the maximum visible subcell density, and the terminal background color is intentionally not used; effective no-color rendering remains ANSI-free. The output is deterministic and includes deterministic sparse background stars in completely empty cells only: stars use the existing hash-based galaxy-star convention, remain uncolored, and introduce no new RNG stream, while the pure `render_quadrant` / `render_quadrant_colored` reference primitives remain star-free. The output has been visually accepted through Phase 6C occupancy calibration, which deliberately retained the 0.26 target occupancy (a target fraction of non-empty terminal cells via a quantile over per-cell max(TL,TR,BL,BR), not a visible-subcell fraction); permanent no-color visual anchors were captured in Phase 6D for seeds 4, 16, and 42 at the fixed 40×20 size, while colored ANSI output remains intentionally un-fingerprinted. Explicit `--renderer quadrant` with `elliptical`, `cluster`, or `starfield` returns a clear error (no silent fallback), and `--model random --renderer quadrant` is rejected before random model resolution. `auto` never selects the quadrant renderer. Phase 6E evaluated switching Spiral `auto` from HalfBlock to Quadrant and deliberately kept HalfBlock as the default for now: a product and backward-compatibility decision, not a renderer-correctness limitation. Quadrant is production-capable (deterministic, calibrated at the retained 0.26 target occupancy, and permanently anchored), its measured default wall-clock overhead is only about +2–3 ms at 40×20 (performance is not the blocker), and it is currently Spiral-only. Keeping the default unchanged avoids an immediate visible change to default Spiral output (glyph topology, per-seed rendering, and color semantics) in a tool commonly used on shell startup. `auto` will be reconsidered only after at least one release of opt-in Quadrant exposure with no meaningful compatibility reports and/or after Quadrant support expands beyond Spiral, followed by an explicit announced default-change decision; this is a reconsideration criterion, not a commitment to a future default change. Phase 6 is complete with Quadrant as a production-capable opt-in renderer.
-- Deterministic `spiral/dust/v1` dust-lane configuration (`DustLaneConfig`) for the Spiral model, derived from an isolated versioned feature stream without advancing the legacy scene RNG.
-- Dust-lane extinction for the Spiral model: the dust configuration is now consumed as a deterministic multiplicative attenuation of the luminous disk (disk plus gated arms times clumpiness) using `tau = strength * profile * radial_gate` and `extinction = exp(-tau)`. The bulge, stellar bar, and stellar knots are not attenuated. Dustless scenes keep the exact pre-dust density expression.
+- Experimental `--renderer quadrant` option for the Spiral model: a 2×2
+  quadrant renderer that maps each terminal cell's four logical subcells
+  (TL, TR, BL, BR) to one of 16 Unicode quadrant, half-block, and full-block
+  glyphs, producing finer, direction-aware contours than the 1×2
+  half-block renderer. Quadrant is production-capable — deterministic,
+  calibrated, and permanently anchored — but remains opt-in: `auto` never
+  selects it.
+- Foreground-only color for the Quadrant renderer: one foreground
+  intensity per cell is derived from the maximum density among visible
+  subcells, and the terminal background color is intentionally never
+  used, so glyph geometry stays determined solely by the 2×2 visibility
+  mask. Effective no-color output remains ANSI-free.
+- Deterministic sparse background stars for the Quadrant renderer: stars
+  are rendered only in completely empty cells, using the existing
+  hash-based star convention (no new RNG stream), and remain uncolored
+  even when galaxy color is enabled.
+- Calibrated occupancy for the Quadrant renderer: the 0.26 target
+  occupancy — the target fraction of non-empty terminal cells, selected as
+  the `(1.0 - 0.26)` quantile over per-cell `max(TL, TR, BL, BR)` — was
+  measured against the quadrant topology and deliberately retained
+  (realized terminal-cell occupancy approximately 26.1% at 40×20).
+- Permanent no-color visual anchors for the Quadrant renderer at 40×20 for
+  seeds 4, 16, and 42, covering shape-aware generation, quadrant
+  occupancy preparation, glyph geometry, and the deterministic star
+  overlay. Colored output is covered by focused unit tests rather than
+  ANSI fingerprints.
+- Deterministic `spiral/dust/v1` dust-lane configuration for the Spiral
+  model, derived from an isolated versioned feature stream: a scene is
+  dusty with probability 0.60, with a tau amplitude (`0.25..0.55`), a
+  signed arm-phase offset (`-0.30..0.30` rad), and a lane width factor
+  (`0.5..1.2`).
+- Dust-lane extinction for the Spiral model: a deterministic multiplicative
+  attenuation of the luminous disk (disk plus gated arms times
+  clumpiness) using `tau = strength * profile * radial_gate` and
+  `extinction = exp(-tau)`. Dust lanes follow the stellar-arm geometry as
+  a signed phase-offset copy with per-arm Gaussian profiles combined by
+  maximum (not sum). The bulge, stellar bar, and stellar knots are not
+  attenuated, and dustless scenes keep the exact pre-dust density
+  expression.
 
 ### Changed
 
-- Made Spiral sampling geometry shape-aware: `SamplingGeometry` in `src/galaxy.rs` now derives its logical dimensions from `CellSamplingShape` via a new `for_terminal(width, height, shape)` constructor, and the Spiral generator has an internal shape-aware path (`generate_spiral_galaxy_with_shape`). The production path always uses `HALF_BLOCK` (1×2), reproducing the legacy `W×2H` logical / `3W×6H` supersampled dimensions bit-for-bit; `QUADRANT` (2×2, logical `2W×2H` / supersampled `6W×6H`) is available to the generator and to tests but is not yet consumed by any renderer and is not user-selectable. Renderer-preserving: existing outputs remain bit-for-bit identical.
-- Introduced the terminal-cell sampling topology abstraction (`CellSamplingShape` and `Quadrant` in `src/render/topology.rs`): the current 1×2 half-block shape, the future 2×2 quadrant shape, row-major TL/TR/BL/BR subcell ordering, and the terminal-cell -> logical-density index mapping. Internal renderer-preserving preparation: production rendering, density generation, and all visual outputs remain bit-for-bit unchanged; the 2×2 topology is defined and tested only.
-- Made the Spiral sampling geometry explicit (`SamplingGeometry` in `src/galaxy.rs`): terminal W×H -> logical W×2H (1×2 logical samples per terminal cell) -> 3× supersampling -> average reduction back to W×2H. Renderer-preserving: existing outputs remain bit-for-bit identical.
+- Default Spiral scenes can now carry dust lanes: about 60% of Spiral
+  scenes render attenuated dust lanes along the spiral arms, which
+  legitimately changes the default Spiral output for those seeds.
+- Explicit `--renderer quadrant` with `elliptical`, `cluster`, or
+  `starfield` returns a clear CLI error instead of silently falling back,
+  and `--model random --renderer quadrant` is rejected before random model
+  resolution, so the request never succeeds or fails by chance of the
+  model draw.
+- Spiral sampling is now shape-aware: the generator derives its logical
+  dimensions from an explicit terminal-cell topology (`CellSamplingShape`).
+  All legacy paths use `HALF_BLOCK` (1×2, logical `W×2H`, supersampled
+  `3W×6H`); the quadrant path uses `QUADRANT` (2×2, logical `2W×2H`,
+  supersampled `6W×6H`). For a fixed seed the RNG stream is identical
+  regardless of shape.
+- Scene resolution is now split from density generation: the engine
+  resolves a request into a concrete model and a concrete seed (the seed
+  is concretized exactly once) before generating density at the requested
+  sampling shape. The legacy `generate_scene` entry point is preserved and
+  produces bit-identical output to the split path for `HALF_BLOCK`.
+
+### Compatibility / Determinism
+
+- Legacy RNG contracts preserved: no legacy RNG draw was added or
+  reordered. The `spiral/bar/v1` and `spiral/dust/v1` streams are
+  isolated versioned feature streams that never advance the legacy scene
+  RNG or each other, and the `random` model's resolution table is frozen.
+- Legacy renderer contracts preserved: HalfBlock, Shade, and ASCII
+  rendering, the per-subcell visibility rule, and the deterministic
+  background-star policy are unchanged. Scenes whose density is unchanged
+  render bit-for-bit identically to v0.5.0; the legacy anchors for seeds
+  16 and 42 are unchanged. The legacy anchor for seed 4 was intentionally
+  re-captured because seed 4 is one of the scenes that now carries dust
+  lanes.
+- Spiral `auto` intentionally remains HalfBlock: the measured default
+  overhead of Quadrant is only about +2–3 ms at 40×20 (performance is not
+  the blocker), but switching the default would immediately and visibly
+  change the default Spiral output in a tool commonly used on shell
+  startup. This is a product and backward-compatibility decision, not a
+  renderer-correctness limitation; the default may be reconsidered after
+  at least one release of opt-in Quadrant exposure without meaningful
+  compatibility reports, or after Quadrant support expands beyond Spiral,
+  and would be an explicitly announced decision.
 
 ## [0.5.0] - 2026-09-09
 
@@ -36,4 +117,6 @@ Changelog tracking starts with v0.5.0.
 - Optional morphology features no longer perturb the legacy Spiral random-number stream.
 - Procedural-galaxy documentation now describes barred morphology and reproducibility guarantees.
 
+[Unreleased]: https://github.com/elacerda/astrofetch/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/elacerda/astrofetch/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/elacerda/astrofetch/compare/v0.4.0...v0.5.0
