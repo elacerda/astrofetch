@@ -25,7 +25,7 @@ use app::App;
 
 fn main() {
     if let Err(e) = App::run() {
-        eprintln!("Erro: {}", e);
+        eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 }
