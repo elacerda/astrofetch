@@ -1,6 +1,6 @@
 [package]
 name = "astrofetch"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 rust-version = "1.88"
 description = "A screenFetch-inspired terminal app with procedural astrophysical ASCII art"

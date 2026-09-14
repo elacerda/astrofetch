@@ -6,6 +6,19 @@ Changelog tracking starts with v0.5.0.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-14
+
+### Fixed
+
+- Fixed repeated `setup-shell` runs unnecessarily rewriting an already
+  managed startup block and reporting it as updated.
+- Standardized top-level CLI error prefixes to English.
+
+### Documentation
+
+- Corrected post-v1.0 wording around visual baselines, Quadrant topology
+  states, renderer compatibility, and pinned-install examples.
+
 ## [1.0.0] - 2026-09-14
 
 The first stable release. It introduces the opt-in 2×2 Quadrant renderer
@@ -117,6 +130,7 @@ built on a shape-aware sampling and scene-resolution architecture.
 - Optional morphology features no longer perturb the legacy Spiral random-number stream.
 - Procedural-galaxy documentation now describes barred morphology and reproducibility guarantees.
 
-[Unreleased]: https://github.com/elacerda/astrofetch/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/elacerda/astrofetch/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/elacerda/astrofetch/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/elacerda/astrofetch/compare/v0.5.0...v1.0.0
 [0.5.0]: https://github.com/elacerda/astrofetch/compare/v0.4.0...v0.5.0
