@@ -5,9 +5,10 @@
 //! structural refactors must preserve the current Spiral output unless a model
 //! change is explicitly intended.
 //!
-//! Seed 4 is unbarred under `spiral/bar/v1` and retains its Phase 0 anchors.
-//! Seeds 16 and 42 are barred and are anchored to the accepted Phase 1B barred
-//! morphology.
+//! Seed 4 is unbarred under `spiral/bar/v1`; its legacy anchors were
+//! re-captured when the deterministic dust lanes were accepted (replacing the
+//! original Phase 0 values). Seeds 16 and 42 are barred and are anchored to the
+//! accepted Phase 1B barred morphology.
 
 use crate::engine::ArtModel;
 use crate::render::topology::CellSamplingShape;
@@ -97,8 +98,9 @@ fn spiral_quadrant_no_color_render_signature(seed: u64) -> u64 {
     hash_terminal_lines(&lines)
 }
 
-/// Phase 0 visual-baseline anchors captured from main commit
-/// `f036c2b230dc5a1faf6f9dcb2614b12d0e7726e8`.
+/// Legacy visual-baseline anchors for the unbarred seed 4, first captured in
+/// Phase 0 from main commit `f036c2b230dc5a1faf6f9dcb2614b12d0e7726e8` and
+/// re-captured when the deterministic dust lanes were explicitly accepted.
 ///
 /// Ordering for each seed: HalfBlock, Shade, ASCII.
 const SEED_4_ANCHORS: [u64; 3] = [
@@ -124,8 +126,8 @@ const SEED_42_ANCHORS: [u64; 3] = [
 
 #[test]
 fn test_spiral_unbarred_seed_4_visual_anchors_unchanged() {
-    // Seed 4 is unbarred under `spiral/bar/v1`, so its visual output must
-    // remain identical to the Phase 0 baseline.
+    // Seed 4 is unbarred under `spiral/bar/v1`; its visual output must remain
+    // identical to the accepted anchors (re-captured with the dust-lane change).
     let actual = [
         spiral_no_color_render_signature(4, EffectiveRenderer::HalfBlock),
         spiral_no_color_render_signature(4, EffectiveRenderer::Shade),

@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
 Install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v0.5.0
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v1.0.0
 ```
 
 Check the installed binary:
@@ -103,7 +103,8 @@ astrofetch --model cluster
 astrofetch --model starfield
 ```
 
-Choose a renderer (works with every model):
+Choose a renderer (half-block, shade, and ascii work with every model;
+quadrant is Spiral only):
 
 ```bash
 astrofetch --renderer auto      # Default: HalfBlock for galaxies, dedicated renderer for Starfield

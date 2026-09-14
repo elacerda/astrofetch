@@ -578,7 +578,7 @@ mod tests {
     fn test_spiral_half_block_split_bit_identical() {
         // O caminho split deve permanecer bit-a-bit idêntico ao
         // generate_scene legado para os seeds congelados da Phase 5A
-        // (unbarred 4, barred 16, barred+dusty 42).
+        // (unbarred 4, barred 16, barred 42).
         for seed in [4_u64, 16, 42] {
             let legacy = ArtModel::Spiral.generate_scene(30, 15, Some(seed));
             let resolved = ArtModel::Spiral.resolve_scene(Some(seed));

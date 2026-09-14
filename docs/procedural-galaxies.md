@@ -505,8 +505,9 @@ Uses ASCII characters ordered by intensity:
 
 The experimental `--renderer quadrant` option renders a Spiral galaxy with
 the 2×2 quadrant topology: each terminal cell owns four logical subcells
-(TL, TR, BL, BR) and one of 16 Unicode quadrant/half/full-block glyphs is
-selected by the 4-bit visibility mask of those subcells. The
+(TL, TR, BL, BR); the 4-bit visibility mask of those subcells selects one of
+16 topology states — empty space (mask 0) or one of 15 visible Unicode
+quadrant/half/full-block glyphs. The
 application-level path also overlays deterministic sparse background stars
 on completely empty cells (mask == 0).
 
