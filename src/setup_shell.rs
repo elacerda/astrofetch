@@ -215,8 +215,29 @@ pub fn insert_or_update_managed_block(
     block: &str,
     force: bool,
 ) -> Result<ManagedBlockResult, AppError> {
-    let content_without_legacy = remove_legacy_startup_blocks(existing_content);
-    let removed_legacy_blocks = content_without_legacy != existing_content;
+    // A managed block's body can be byte-identical to a legacy startup block,
+    // so legacy removal must never apply inside the managed block itself.
+    let (content_without_legacy, removed_legacy_blocks) =
+        match find_managed_block(existing_content)? {
+            Some((start, end)) => {
+                let before = &existing_content[..start];
+                let after = &existing_content[end..];
+                let cleaned_before = remove_legacy_startup_blocks(before);
+                let cleaned_after = remove_legacy_startup_blocks(after);
+                let mut content = String::with_capacity(
+                    cleaned_before.len() + (end - start) + cleaned_after.len(),
+                );
+                content.push_str(&cleaned_before);
+                content.push_str(&existing_content[start..end]);
+                content.push_str(&cleaned_after);
+                (content, cleaned_before != before || cleaned_after != after)
+            }
+            None => {
+                let cleaned = remove_legacy_startup_blocks(existing_content);
+                let removed = cleaned != existing_content;
+                (cleaned, removed)
+            }
+        };
 
     match find_managed_block(&content_without_legacy)? {
         Some((start, end))
@@ -574,6 +595,20 @@ mod tests {
         assert!(content.is_empty());
 
         fs::remove_file(target_path).unwrap();
+    }
+
+    #[test]
+    fn test_reinsert_identical_generated_block_is_no_op() {
+        // Re-running setup with the exact block that is already installed must
+        // be a no-op, even though the block body matches a legacy startup block.
+        let block = shell_block(SetupShell::Bash, false);
+        let existing = "before\nexport FOO=bar\n";
+        let first = insert_or_update_managed_block(existing, &block, false).unwrap();
+        assert_eq!(first.action, ManagedBlockAction::Inserted);
+
+        let second = insert_or_update_managed_block(&first.content, &block, false).unwrap();
+        assert_eq!(second.action, ManagedBlockAction::AlreadyInstalled);
+        assert_eq!(second.content, first.content);
     }
 
     #[test]
