@@ -528,9 +528,17 @@ Current scope (by design, for this phase):
   `render_quadrant_colored` primitives intentionally remain star-free
   reference and compatibility functions (frozen Phase-5B/6A behavior,
   exercised by tests only).
-- **Visually accepted through Phase 6C, not yet anchored**: the output
-  has been visually accepted through Phase 6C (occupancy calibration),
-  but permanent Quadrant visual anchors remain deferred to Phase 6D.
+- **Permanently anchored (Phase 6D)**: the output was visually accepted
+  through Phase 6C (occupancy calibration), and permanent no-color
+  Quadrant anchors now exist in `src/visual_baseline.rs` for seeds 4, 16,
+  and 42 at the fixed 40×20 terminal size. The fingerprint covers the
+  production star-aware Quadrant path
+  (`resolve_scene` -> `generate_density` at `QUADRANT` ->
+  `prepare_density_with_shape` at `QUADRANT` ->
+  `render_quadrant_with_stars`), including the deterministic background
+  stars. Occupancy remains calibrated at 0.26. Foreground color remains
+  unit-tested rather than ANSI-fingerprinted. Quadrant remains opt-in:
+  `auto` still never selects it.
 - **Occupancy calibrated (Phase 6C)**: the 0.26 target occupancy was
   deliberately retained; see the calibration record below.
 
@@ -564,8 +572,9 @@ default:
 - **Conclusion**: no topology-specific occupancy target is required;
   the Phase 6A foreground color and Phase 6B background stars resolved
   the two main perceptual gaps without occupancy retuning. Quadrant is
-  visually accepted through Phase 6C; permanent visual anchors remain
-  deferred to Phase 6D, and `auto` still never selects Quadrant.
+  visually accepted through Phase 6C; its permanent no-color visual
+  anchors were captured in Phase 6D, and `auto` still never selects
+  Quadrant.
 
 ### Galaxy renderer sampling
 

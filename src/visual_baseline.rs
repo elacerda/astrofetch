@@ -10,9 +10,11 @@
 //! morphology.
 
 use crate::engine::ArtModel;
+use crate::render::topology::CellSamplingShape;
 use crate::render::{
-    prepare_density, render_ascii, render_half_blocks, render_shades, ColorPalette,
-    EffectiveRenderer, PreparedDensity, RenderProfile,
+    prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks,
+    render_quadrant_with_stars, render_shades, ColorPalette, EffectiveRenderer, PreparedDensity,
+    RenderProfile,
 };
 
 const BASELINE_WIDTH: usize = 40;
@@ -58,6 +60,41 @@ fn hash_terminal_lines(lines: &[String]) -> u64 {
     }
 
     hash
+}
+
+/// Phase 6D: no-color signature of the Spiral Quadrant renderer at
+/// 40×20, mirroring the production split engine path without going through
+/// `App` or `Terminal`:
+///
+/// `resolve_scene(seed)` -> `generate_density(..., QUADRANT)` ->
+/// `prepare_density_with_shape(..., QUADRANT)` ->
+/// `render_quadrant_with_stars(..., colors_enabled = false, Nebula)`.
+///
+/// The fingerprint covers the QUADRANT sampling output, normalization and
+/// stretch, the quadrant occupancy threshold (target 0.26), the 4-bit glyph
+/// geometry, and the deterministic background stars. It intentionally does
+/// not cover ANSI color bytes, so colored Quadrant remains protected by the
+/// focused unit tests and the colored/no-color geometry-identity invariant.
+fn spiral_quadrant_no_color_render_signature(seed: u64) -> u64 {
+    let resolved = ArtModel::Spiral.resolve_scene(Some(seed));
+    let density = ArtModel::Spiral.generate_density(
+        &resolved,
+        BASELINE_WIDTH,
+        BASELINE_HEIGHT,
+        CellSamplingShape::QUADRANT,
+    );
+    let profile =
+        RenderProfile::for_model_and_renderer(ArtModel::Spiral, EffectiveRenderer::Quadrant);
+    let prepared = prepare_density_with_shape(density, profile, CellSamplingShape::QUADRANT);
+
+    let PreparedDensity::Galaxy { density, threshold } = prepared else {
+        panic!("Spiral + Quadrant must use galaxy density preparation");
+    };
+
+    let canvas = density.into_rows();
+    let lines = render_quadrant_with_stars(&canvas, threshold, false, ColorPalette::Nebula);
+
+    hash_terminal_lines(&lines)
 }
 
 /// Phase 0 visual-baseline anchors captured from main commit
@@ -122,4 +159,45 @@ fn test_spiral_barred_seed_42_visual_anchors() {
     ];
 
     assert_eq!(actual, SEED_42_ANCHORS);
+}
+
+/// Phase 6D permanent no-color Quadrant anchors, captured from the
+/// production-equivalent split pipeline at the fixed 40×20 baseline size.
+///
+/// Seed 4: unbarred representative morphology.
+const SEED_4_QUADRANT_ANCHOR: u64 = 963437774247816460_u64;
+/// Seed 16: barred / long-arm morphology.
+const SEED_16_QUADRANT_ANCHOR: u64 = 1819724489803438532_u64;
+/// Seed 42: barred dense-core adversarial morphology.
+const SEED_42_QUADRANT_ANCHOR: u64 = 10539789323035215409_u64;
+
+#[test]
+fn test_spiral_quadrant_seed_4_visual_anchor() {
+    // Seed 4: unbarred representative morphology. Phase 6D acceptance: the
+    // no-color Quadrant output at 40×20 is permanently anchored.
+    assert_eq!(
+        spiral_quadrant_no_color_render_signature(4),
+        SEED_4_QUADRANT_ANCHOR
+    );
+}
+
+#[test]
+fn test_spiral_quadrant_seed_16_visual_anchor() {
+    // Seed 16: barred / long-arm morphology. Phase 6D acceptance: the
+    // no-color Quadrant output at 40×20 is permanently anchored.
+    assert_eq!(
+        spiral_quadrant_no_color_render_signature(16),
+        SEED_16_QUADRANT_ANCHOR
+    );
+}
+
+#[test]
+fn test_spiral_quadrant_seed_42_visual_anchor() {
+    // Seed 42: barred dense-core adversarial morphology. Phase 6D
+    // acceptance: the no-color Quadrant output at 40×20 is permanently
+    // anchored.
+    assert_eq!(
+        spiral_quadrant_no_color_render_signature(42),
+        SEED_42_QUADRANT_ANCHOR
+    );
 }

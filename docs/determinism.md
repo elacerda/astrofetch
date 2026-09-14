@@ -44,6 +44,8 @@ Seed 4 is unbarred under `spiral/bar/v1` and retains its Phase 0 anchors. Seeds 
 
 The visual baseline deliberately covers renderer output rather than hashing the intermediate floating-point density map. This protects the visible behavior that later renderer-preserving refactors must maintain while avoiding an unnecessary bitwise contract on every intermediate floating-point operation.
 
+The legacy HalfBlock, Shade, and ASCII anchors remain unchanged. Phase 6D adds no-color 40×20 Quadrant anchors for the same seeds 4, 16, and 42. The Quadrant fingerprint follows the split QUADRANT-shape generation and preparation path (`resolve_scene` -> `generate_density` at `QUADRANT` -> `prepare_density_with_shape` at `QUADRANT` -> `render_quadrant_with_stars`) and includes the deterministic background stars. Colored Quadrant ANSI bytes are intentionally not fingerprinted; color semantics are covered instead by focused unit tests and the colored/no-color geometry-identity invariant.
+
 Intentional morphology changes update visual expectations only when their changed behavior is explicitly accepted. The legacy RNG checkpoint remains a separate guard against accidentally perturbing unrelated random streams.
 
 ## Scope of the guarantee
