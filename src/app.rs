@@ -2,14 +2,16 @@ use crate::cli::{Args, ArtModel, Command, RendererChoice};
 use crate::display_plan::{DisplayPlanner, OutputMode, PlannerRequest};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
+use crate::galaxy::{spiral_animation_phase_rad, PreparedSpiralScene};
 use crate::layout::compose_layout;
 use crate::render::topology::CellSamplingShape;
 use crate::render::{
-    prepare_density, prepare_density_with_shape, render_ascii, render_ascii_with_twinkle,
-    render_half_blocks, render_half_blocks_with_twinkle, render_quadrant_with_stars,
-    render_quadrant_with_stars_at_frame, render_shades, render_shades_with_twinkle,
-    render_starfield, render_starfield_with_twinkle, sampling_shape_for, ColorPalette,
-    EffectiveRenderer, PreparedDensity, RenderProfile, StarTwinkleFrame,
+    prepare_density, prepare_density_with_shape, prepare_galaxy_density_pinned, render_ascii,
+    render_ascii_with_twinkle, render_half_blocks, render_half_blocks_with_twinkle,
+    render_quadrant_with_stars, render_quadrant_with_stars_at_frame, render_shades,
+    render_shades_with_twinkle, render_starfield, render_starfield_with_twinkle,
+    robust_normalization_bounds, sampling_shape_for, ColorPalette, EffectiveRenderer,
+    PreparedDensity, RenderProfile, StarTwinkleFrame,
 };
 use crate::system::{
     get_disk_detail_fields, get_display_field_order, CollectionProfile, SystemSnapshot,
@@ -59,6 +61,10 @@ struct PreparedArt {
     resolved_model: EngineModel,
     /// Concrete seed captured during scene resolution.
     scene_seed: u64,
+    /// Terminal art width used during density generation.
+    art_width: usize,
+    /// Terminal art height used during density generation.
+    art_height: usize,
     /// Effective terminal-cell sampling shape used during generation.
     sampling_shape: CellSamplingShape,
     /// Renderer selected after CLI/model resolution.
@@ -69,6 +75,24 @@ struct PreparedArt {
     colors_enabled: bool,
     /// Resolved palette shared by every frame.
     palette: ColorPalette,
+    /// A5: frozen Spiral scene for intermediate animation frames.
+    spiral_animation: Option<SpiralAnimationPrep>,
+}
+
+/// A5 Spiral intermediate-frame state (Spiral scenes only).
+///
+/// `scene` is the single frozen morphology derivation for the concrete scene
+/// seed (spiral configuration, bar, dust, and noise seed). `bounds` are the
+/// static frame's robust normalization percentile bounds, captured from the
+/// same raw density the static preparation consumed. When `bounds` is
+/// `None` (a degenerate static normalization), intermediate frames fall back
+/// to the prepared static density so no new structure can appear mid-sequence.
+#[derive(Debug, Clone)]
+struct SpiralAnimationPrep {
+    /// Frozen Spiral morphology for the concrete scene seed.
+    scene: PreparedSpiralScene,
+    /// Static-frame robust normalization bounds, if usable.
+    bounds: Option<(f64, f64)>,
 }
 
 /// Row-materialized form of one prepared density.
@@ -410,6 +434,17 @@ impl App {
         };
 
         let profile = RenderProfile::for_model_and_renderer(resolved_model, effective_renderer);
+        // A5: for Spiral scenes, freeze the morphology once from the same
+        // concrete seed the static generation used, and capture the static
+        // frame's robust normalization bounds from the raw density before
+        // preparation consumes it. Non-Spiral models never build this state.
+        let spiral_animation = (resolved_model == EngineModel::Spiral).then(|| {
+            let bounds = robust_normalization_bounds(&density, profile.normalization);
+            SpiralAnimationPrep {
+                scene: PreparedSpiralScene::for_scene_seed(scene_seed),
+                bounds,
+            }
+        });
         // HALF_BLOCK keeps the legacy preparation call bit-for-bit; only
         // QUADRANT goes through the shape-aware preparation.
         let prepared = if shape == CellSamplingShape::QUADRANT {
@@ -432,11 +467,14 @@ impl App {
         Ok(PreparedArt {
             resolved_model,
             scene_seed,
+            art_width,
+            art_height,
             sampling_shape: shape,
             effective_renderer,
             prepared_density,
             colors_enabled,
             palette: effective_palette,
+            spiral_animation,
         })
     }
 
@@ -446,13 +484,32 @@ impl App {
         terminal: &Terminal,
         frame: Option<StarTwinkleFrame>,
     ) -> Result<Vec<String>, AppError> {
+        Self::render_art_density(prepared, terminal, frame, &prepared.prepared_density, None)
+    }
+
+    /// Renders one frame from an explicit prepared density.
+    ///
+    /// `density` is normally `prepared.prepared_density`; A5 Spiral
+    /// intermediate frames pass a per-phase density instead. `star_canvas`
+    /// optionally pins the background-star decision (star seed and per-cell
+    /// local density) to a reference canvas, so a frame sequence whose
+    /// structure canvas varies per frame still shows the exact same
+    /// background stars. `None` keeps the legacy behavior: the star
+    /// decision reads the structure canvas itself.
+    fn render_art_density(
+        prepared: &PreparedArt,
+        terminal: &Terminal,
+        frame: Option<StarTwinkleFrame>,
+        density: &PreparedArtDensity,
+        star_canvas: Option<&[Vec<f64>]>,
+    ) -> Result<Vec<String>, AppError> {
         debug_assert_eq!(
             sampling_shape_for(prepared.resolved_model, prepared.effective_renderer),
             prepared.sampling_shape
         );
 
         let effective_colors = prepared.colors_enabled && terminal.colors_enabled();
-        match (&prepared.prepared_density, prepared.effective_renderer) {
+        match (density, prepared.effective_renderer) {
             (PreparedArtDensity::Starfield { canvas }, EffectiveRenderer::Starfield) => {
                 Ok(match frame {
                     Some(frame) => render_starfield_with_twinkle(
@@ -478,6 +535,7 @@ impl App {
                         effective_colors,
                         prepared.palette,
                         Some(frame),
+                        star_canvas,
                     ),
                     None => {
                         render_half_blocks(canvas, *threshold, effective_colors, prepared.palette)
@@ -492,6 +550,7 @@ impl App {
                         effective_colors,
                         prepared.palette,
                         Some(frame),
+                        star_canvas,
                     ),
                     None => render_shades(canvas, *threshold, effective_colors, prepared.palette),
                 })
@@ -504,6 +563,7 @@ impl App {
                         effective_colors,
                         prepared.palette,
                         Some(frame),
+                        star_canvas,
                     ),
                     None => render_ascii(canvas, *threshold, effective_colors, prepared.palette),
                 })
@@ -516,6 +576,7 @@ impl App {
                         effective_colors,
                         prepared.palette,
                         Some(frame),
+                        star_canvas,
                     ),
                     None => render_quadrant_with_stars(
                         canvas,
@@ -557,10 +618,81 @@ impl App {
                     frame_count: schedule.frame_count,
                 })
             };
-            frames.push(Self::render_prepared_art(prepared, terminal, frame)?);
+
+            // A5: intermediate Spiral frames re-evaluate the frozen
+            // morphology at the frame phase. Static endpoints and every
+            // non-Spiral model keep the prepared static density. When a
+            // per-phase density is rendered, the star decision is pinned to
+            // the static canvas so the background star field never re-rolls.
+            let frame_density = match (frame, prepared.spiral_animation.as_ref()) {
+                (Some(_), Some(prep)) if prep.bounds.is_some() => {
+                    let phase = spiral_animation_phase_rad(frame_index, schedule.frame_count);
+                    Some(Self::spiral_frame_density(prepared, &prep.scene, phase))
+                }
+                _ => None,
+            };
+            let (density, star_canvas): (&PreparedArtDensity, Option<&[Vec<f64>]>) =
+                match &frame_density {
+                    Some(frame_density) => {
+                        let static_canvas = match &prepared.prepared_density {
+                            PreparedArtDensity::Galaxy { canvas, .. } => Some(canvas.as_slice()),
+                            PreparedArtDensity::Starfield { .. } => None,
+                        };
+                        (frame_density, static_canvas)
+                    }
+                    None => (&prepared.prepared_density, None),
+                };
+
+            frames.push(Self::render_art_density(
+                prepared,
+                terminal,
+                frame,
+                density,
+                star_canvas,
+            )?);
         }
 
         Ok(frames)
+    }
+
+    /// A5: prepares one intermediate-frame density for a Spiral scene.
+    ///
+    /// The frozen scene morphology is re-evaluated at `phase` (no RNG draw is
+    /// consumed), then prepared with the static frame's threshold and the
+    /// static frame's pinned robust normalization bounds, so only the
+    /// angular pattern varies between frames. Callers guarantee that
+    /// `prepared.spiral_animation` exists with usable bounds.
+    fn spiral_frame_density(
+        prepared: &PreparedArt,
+        scene: &PreparedSpiralScene,
+        phase: f64,
+    ) -> PreparedArtDensity {
+        let threshold = match &prepared.prepared_density {
+            PreparedArtDensity::Galaxy { threshold, .. } => *threshold,
+            PreparedArtDensity::Starfield { .. } => {
+                unreachable!("Spiral scenes always prepare galaxy densities")
+            }
+        };
+        let bounds = prepared
+            .spiral_animation
+            .as_ref()
+            .and_then(|prep| prep.bounds)
+            .expect("spiral_frame_density is only called with usable bounds");
+        let profile = RenderProfile::for_model_and_renderer(
+            prepared.resolved_model,
+            prepared.effective_renderer,
+        );
+        let raw = scene.density_at(
+            prepared.art_width,
+            prepared.art_height,
+            prepared.sampling_shape,
+            phase,
+        );
+        let density = prepare_galaxy_density_pinned(&raw, profile, bounds);
+        PreparedArtDensity::Galaxy {
+            canvas: density.into_rows(),
+            threshold,
+        }
     }
 
     /// Shared art pipeline for logo-only and combined static output.
@@ -2062,5 +2194,277 @@ mod tests {
         for output in &outputs {
             assert_eq!(&output[art_height + 1..], info_lines.as_slice());
         }
+    }
+
+    // ===== A5: subtle spiral phase motion =====
+
+    #[test]
+    fn test_a5_spiral_animation_endpoints_static_and_intermediates_differ() {
+        // Byte-level A5 contract on real prepared scenes (barred seed 16 and
+        // unbarred+dusty seed 4): the endpoints are the static render, every
+        // intermediate frame drifts, and the visible geometry (line count
+        // and per-line visible width) never changes.
+        for (model, renderer, seed) in [
+            (ArtModel::Spiral, RendererChoice::HalfBlock, 16_u64),
+            (ArtModel::Spiral, RendererChoice::Quadrant, 4_u64),
+        ] {
+            let app = build_test_app_pipeline(model, renderer, Some(seed), true, false);
+            let terminal = Terminal::with_colors(true, false);
+            let prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+            let static_frame = app
+                .render_art(&terminal, false, EngineModel::Spiral, 40, 20)
+                .unwrap();
+            let frames = app.render_animation_frames(&terminal, &prepared).unwrap();
+
+            assert_eq!(frames.first(), Some(&static_frame));
+            assert_eq!(frames.last(), Some(&static_frame));
+            for frame in &frames[1..frames.len() - 1] {
+                assert_ne!(frame, &static_frame, "intermediate frame must drift");
+            }
+            let widths: Vec<usize> = static_frame
+                .iter()
+                .map(|line| visible_width(line))
+                .collect();
+            for frame in &frames {
+                assert_eq!(frame.len(), static_frame.len());
+                assert_eq!(
+                    frame
+                        .iter()
+                        .map(|line| visible_width(line))
+                        .collect::<Vec<_>>(),
+                    widths
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_a5_spiral_scene_morphology_is_frozen_for_the_scene_seed() {
+        // Scene identity: the prepared Spiral animation state holds exactly
+        // one morphology derivation, and it is the same immutable scene a
+        // fresh derivation from the concrete seed produces (no per-frame
+        // RNG re-roll). All morphology fields are individually pinned.
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::HalfBlock,
+            Some(16),
+            true,
+            false,
+        );
+        let prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+        let Some(spiral) = prepared.spiral_animation.as_ref() else {
+            panic!("Spiral preparation must build the A5 animation state");
+        };
+
+        let fresh = PreparedSpiralScene::for_scene_seed(prepared.scene_seed);
+        assert_eq!(
+            spiral.scene, fresh,
+            "frozen scene must match the seed derivation"
+        );
+        assert_eq!(
+            spiral.scene.config, fresh.config,
+            "spiral configuration must be identical"
+        );
+        assert_eq!(
+            spiral.scene.bar, fresh.bar,
+            "bar configuration must be identical"
+        );
+        assert_eq!(
+            spiral.scene.dust, fresh.dust,
+            "dust configuration must be identical"
+        );
+        assert_eq!(
+            spiral.scene.noise_seed, fresh.noise_seed,
+            "noise seed must be identical"
+        );
+    }
+
+    #[test]
+    fn test_a5_non_spiral_models_keep_the_legacy_frame_path() {
+        // Invariant 4: non-Spiral models must not build A5 state, and every
+        // frame must equal the legacy per-frame render of the prepared art
+        // (the pre-A5 behavior, byte for byte).
+        for (cli_model, engine_model) in [
+            (ArtModel::Elliptical, EngineModel::Elliptical),
+            (ArtModel::Cluster, EngineModel::Cluster),
+            (ArtModel::Starfield, EngineModel::Starfield),
+        ] {
+            let app = build_test_app_pipeline(
+                cli_model.clone(),
+                RendererChoice::Auto,
+                Some(42),
+                true,
+                false,
+            );
+            let terminal = Terminal::with_colors(true, false);
+            let prepared = app.prepare_art(false, engine_model, 40, 20).unwrap();
+            assert!(
+                prepared.spiral_animation.is_none(),
+                "non-Spiral models must not build A5 state"
+            );
+            let frames = app.render_animation_frames(&terminal, &prepared).unwrap();
+            let schedule = crate::animation::intro_schedule();
+            for (frame_index, frame) in frames.iter().enumerate() {
+                let is_static_endpoint = frame_index == 0
+                    || frame_index == schedule.frame_count.saturating_sub(1) as usize;
+                let context = if is_static_endpoint {
+                    None
+                } else {
+                    Some(StarTwinkleFrame {
+                        scene_seed: prepared.scene_seed,
+                        frame_index: frame_index as u32,
+                        frame_count: schedule.frame_count,
+                    })
+                };
+                let legacy = App::render_prepared_art(&prepared, &terminal, context)
+                    .expect("legacy frame render");
+                assert_eq!(
+                    frame, &legacy,
+                    "{cli_model:?} frame {frame_index} must be legacy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_a5_degenerate_bounds_fall_back_to_static_density() {
+        // Degenerate robust-bounds fallback: when the static Spiral
+        // normalization bounds are unavailable (None), the A5 dispatch must
+        // skip the pinned per-phase preparation and render every frame from
+        // the prepared static density. The pinned path panics on missing
+        // bounds, so a panic-free run proves the `bounds.is_some()` guard
+        // held; per-frame equality with the legacy static-density render
+        // proves the intermediate frames consume the static prepared
+        // density; endpoint equality keeps the first/final/static contract
+        // intact.
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::HalfBlock,
+            Some(16),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let mut prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+        let Some(prep) = prepared.spiral_animation.as_mut() else {
+            panic!("Spiral preparation must build the A5 animation state");
+        };
+        assert!(
+            prep.bounds.is_some(),
+            "sanity: a real Spiral scene must have usable static bounds"
+        );
+        prep.bounds = None; // simulate a degenerate static normalization
+
+        let schedule = crate::animation::intro_schedule();
+        let frames = app
+            .render_animation_frames(&terminal, &prepared)
+            .expect("degenerate-bounds frames must render without panic");
+        assert_eq!(frames.len(), schedule.frame_count as usize);
+
+        for (frame_index, frame) in frames.iter().enumerate() {
+            let is_static_endpoint =
+                frame_index == 0 || frame_index == schedule.frame_count.saturating_sub(1) as usize;
+            let context = if is_static_endpoint {
+                None
+            } else {
+                Some(StarTwinkleFrame {
+                    scene_seed: prepared.scene_seed,
+                    frame_index: frame_index as u32,
+                    frame_count: schedule.frame_count,
+                })
+            };
+            let legacy = App::render_prepared_art(&prepared, &terminal, context)
+                .expect("legacy static-density frame render");
+            assert_eq!(
+                frame, &legacy,
+                "frame {frame_index}: missing bounds must fall back to the static prepared density"
+            );
+        }
+
+        let static_frame =
+            App::render_prepared_art(&prepared, &terminal, None).expect("static frame render");
+        assert_eq!(&frames[0], &static_frame, "first frame must stay static");
+        assert_eq!(
+            &frames[frames.len() - 1],
+            &static_frame,
+            "final frame must stay static"
+        );
+    }
+
+    #[test]
+    fn test_a5_spiral_frame_density_keeps_static_threshold_and_scale() {
+        // The per-phase prepared density reuses the static frame's threshold
+        // and the static frame's robust normalization bounds: only the
+        // angular pattern varies, the presentation scale does not.
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::HalfBlock,
+            Some(16),
+            true,
+            false,
+        );
+        let prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+        let PreparedArtDensity::Galaxy {
+            canvas: static_canvas,
+            threshold,
+        } = &prepared.prepared_density
+        else {
+            panic!("Spiral must prepare a galaxy density");
+        };
+        let spiral = prepared.spiral_animation.as_ref().unwrap();
+
+        // Bounds captured from the same raw density the static preparation
+        // consumed: re-deriving them from the engine output must agree.
+        let scene = PreparedSpiralScene::for_scene_seed(prepared.scene_seed);
+        let raw = scene.density_at(40, 20, prepared.sampling_shape, 0.0);
+        let profile = RenderProfile::for_model_and_renderer(
+            prepared.resolved_model,
+            prepared.effective_renderer,
+        );
+        assert_eq!(
+            spiral.bounds,
+            robust_normalization_bounds(&raw, profile.normalization)
+        );
+
+        for frame in 1..5_u32 {
+            let phase = spiral_animation_phase_rad(frame, 6);
+            let frame_density = App::spiral_frame_density(&prepared, &spiral.scene, phase);
+            let PreparedArtDensity::Galaxy {
+                canvas,
+                threshold: frame_threshold,
+            } = &frame_density
+            else {
+                panic!("per-phase density must be a galaxy density");
+            };
+            assert_eq!(
+                *frame_threshold, *threshold,
+                "threshold must be static-pinned"
+            );
+            assert_eq!(canvas.len(), static_canvas.len());
+            for (frame_row, static_row) in canvas.iter().zip(static_canvas.iter()) {
+                assert_eq!(frame_row.len(), static_row.len());
+            }
+        }
+    }
+
+    #[test]
+    fn test_a5_spiral_animation_is_deterministic_across_independent_preparations() {
+        // Same seed + same frame => byte-identical rendered frames, even
+        // when the whole preparation pipeline runs independently twice.
+        let render_sequence = |seed: u64| -> Vec<Vec<String>> {
+            let app = build_test_app_pipeline(
+                ArtModel::Spiral,
+                RendererChoice::Ascii,
+                Some(seed),
+                true,
+                false,
+            );
+            let terminal = Terminal::with_colors(true, false);
+            let prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+            app.render_animation_frames(&terminal, &prepared)
+                .expect("frame sequence")
+        };
+        assert_eq!(render_sequence(4), render_sequence(4));
+        assert_eq!(render_sequence(42), render_sequence(42));
     }
 }

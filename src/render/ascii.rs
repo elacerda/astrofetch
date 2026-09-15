@@ -23,18 +23,29 @@ pub fn render_ascii(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
-    render_ascii_with_twinkle(canvas, threshold, colors_enabled, palette, None)
+    render_ascii_with_twinkle(canvas, threshold, colors_enabled, palette, None, None)
 }
 
 /// Renders ASCII art with an optional deterministic star-twinkle frame.
+///
+/// `star_canvas` optionally pins the background-star decision (star seed and
+/// per-cell local density) to a reference canvas, so that a frame sequence
+/// whose structure canvas varies per frame still shows the exact same
+/// background stars. When `None`, the star decision uses `canvas` itself
+/// (the legacy behavior).
 pub(crate) fn render_ascii_with_twinkle(
     canvas: &[Vec<f64>],
     threshold: f64,
     colors_enabled: bool,
     palette: ColorPalette,
     frame: Option<StarTwinkleFrame>,
+    star_canvas: Option<&[Vec<f64>]>,
 ) -> Vec<String> {
-    let star_seed = star_field_seed(canvas);
+    // The background-star decision is pinned to the reference star canvas
+    // when one is supplied (A5), so the star field never re-rolls between
+    // frames of an animated sequence.
+    let star_source = star_canvas.unwrap_or(canvas);
+    let star_seed = star_field_seed(star_source);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
 
     for y in (0..canvas.len()).step_by(2) {
@@ -69,10 +80,22 @@ pub(crate) fn render_ascii_with_twinkle(
                     line.push_plain(ch);
                 }
             } else {
-                // No visible galaxy - fall back to background star or space
+                // No visible galaxy - fall back to background star or space.
+                // The star decision reads the (pinned) star canvas, not the
+                // per-frame structure canvas.
+                let star_top = star_source
+                    .get(y)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
+                let star_bottom = star_source
+                    .get(y + 1)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
                 if let Some(star_ch) =
-                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed).and_then(
-                        |base| {
+                    star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed)
+                        .and_then(|base| {
                             frame.map_or(Some(base), |frame| {
                                 twinkle_star_glyph(
                                     Some(base),
@@ -83,8 +106,7 @@ pub(crate) fn render_ascii_with_twinkle(
                                     frame.frame_count,
                                 )
                             })
-                        },
-                    )
+                        })
                 {
                     line.push_plain(star_ch);
                 } else {

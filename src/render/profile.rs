@@ -182,6 +182,136 @@ pub fn prepare_density_with_shape(
     }
 }
 
+/// Outcome of the robust percentile estimation.
+///
+/// Frozen semantics of `normalize_robust_map`: the three outcomes map to the
+/// exact legacy behaviors (all-zero map, all-positive-to-1.0 map, and the
+/// usual min-max-like rescale).
+enum RobustBounds {
+    /// No finite positive values: the normalized map is all zeros.
+    Empty,
+    /// Percentile range below `f64::EPSILON`: every finite positive value maps
+    /// to 1.0.
+    Degenerate,
+    /// Usual percentile bounds.
+    Range { low: f64, high: f64 },
+}
+
+/// Computes the frozen robust percentile bounds for `Normalization::Robust`.
+///
+/// Uses only finite positive values, sorts deterministically with
+/// `total_cmp`, and applies the exact legacy index expressions
+/// `floor((n - 1) * percentile)`. This is the single source of truth for the
+/// percentile estimation; callers must not re-derive the bounds.
+fn robust_bounds(density: &DensityMap, normalization: Normalization) -> RobustBounds {
+    let Normalization::Robust {
+        low_percentile,
+        high_percentile,
+    } = normalization
+    else {
+        unreachable!("robust_bounds requires Normalization::Robust")
+    };
+
+    // Flatten finite positive values
+    let mut values: Vec<f64> = density
+        .data
+        .iter()
+        .copied()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .collect();
+
+    if values.is_empty() {
+        return RobustBounds::Empty;
+    }
+
+    // Sort deterministically using total_cmp
+    values.sort_by(f64::total_cmp);
+
+    let n = values.len();
+    let low_idx = ((n - 1) as f64 * low_percentile.clamp(0.0, 1.0)).floor() as usize;
+    let high_idx = ((n - 1) as f64 * high_percentile.clamp(0.0, 1.0)).floor() as usize;
+
+    // Ensure high_idx >= low_idx
+    let high_idx = high_idx.max(low_idx);
+
+    let low_val = values[low_idx.min(n - 1)];
+    let high_val = values[high_idx.min(n - 1)];
+
+    let range = high_val - low_val;
+
+    if range.abs() < f64::EPSILON {
+        RobustBounds::Degenerate
+    } else {
+        RobustBounds::Range {
+            low: low_val,
+            high: high_val,
+        }
+    }
+}
+
+/// Extracts the robust percentile bounds used by [`normalize_robust_map`].
+///
+/// Returns `None` for `Normalization::None` and for the two degenerate
+/// outcomes (no finite positive values, or a percentile range below
+/// `f64::EPSILON`), where no usable fixed bounds exist. Used by the A5
+/// Spiral animation to pin intermediate frames to the static frame's
+/// normalization scale.
+pub(crate) fn robust_normalization_bounds(
+    density: &DensityMap,
+    normalization: Normalization,
+) -> Option<(f64, f64)> {
+    match normalization {
+        Normalization::None => None,
+        Normalization::Robust { .. } => match robust_bounds(density, normalization) {
+            RobustBounds::Range { low, high } => Some((low, high)),
+            RobustBounds::Empty | RobustBounds::Degenerate => None,
+        },
+    }
+}
+
+/// Applies fixed robust bounds and the profile stretch to a galaxy density.
+///
+/// This is the A5 pinned-preparation path: an intermediate animation frame is
+/// normalized with the static frame's percentile bounds instead of its own,
+/// so the presentation scale (and, on the caller side, the threshold) does
+/// not vary per frame. The per-value mapping is the exact legacy expression
+/// `(v - low) / range` clamped to `[0, 1]`, with non-finite, negative, and
+/// zero values mapped to 0.0.
+pub(crate) fn prepare_galaxy_density_pinned(
+    density: &DensityMap,
+    profile: RenderProfile,
+    bounds: (f64, f64),
+) -> DensityMap {
+    let normalized = apply_robust_bounds(density, bounds.0, bounds.1);
+    apply_stretch_to_density(&normalized, profile.stretch)
+}
+
+/// Applies the fixed robust bounds `(low_val, high_val)` to a density map
+/// using the exact legacy per-value mapping: non-finite, negative, and zero
+/// values become 0.0, everything else is `(v - low_val) / range` clamped to
+/// `[0, 1]`. This is the single mapping shared by `normalize_robust_map`
+/// (static path) and `prepare_galaxy_density_pinned` (A5 animation path), so
+/// the two cannot diverge.
+fn apply_robust_bounds(density: &DensityMap, low_val: f64, high_val: f64) -> DensityMap {
+    let range = high_val - low_val;
+    DensityMap {
+        width: density.width,
+        height: density.height,
+        data: density
+            .data
+            .iter()
+            .map(|v| {
+                if !v.is_finite() || *v <= 0.0 {
+                    0.0
+                } else {
+                    let clamped = (v - low_val) / range;
+                    clamped.clamp(0.0, 1.0)
+                }
+            })
+            .collect(),
+    }
+}
+
 /// Robust percentile normalization operating on DensityMap.
 ///
 /// This function:
@@ -192,68 +322,19 @@ pub fn prepare_density_with_shape(
 fn normalize_robust_map(density: &DensityMap, normalization: Normalization) -> DensityMap {
     match normalization {
         Normalization::None => density.clone(),
-        Normalization::Robust {
-            low_percentile,
-            high_percentile,
-        } => {
-            // Flatten finite positive values
-            let mut values: Vec<f64> = density
-                .data
-                .iter()
-                .copied()
-                .filter(|v| v.is_finite() && *v > 0.0)
-                .collect();
-
-            if values.is_empty() {
-                // Empty or zero map remains zero
-                return DensityMap::new(density.width, density.height);
-            }
-
-            // Sort deterministically using total_cmp
-            values.sort_by(f64::total_cmp);
-
-            let n = values.len();
-            let low_idx = ((n - 1) as f64 * low_percentile.clamp(0.0, 1.0)).floor() as usize;
-            let high_idx = ((n - 1) as f64 * high_percentile.clamp(0.0, 1.0)).floor() as usize;
-
-            // Ensure high_idx >= low_idx
-            let high_idx = high_idx.max(low_idx);
-
-            let low_val = values[low_idx.min(n - 1)];
-            let high_val = values[high_idx.min(n - 1)];
-
-            let range = high_val - low_val;
-
-            if range.abs() < f64::EPSILON {
-                // All finite positive values are equal
-                return DensityMap {
-                    width: density.width,
-                    height: density.height,
-                    data: density
-                        .data
-                        .iter()
-                        .map(|v| if v.is_finite() && *v > 0.0 { 1.0 } else { 0.0 })
-                        .collect(),
-                };
-            }
-
-            DensityMap {
+        Normalization::Robust { .. } => match robust_bounds(density, normalization) {
+            RobustBounds::Empty => DensityMap::new(density.width, density.height),
+            RobustBounds::Degenerate => DensityMap {
                 width: density.width,
                 height: density.height,
                 data: density
                     .data
                     .iter()
-                    .map(|v| {
-                        if !v.is_finite() || *v <= 0.0 {
-                            0.0
-                        } else {
-                            let clamped = (v - low_val) / range;
-                            clamped.clamp(0.0, 1.0)
-                        }
-                    })
+                    .map(|v| if v.is_finite() && *v > 0.0 { 1.0 } else { 0.0 })
                     .collect(),
-            }
-        }
+            },
+            RobustBounds::Range { low, high } => apply_robust_bounds(density, low, high),
+        },
     }
 }
 
@@ -1509,5 +1590,129 @@ mod tests {
             }
             PreparedDensity::Galaxy { .. } => panic!("Expected Starfield variant"),
         }
+    }
+
+    // ---- A5: pinned normalization for animation frames ----
+
+    #[test]
+    fn test_pinned_preparation_matches_normal_preparation_bit_for_bit() {
+        // Pinning a density to its own static bounds must reproduce the
+        // normal preparation exactly (same mapping, same stretch), for the
+        // frozen audit seeds and both sampling shapes.
+        for seed in [4_u64, 16, 5] {
+            let density = crate::galaxy::PreparedSpiralScene::for_scene_seed(seed).density_at(
+                30,
+                15,
+                CellSamplingShape::HALF_BLOCK,
+                0.0,
+            );
+            let profile = RenderProfile::for_model(ArtModel::Spiral);
+
+            let PreparedDensity::Galaxy {
+                density: regular,
+                threshold: _,
+            } = prepare_density_with_shape(density.clone(), profile, CellSamplingShape::HALF_BLOCK)
+            else {
+                panic!("Spiral must use galaxy preparation");
+            };
+
+            let bounds = robust_normalization_bounds(&density, profile.normalization)
+                .expect("a real Spiral scene must have usable robust bounds");
+            let pinned = prepare_galaxy_density_pinned(&density, profile, bounds);
+
+            assert_eq!(
+                pinned.data, regular.data,
+                "seed {seed}: pinned self-normalization must be bit-identical"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pinned_preparation_uses_reference_bounds_not_own() {
+        // Pinning a phase-shifted density to the static frame's bounds must
+        // (a) stay within [0, 1] after the mapping and (b) differ from
+        // self-normalization, proving the reference bounds are actually used.
+        let seed = 4_u64;
+        let scene = crate::galaxy::PreparedSpiralScene::for_scene_seed(seed);
+        let static_density = scene.density_at(30, 15, CellSamplingShape::HALF_BLOCK, 0.0);
+        let phased_density = scene.density_at(
+            30,
+            15,
+            CellSamplingShape::HALF_BLOCK,
+            crate::galaxy::spiral_animation_phase_rad(2, 6),
+        );
+        let profile = RenderProfile::for_model(ArtModel::Spiral);
+
+        let bounds = robust_normalization_bounds(&static_density, profile.normalization)
+            .expect("static scene must have usable robust bounds");
+
+        let pinned = prepare_galaxy_density_pinned(&phased_density, profile, bounds);
+        assert!(
+            pinned.data.iter().all(|v| (0.0..=1.0).contains(v)),
+            "pinned normalization must stay within [0, 1]"
+        );
+
+        let PreparedDensity::Galaxy {
+            density: self_normalized,
+            ..
+        } = prepare_density_with_shape(
+            phased_density.clone(),
+            profile,
+            CellSamplingShape::HALF_BLOCK,
+        )
+        else {
+            panic!("Spiral must use galaxy preparation");
+        };
+        assert_ne!(
+            pinned.data, self_normalized.data,
+            "pinned output must differ from self-normalization (reference bounds must be used)"
+        );
+    }
+
+    #[test]
+    fn test_robust_normalization_bounds_degenerate_cases() {
+        let profile = RenderProfile::for_model(ArtModel::Spiral);
+
+        // Normalization::None never yields bounds.
+        assert_eq!(
+            robust_normalization_bounds(&DensityMap::new(4, 4), Normalization::None),
+            None
+        );
+
+        // An all-zero map has no finite positive values.
+        assert_eq!(
+            robust_normalization_bounds(&DensityMap::new(4, 4), profile.normalization),
+            None
+        );
+
+        // A constant positive map has a degenerate (zero) percentile range.
+        let constant = DensityMap {
+            width: 4,
+            height: 4,
+            data: vec![0.5; 16],
+        };
+        assert_eq!(
+            robust_normalization_bounds(&constant, profile.normalization),
+            None
+        );
+
+        // A varied positive map yields usable bounds in range order.
+        let varied = DensityMap {
+            width: 10,
+            height: 10,
+            data: (0..100).map(|i| 0.01 * (i as f64)).collect(),
+        };
+        let Some((low, high)) = robust_normalization_bounds(&varied, profile.normalization) else {
+            panic!("a varied map must yield usable bounds");
+        };
+        assert!(
+            low > 0.0 && high > low,
+            "bounds must be ordered positive values"
+        );
+        assert!(low <= 0.10 + 1.0e-12, "low bound near the 2nd percentile");
+        assert!(
+            high >= 0.90 - 1.0e-12,
+            "high bound near the 98th percentile"
+        );
     }
 }

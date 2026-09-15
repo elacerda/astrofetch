@@ -15,6 +15,7 @@ pub use ascii::render_ascii;
 pub(crate) use ascii::render_ascii_with_twinkle;
 pub use color::ColorPalette;
 pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
+pub(crate) use profile::{prepare_galaxy_density_pinned, robust_normalization_bounds};
 pub(crate) use quadrant::{render_quadrant_with_stars, render_quadrant_with_stars_at_frame};
 pub use shade::render_shades;
 pub(crate) use shade::render_shades_with_twinkle;
@@ -187,18 +188,26 @@ pub fn render_half_blocks(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
-    render_half_blocks_with_twinkle(canvas, threshold, colors_enabled, palette, None)
+    render_half_blocks_with_twinkle(canvas, threshold, colors_enabled, palette, None, None)
 }
 
 /// Renders half-block art with an optional deterministic star-twinkle frame.
+///
+/// `star_canvas` optionally pins the background-star decision (star seed and
+/// per-cell local density) to a reference canvas, so that a frame sequence
+/// whose structure canvas varies per frame still shows the exact same
+/// background stars. When `None`, the star decision uses `canvas` itself
+/// (the legacy behavior).
 pub(crate) fn render_half_blocks_with_twinkle(
     canvas: &[Vec<f64>],
     threshold: f64,
     colors_enabled: bool,
     palette: ColorPalette,
     frame: Option<StarTwinkleFrame>,
+    star_canvas: Option<&[Vec<f64>]>,
 ) -> Vec<String> {
-    let star_seed = star_field_seed(canvas);
+    let star_source = star_canvas.unwrap_or(canvas);
+    let star_seed = star_field_seed(star_source);
 
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -222,9 +231,21 @@ pub(crate) fn render_half_blocks_with_twinkle(
             if !colors_enabled {
                 let galaxy_ch = glyph_for_half_block(top_visible, bottom_visible);
                 if galaxy_ch == ' ' {
-                    // Only inject background star if neither half is visible
+                    // Only inject background star if neither half is visible.
+                    // The star decision reads the (pinned) star canvas, not
+                    // the per-frame structure canvas.
+                    let star_top = star_source
+                        .get(y)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let star_bottom = star_source
+                        .get(y + 1)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
                     if let Some(star_ch) = maybe_twinkle_star(
-                        star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed),
+                        star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
                         x,
                         y / 2,
                         frame,
@@ -259,9 +280,20 @@ pub(crate) fn render_half_blocks_with_twinkle(
                 line.push_cell('▄', Some(fg), None);
             } else {
                 // Neither visible: plain space or background star
-                // Always emit a cell to preserve terminal width
+                // Always emit a cell to preserve terminal width. The star
+                // decision reads the (pinned) star canvas.
+                let star_top = star_source
+                    .get(y)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
+                let star_bottom = star_source
+                    .get(y + 1)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
                 let ch = maybe_twinkle_star(
-                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed),
+                    star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
                     x,
                     y / 2,
                     frame,
@@ -911,7 +943,14 @@ mod tests {
         let cases = [
             (
                 render_half_blocks(&half_canvas, 0.5, false, DEFAULT_PALETTE),
-                render_half_blocks_with_twinkle(&half_canvas, 0.5, false, DEFAULT_PALETTE, frame),
+                render_half_blocks_with_twinkle(
+                    &half_canvas,
+                    0.5,
+                    false,
+                    DEFAULT_PALETTE,
+                    frame,
+                    None,
+                ),
             ),
             (
                 crate::render::render_shades(&half_canvas, 0.5, false, DEFAULT_PALETTE),
@@ -921,6 +960,7 @@ mod tests {
                     false,
                     DEFAULT_PALETTE,
                     frame,
+                    None,
                 ),
             ),
             (
@@ -931,6 +971,7 @@ mod tests {
                     false,
                     DEFAULT_PALETTE,
                     frame,
+                    None,
                 ),
             ),
             (
@@ -941,6 +982,7 @@ mod tests {
                     false,
                     DEFAULT_PALETTE,
                     frame,
+                    None,
                 ),
             ),
         ];

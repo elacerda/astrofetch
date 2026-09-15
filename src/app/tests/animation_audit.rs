@@ -238,8 +238,14 @@ struct FrameMetrics {
     position_moved_fraction: Vec<f64>,
     /// Per intermediate frame: number of stars that moved.
     position_moved_count: Vec<usize>,
-    /// Per intermediate frame: ground-truth stars missing from the output.
+    /// Per intermediate frame: ground-truth stars whose cell is empty space
+    /// (a pinned star may never vanish into space).
     missing: Vec<usize>,
+    /// Per intermediate frame: ground-truth stars hidden behind shifted
+    /// galaxy structure (allowed only for the A5 Spiral arm motion).
+    occluded: Vec<usize>,
+    /// Frame-0 visible structure cells (non-space, non-star-tier glyphs).
+    visible_cells: usize,
     /// Per intermediate frame: output stars absent from the ground truth.
     extra: Vec<usize>,
     /// Per intermediate frame: non-star cells that differ from frame 0.
@@ -282,6 +288,7 @@ fn measure_scene(
     let mut position_moved_fraction = Vec::with_capacity(intermediate);
     let mut position_moved_count = Vec::with_capacity(intermediate);
     let mut missing = Vec::with_capacity(intermediate);
+    let mut occluded = Vec::with_capacity(intermediate);
     let mut extra = Vec::with_capacity(intermediate);
     let mut morphology_delta = Vec::with_capacity(intermediate);
     let mut direction_vectors = Vec::with_capacity(intermediate);
@@ -293,6 +300,16 @@ fn measure_scene(
 
     let gt_set: std::collections::HashSet<(usize, usize)> =
         ground_truth.iter().map(|&(x, y, _)| (x, y)).collect();
+    // Frame-0 visible structure cells: non-space cells that are not
+    // ground-truth star cells (the population A5 arm motion may touch).
+    let mut visible_cells = 0usize;
+    for (y, row) in base.rows.iter().enumerate() {
+        for (x, ch) in row.iter().enumerate() {
+            if *ch != ' ' && !gt_set.contains(&(x, y)) {
+                visible_cells += 1;
+            }
+        }
+    }
 
     for (frame_index, frame) in scene.frames.iter().enumerate() {
         let grid = frame_grid(frame);
@@ -359,13 +376,25 @@ fn measure_scene(
             }
         }
 
-        let missing_count = if is_starfield {
-            gt_set.difference(&output_set).count()
+        // Galaxy: a ground-truth star cell that is no longer a tier glyph is
+        // either space (a true disappearance, always a bug) or a structure
+        // glyph (occluded by the shifted galaxy pattern, A5 Spiral only).
+        let (missing_count, occluded_count) = if is_starfield {
+            (gt_set.difference(&output_set).count(), 0)
         } else {
-            ground_truth
-                .iter()
-                .filter(|&&(x, y, _)| star_tier(grid.rows[y][x]).is_none())
-                .count()
+            let mut missing_count = 0usize;
+            let mut occluded_count = 0usize;
+            for &(x, y, _) in ground_truth.iter() {
+                if star_tier(grid.rows[y][x]).is_some() {
+                    continue;
+                }
+                if grid.rows[y][x] == ' ' {
+                    missing_count += 1;
+                } else {
+                    occluded_count += 1;
+                }
+            }
+            (missing_count, occluded_count)
         };
         let moved_in = if is_starfield {
             output_set.difference(&gt_set).count()
@@ -408,6 +437,7 @@ fn measure_scene(
         position_moved_fraction.push(moved_in as f64 / star_count.max(1) as f64);
         position_moved_count.push(moved_in);
         missing.push(missing_count);
+        occluded.push(occluded_count);
         extra.push(moved_in);
         morphology_delta.push(morphology_delta_count);
         direction_vectors.push(directions.len());
@@ -429,6 +459,8 @@ fn measure_scene(
         position_moved_fraction,
         position_moved_count,
         missing,
+        occluded,
+        visible_cells,
         extra,
         morphology_delta,
         created_or_destroyed,
@@ -447,15 +479,53 @@ fn measure_scene(
 
 /// Hard invariants every galaxy scene must satisfy on every intermediate
 /// frame.
-fn assert_galaxy_invariants(scene_name: &str, metrics: &FrameMetrics) {
+///
+/// `spiral_motion_allowed` is the A5 relaxation: the Spiral model
+/// intentionally re-evaluates its frozen morphology at a small deterministic
+/// phase on intermediate frames, so a bounded share of its visible structure
+/// cells may change and a pinned background star may be occluded (hidden
+/// behind shifted structure). A pinned star may still never vanish into
+/// space. The changed-cell budget below is a broad regression/diagnostic
+/// ceiling, not a guarantee of how subtle the drift is: it exists to catch
+/// catastrophic full-frame structural movement, since even a modest real
+/// rotation rewrites far more structure cells than the budget allows. Every
+/// non-Spiral model keeps the strict A4 contract (zero morphology delta,
+/// zero occlusion).
+fn assert_galaxy_invariants(scene_name: &str, metrics: &FrameMetrics, spiral_motion_allowed: bool) {
     assert!(
         metrics.missing.iter().all(|m| *m == 0) && metrics.extra.iter().all(|e| *e == 0),
         "{scene_name}: background star coordinates must be invariant across frames"
     );
-    assert!(
-        metrics.morphology_delta.iter().all(|d| *d == 0),
-        "{scene_name}: galaxy foreground/morphology cells must be invariant across frames"
-    );
+    if spiral_motion_allowed {
+        // Broad regression/diagnostic ceiling, not a "subtle drift"
+        // guarantee: on the audit fixtures the A5 drift (2.5 deg phase)
+        // peaks at 33% of visible cells for HalfBlock, 41% for Shade, and
+        // 61% for Ascii (the finer glyph ladder quantizes the same angular
+        // shift more visibly), so the 75% budget sits well above the
+        // expected motion. Its job is to catch catastrophic full-frame
+        // structural movement: any appreciable rotation (tens of degrees)
+        // rewrites ~all of the pattern and fails this bound.
+        let budget = metrics.visible_cells * 3 / 4;
+        assert!(
+            metrics.morphology_delta.iter().all(|d| *d <= budget),
+            "{scene_name}: A5 arm motion exceeds the broad regression ceiling (max delta {} > budget {} over {} visible cells; deltas={:?})",
+            metrics.morphology_delta.iter().copied().max().unwrap_or(0),
+            budget,
+            metrics.visible_cells,
+            metrics.morphology_delta
+        );
+        // Occlusion of pinned stars by shifted structure is the expected
+        // A5 consequence; the count is reported by the audit table.
+    } else {
+        assert!(
+            metrics.morphology_delta.iter().all(|d| *d == 0),
+            "{scene_name}: galaxy foreground/morphology cells must be invariant across frames"
+        );
+        assert!(
+            metrics.occluded.iter().all(|o| *o == 0),
+            "{scene_name}: structure must never shift over background stars"
+        );
+    }
     assert!(
         metrics.created_or_destroyed == 0,
         "{scene_name}: no background star may be created or destroyed"
@@ -496,8 +566,9 @@ fn assert_starfield_invariants(scene_name: &str, metrics: &FrameMetrics) {
 
 /// Quantifies twinkle and motion fractions for the representative audit
 /// fixtures. Run with `--nocapture` to print the measurement table; the
-/// structural invariants (count, geometry, endpoints) are asserted, while
-/// the subtlety bounds live in the dedicated contract tests.
+/// structural invariants (count, geometry, endpoints) are asserted,
+/// while the structural motion ceilings live in the dedicated contract
+/// tests.
 #[test]
 fn test_audit_report_twinkle_and_motion_fractions() {
     let galaxy_cases: [(ArtModel, RendererChoice, &str); 6] = [
@@ -530,7 +601,8 @@ fn test_audit_report_twinkle_and_motion_fractions() {
                 galaxy_ground_truth(&scene, AUDIT_ART.0)
             };
             let metrics = measure_scene(&scene, &ground_truth, false);
-            assert_galaxy_invariants(name, &metrics);
+            let spiral = matches!(*model, ArtModel::Spiral);
+            assert_galaxy_invariants(name, &metrics, spiral);
             let stars = metrics.stars;
             let tier = if metrics.stars > 0 {
                 metrics
@@ -541,8 +613,16 @@ fn test_audit_report_twinkle_and_motion_fractions() {
             } else {
                 vec!["-".to_string(); 4]
             };
+            let motion = if spiral {
+                format!(
+                    " motion/frame={:?} occl/frame={:?} visible={}",
+                    metrics.morphology_delta, metrics.occluded, metrics.visible_cells
+                )
+            } else {
+                String::new()
+            };
             eprintln!(
-                "AUDIT {name:<16} seed={seed:<6} stars={stars:<4} tier/frame={tier:?} created=0 geometry=ok endpoints=ok"
+                "AUDIT {name:<16} seed={seed:<6} stars={stars:<4} tier/frame={tier:?} created=0 geometry=ok endpoints=ok{motion}"
             );
         }
     }
@@ -575,8 +655,13 @@ fn test_audit_report_twinkle_and_motion_fractions() {
     }
 }
 
-/// Galaxy background star coordinates and galaxy morphology must be
-/// invariant across all frames for every galaxy renderer and seed.
+/// Galaxy background star coordinates must be invariant across all frames
+/// for every galaxy renderer and seed. Galaxy structure must be invariant
+/// for every non-Spiral model; the A5 Spiral arm motion may rewrite a
+/// bounded fraction of the visible structure cells (and may occlude pinned
+/// background stars). The 75%-of-visible-cells ceiling is a broad
+/// regression bound against catastrophic full-frame structural movement,
+/// not a precision guarantee on the drift's subtlety.
 #[test]
 fn test_audit_galaxy_positions_and_morphology_invariant() {
     let cases: [(ArtModel, RendererChoice, &str); 5] = [
@@ -608,7 +693,17 @@ fn test_audit_galaxy_positions_and_morphology_invariant() {
                 galaxy_ground_truth(&scene, AUDIT_ART.0)
             };
             let metrics = measure_scene(&scene, &ground_truth, false);
-            assert_galaxy_invariants(name, &metrics);
+            let spiral = matches!(*model, ArtModel::Spiral);
+            assert_galaxy_invariants(name, &metrics, spiral);
+            if spiral {
+                // A5: with a nonzero phase the pattern must actually move
+                // (at least one intermediate frame differs from frame 0),
+                // while the change stays within the broad regression ceiling.
+                assert!(
+                    metrics.morphology_delta.iter().any(|d| *d > 0),
+                    "{name} seed={seed}: A5 phase motion must be visible in some frame"
+                );
+            }
             if metrics.stars >= 4 {
                 assert!(
                     metrics.tier_changed_fraction.iter().any(|f| *f > 0.0),
