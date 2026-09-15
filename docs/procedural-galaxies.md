@@ -124,22 +124,23 @@ The spiral model generates the field at a higher internal sampling resolution an
 
 ### Spiral sampling geometry
 
-The Spiral model evaluates the density field on a fixed, non-configurable
+The Spiral model evaluates the density field on an explicit, non-configurable
 sampling geometry (`SamplingGeometry` in `src/galaxy.rs`). Phase 3 made the
 geometry explicit without changing it; Phase 5A made it shape-aware: the
 logical dimensions now derive from the cell sampling shape
-(`CellSamplingShape`), and the production path always uses the `HALF_BLOCK`
-shape, so all existing outputs remain bit-for-bit identical:
+(`CellSamplingShape`). Default and legacy production paths use `HALF_BLOCK`,
+while explicit Spiral Quadrant rendering uses `QUADRANT`; the shape-aware split
+preserves bit-for-bit compatibility for the legacy paths:
 
 ```text
 terminal W×H
-  -> logical max(W,1) × max(H,1)×2        (HALF_BLOCK, production)
+  -> logical max(W,1) × max(H,1)×2        (HALF_BLOCK, default/legacy)
   -> supersampled logical_width×3 × logical_height×3
   -> average reduction back to the logical W×2H field
 ```
 
 - The terminal requests `W × H` cells.
-- The production `HALF_BLOCK` shape (1×2) gives the legacy logical field
+- The default/legacy `HALF_BLOCK` shape (1×2) gives the legacy logical field
   `W × 2H`: 1 logical sample per terminal cell horizontally and 2
   vertically (the renderer consumes two density rows per visible terminal
   row via half-block glyphs), and the supersampled field `3W × 6H`.
@@ -158,9 +159,9 @@ terminal W×H
 The mapping from terminal cells to logical density samples is an explicit
 topology abstraction (`CellSamplingShape` in `src/render/topology.rs`):
 
-- **Current production topology**: 1×2 — one logical sample horizontally
+- **Default/legacy production topology**: 1×2 — one logical sample horizontally
   and two vertically per terminal cell (the half-block contract).
-- **Quadrant topology**: 2×2 — four logical samples per terminal cell.
+- **Opt-in production topology**: 2×2 — four logical samples per terminal cell.
   Consumed by the experimental `--renderer quadrant` path for the Spiral
   model (color supported: foreground-only ANSI).
 - Subcell ordering is row-major: top-left, top-right, bottom-left,
@@ -684,9 +685,8 @@ The renderer is best understood as a compact procedural visualization inspired b
 
 Possible future directions include:
 
-- ring galaxies;
-- improved inclination handling;
-- color maps tuned for color-blind accessibility;
-- terminal-size-aware model selection;
-- benchmarked startup performance;
-- snapshot-based visual regression tests.
+- deeper morphology and variety for the Elliptical and Cluster models;
+- ring galaxies or other visually distinct morphological families;
+- improved inclination handling where it produces a clear terminal-scale benefit;
+- evidence-based evaluation of whether Quadrant should expand beyond Spiral;
+- further palette/accessibility tuning only where terminal color constraints leave a demonstrated gap.
