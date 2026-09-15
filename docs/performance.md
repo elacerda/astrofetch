@@ -6,7 +6,7 @@ startup baseline. No optimization work is implied by this record.
 ## Environment
 
 - Host: Linux x86_64 (GNU/Linux), Tufao workstation
-- Binary: `target/release/astrofetch` built from `main` (post-v1.0.0 hardening branch)
+- Binary: `target/release/astrofetch` built from the post-v1.0.0 hardening branch that was later merged into `main`
 - Update check disabled on all runs (`--no-update-check`)
 - Method: wall-clock milliseconds per invocation via `date +%s%N`, 11
   repetitions per case, median reported (no `hyperfine` available)
@@ -46,9 +46,10 @@ Full runs: min/median/max for the warm default case: 54/56/57 ms.
 - Rendering is cheap: logo-only paths are 2–6 ms. The `--info-only` path
   (~53 ms) dominates the full-display cost, i.e. system information
   collection is the main startup expense.
-- The system-information cache provides only a marginal benefit in this
-  environment (~2 ms between cold and warm default runs); collection on
-  this host is already fast. No optimization is required.
+- No meaningful cold/warm cache difference was observed in this sample:
+  the default medians differed by only ~2 ms, with the warm median slightly
+  higher. Collection on this host is already fast, so no cache or startup
+  optimization is required from these measurements.
 - Quadrant rendering adds ~2 ms over HalfBlock at 40×20 for the same seed.
 
 ## Conclusion

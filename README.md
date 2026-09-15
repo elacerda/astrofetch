@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
 Install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v1.0.1
 ```
 
 Check the installed binary:
@@ -166,7 +166,7 @@ Palette behavior:
 Palette and renderer:
 
 - Palette controls ANSI color selection.
-- Renderer controls glyph selection (half-block, shade, ASCII, starfield).
+- Renderer controls glyph selection (half-block, shade, ASCII, starfield, quadrant).
 - They work independently and compose together.
 
 Examples:
@@ -381,7 +381,9 @@ Release binaries are built by GitHub Actions when a `v*` tag is pushed.
 ## Documentation
 
 - [`docs/procedural-galaxies.md`](docs/procedural-galaxies.md): scientific and technical notes about the procedural renderer.
-- [`docs/DEVELOPMENT_NOTES.md`](docs/DEVELOPMENT_NOTES.md): historical implementation notes and roadmap-style development context.
+- [`docs/determinism.md`](docs/determinism.md): reproducibility, feature-stream isolation, RNG checkpoints, and visual-anchor contracts.
+- [`docs/performance.md`](docs/performance.md): measured startup-performance baseline and interpretation.
+- [`docs/DEVELOPMENT_NOTES.md`](docs/DEVELOPMENT_NOTES.md): historical implementation notes and superseded roadmap context.
 
 ## License
 
