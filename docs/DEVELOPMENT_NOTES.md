@@ -1,6 +1,19 @@
 # Development notes
 
-This document contains historical planning notes and implementation guidance for AstroFetch. It may mention completed milestones or older design assumptions. For user-facing documentation, see [`../README.md`](../README.md). For the current procedural renderer explanation, see [`procedural-galaxies.md`](procedural-galaxies.md).
+This document is a historical development archive covering the original roadmap,
+MVP planning, and the Patch 5 implementation cycle. It is **not** the current
+product specification or active roadmap. The current stable baseline is
+AstroFetch v1.0.1.
+
+For user-facing documentation, see [`../README.md`](../README.md). For the
+current procedural renderer explanation, see
+[`procedural-galaxies.md`](procedural-galaxies.md). Reproducibility contracts
+are documented in [`determinism.md`](determinism.md), and the current startup
+measurement baseline is in [`performance.md`](performance.md).
+
+The historical sections below intentionally retain completed milestones and
+older design assumptions unless a stale statement would otherwise be mistaken
+for current project status.
 
 ---
 
@@ -247,7 +260,6 @@ Regras implementadas:
 
 Melhorias futuras possíveis:
 
-- `astrofetch uninstall-shell` para remover apenas o bloco gerenciado;
 - comando de diagnóstico para mostrar qual arquivo seria usado por plataforma;
 - documentação específica de remoção manual para cada shell.
 
@@ -655,20 +667,21 @@ Testes importantes:
 Objetivo: oferecer uma instalação simples para usuários normais sem exigir Rust
 na máquina local.
 
-Ordem de distribuição:
+Ordem de distribuição planejada historicamente:
 
 1. releases binários confiáveis no GitHub, com `install.sh` para Linux/macOS;
 2. preparação para crates.io e publicação via `cargo publish`;
 3. Homebrew tap;
 4. outros ecossistemas de pacotes, somente depois.
 
-Trabalho atual:
+Status pós-v1.0.1:
 
-- gerar artefatos versionados em GitHub Releases para Linux, macOS e Windows;
-- manter nomes previsíveis de artefatos por versão e target;
-- oferecer `install.sh` POSIX-sh para baixar e instalar binários em
-  `~/.local/bin`;
-- manter startup de shell separado e opt-in via `astrofetch setup-shell`.
+- GitHub Releases é a autoridade de versão e publica binários para Linux,
+  macOS e Windows junto com `SHA256SUMS`;
+- `install.sh` é o método recomendado e valida os checksums publicados;
+- o Homebrew tap é um canal oficial suportado para macOS e Linux;
+- crates.io continua apenas como possibilidade futura a ser avaliada;
+- startup de shell permanece separado e opt-in via `astrofetch setup-shell`.
 
 Fora de escopo por enquanto:
 
@@ -681,12 +694,12 @@ Fora de escopo por enquanto:
 - Scoop;
 - WinGet.
 
-Critério de aceite:
+Critério de aceite atual:
 
 - usuários em Linux/macOS conseguem instalar com `install.sh` sem toolchain Rust;
 - usuários no Windows conseguem baixar o zip manualmente no GitHub Releases;
 - `cargo install --path .` continua documentado como fluxo de desenvolvimento;
-- crates.io e Homebrew aparecem apenas como canais futuros.
+- Homebrew é suportado; crates.io ainda não é um canal oficial.
 
 ## Estrutura Inicial Sugerida
 
@@ -870,9 +883,10 @@ Critérios de aceite:
 - Aplicar timeout real para comandos externos. (Concluído no Patch 5C.)
 - Considerar cache opcional ou modos fast/full para campos mais caros.
   (Concluído nos Patches 5B e 5E: perfis Full/Compact e cache TTL seletivo.)
-- Consolidar GitHub Releases binários e `install.sh`.
-- Preparar crates.io e Homebrew como canais futuros, depois dos releases
-  binários.
+- Consolidar GitHub Releases binários e `install.sh`. (Concluído; ambos são
+  canais públicos do baseline v1.0.1.)
+- Homebrew. (Concluído; o tap é um canal oficial suportado.)
+- Avaliar crates.io como canal opcional futuro; ainda não é suportado oficialmente.
 - Melhorar fontes de informação em macOS e Windows.
 
 ## Patch 5: Coleta de Sistema (5A–5E)
