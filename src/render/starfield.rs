@@ -2,6 +2,7 @@ use super::{
     ansi::AnsiForegroundLine,
     color::{starfield_foreground_ansi, ColorPalette},
     hash::{hash_cell, hash_to_unit},
+    twinkle_star_glyph, StarTwinkleFrame,
 };
 use crate::terminal::Terminal;
 
@@ -10,6 +11,17 @@ pub fn render_starfield(
     colors_enabled: bool,
     terminal: &Terminal,
     palette: ColorPalette,
+) -> Vec<String> {
+    render_starfield_with_twinkle(canvas, colors_enabled, terminal, palette, None)
+}
+
+/// Renders the dedicated starfield with an optional deterministic twinkle frame.
+pub(crate) fn render_starfield_with_twinkle(
+    canvas: &[Vec<f64>],
+    colors_enabled: bool,
+    terminal: &Terminal,
+    palette: ColorPalette,
+    frame: Option<StarTwinkleFrame>,
 ) -> Vec<String> {
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -26,7 +38,22 @@ pub fn render_starfield(
                 .unwrap_or(0.0);
 
             let value = top.max(bottom);
-            let ch = starfield_glyph(value);
+            let base = starfield_glyph(value);
+            let ch = if base == ' ' {
+                base
+            } else {
+                frame.map_or(base, |frame| {
+                    twinkle_star_glyph(
+                        Some(base),
+                        frame.scene_seed,
+                        x,
+                        y / 2,
+                        frame.frame_index,
+                        frame.frame_count,
+                    )
+                    .unwrap_or(base)
+                })
+            };
 
             if colors_enabled && terminal.colors_enabled() && ch != ' ' {
                 let hue = hash_to_unit(hash_cell(x, y / 2, 0x51a7_f17e_d00d_cafe));

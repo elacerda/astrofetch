@@ -5,9 +5,11 @@ use crate::error::AppError;
 use crate::layout::compose_layout;
 use crate::render::topology::CellSamplingShape;
 use crate::render::{
-    prepare_density, prepare_density_with_shape, render_ascii, render_half_blocks,
-    render_quadrant_with_stars, render_shades, render_starfield, sampling_shape_for, ColorPalette,
-    EffectiveRenderer, PreparedDensity, RenderProfile,
+    prepare_density, prepare_density_with_shape, render_ascii, render_ascii_with_twinkle,
+    render_half_blocks, render_half_blocks_with_twinkle, render_quadrant_with_stars,
+    render_quadrant_with_stars_at_frame, render_shades, render_shades_with_twinkle,
+    render_starfield, render_starfield_with_twinkle, sampling_shape_for, ColorPalette,
+    EffectiveRenderer, PreparedDensity, RenderProfile, StarTwinkleFrame,
 };
 use crate::system::{
     get_disk_detail_fields, get_display_field_order, CollectionProfile, SystemSnapshot,
@@ -43,6 +45,42 @@ pub(super) fn resolve_color_palette(requested: PaletteChoice) -> ColorPalette {
 struct InfoLine {
     label: String,
     value: String,
+}
+
+/// Prepared art state shared by every frame of an animated intro.
+///
+/// Scene resolution, density generation, normalization, stretching, threshold
+/// selection, and row materialization happen before the first frame is
+/// rendered. Frame rendering only reads this state and applies a pure
+/// presentation context to existing stars.
+#[derive(Debug)]
+struct PreparedArt {
+    /// Concrete model selected for this scene.
+    resolved_model: EngineModel,
+    /// Concrete seed captured during scene resolution.
+    scene_seed: u64,
+    /// Effective terminal-cell sampling shape used during generation.
+    sampling_shape: CellSamplingShape,
+    /// Renderer selected after CLI/model resolution.
+    effective_renderer: EffectiveRenderer,
+    /// Prepared density rows and, for galaxy renderers, the fixed threshold.
+    prepared_density: PreparedArtDensity,
+    /// Effective application color state captured before rendering frames.
+    colors_enabled: bool,
+    /// Resolved palette shared by every frame.
+    palette: ColorPalette,
+}
+
+/// Row-materialized form of one prepared density.
+#[derive(Debug)]
+enum PreparedArtDensity {
+    /// Dedicated Starfield density with no galaxy threshold.
+    Starfield { canvas: Vec<Vec<f64>> },
+    /// Galaxy density with the fixed prepared visibility threshold.
+    Galaxy {
+        canvas: Vec<Vec<f64>>,
+        threshold: f64,
+    },
 }
 
 /// Aplicação principal do AstroFetch.
@@ -153,6 +191,38 @@ impl App {
         Ok(())
     }
 
+    /// Presents a fixed sequence of already-rendered frames.
+    ///
+    /// The terminal runner only receives strings; scene generation, density
+    /// preparation, and star selection remain entirely in the app/render
+    /// layers. Any geometry or handler gate failure falls back to the first
+    /// frame, which is the legacy static render.
+    fn emit_frames(&self, terminal: &Terminal, frames: &[Vec<String>]) -> Result<(), AppError> {
+        if crate::animation::should_animate(self.args.animate, terminal.is_tty) {
+            match crate::animation::run_intro_frames(frames) {
+                Ok(crate::animation::IntroOutcome::Completed) => return Ok(()),
+                Ok(crate::animation::IntroOutcome::Interrupted) => {
+                    return Err(AppError::Interrupted);
+                }
+                Ok(crate::animation::IntroOutcome::Skipped) => {
+                    // The intro wrote nothing: fall through to the static
+                    // first frame below.
+                }
+                Err(crate::animation::IntroError::HandlerInstall(_)) => {
+                    // No terminal side effects happened yet: use static output.
+                }
+                Err(crate::animation::IntroError::Io(err)) => {
+                    return Err(AppError::Animation(err.to_string()));
+                }
+            }
+        }
+
+        if let Some(first_frame) = frames.first() {
+            terminal.print_lines(first_frame)?;
+        }
+        Ok(())
+    }
+
     /// Returns the collection profile based on CLI compact flag.
     fn collection_profile(&self) -> CollectionProfile {
         if self.args.compact {
@@ -199,15 +269,21 @@ impl App {
             _ => unreachable!(),
         };
 
-        let art_lines = self.render_art(
-            terminal,
-            colors_enabled,
-            engine_model,
-            art_width,
-            art_height,
-        )?;
+        if crate::animation::should_animate(self.args.animate, terminal.is_tty) {
+            let prepared = self.prepare_art(colors_enabled, engine_model, art_width, art_height)?;
+            let frames = self.render_animation_frames(terminal, &prepared)?;
+            self.emit_frames(terminal, &frames)
+        } else {
+            let art_lines = self.render_art(
+                terminal,
+                colors_enabled,
+                engine_model,
+                art_width,
+                art_height,
+            )?;
 
-        self.emit_output(terminal, &art_lines)
+            self.emit_output(terminal, &art_lines)
+        }
     }
 
     /// Executa em modo Combined: arte ASCII + informações do sistema.
@@ -247,58 +323,62 @@ impl App {
             _ => unreachable!(),
         };
 
-        let art_lines = self.render_art(
-            terminal,
-            colors_enabled,
-            engine_model,
-            art_width,
-            art_height,
-        )?;
+        if crate::animation::should_animate(self.args.animate, terminal.is_tty) {
+            let prepared = self.prepare_art(colors_enabled, engine_model, art_width, art_height)?;
+            let art_frames = self.render_animation_frames(terminal, &prepared)?;
 
-        match display_plan {
-            crate::display_plan::DisplayPlan::Combined { art, layout } => {
-                let output_lines = compose_layout(&art_lines, &info_lines, art.width, layout);
-                self.emit_output(terminal, &output_lines)?;
+            match display_plan {
+                crate::display_plan::DisplayPlan::Combined { art, layout } => {
+                    let output_frames: Vec<Vec<String>> = art_frames
+                        .iter()
+                        .map(|art_lines| compose_layout(art_lines, &info_lines, art.width, layout))
+                        .collect();
+                    self.emit_frames(terminal, &output_frames)?;
+                }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
+        } else {
+            let art_lines = self.render_art(
+                terminal,
+                colors_enabled,
+                engine_model,
+                art_width,
+                art_height,
+            )?;
+
+            match display_plan {
+                crate::display_plan::DisplayPlan::Combined { art, layout } => {
+                    let output_lines = compose_layout(&art_lines, &info_lines, art.width, layout);
+                    self.emit_output(terminal, &output_lines)?;
+                }
+                _ => unreachable!(),
+            }
         }
 
         Ok(())
     }
 
-    /// Shared art pipeline for logo-only and combined output.
+    /// Prepares one scene for static or animated presentation.
     ///
-    /// Resolution order (Phase 5B.3):
-    /// 1. Reject `random + quadrant` before scene resolution, so an explicit
-    ///    Quadrant request never succeeds or fails by chance of the random
-    ///    model draw.
-    /// 2. Resolve the scene and the effective renderer. The experimental
-    ///    Quadrant path uses the Phase 5B.1 split engine API
-    ///    (`resolve_scene` -> `generate_density` at the QUADRANT sampling
-    ///    shape), concretizing the seed exactly once. Every other renderer
-    ///    keeps the legacy `generate_scene` path bit-for-bit unchanged.
-    /// 3. `sampling_shape_for` selects the terminal-cell sampling shape.
-    /// 4. Prepare the density with the shape-matching occupancy semantics
-    ///    (HALF_BLOCK keeps the legacy preparation call).
-    /// 5. `render_prepared_density` dispatches to the effective renderer;
-    ///    Quadrant uses the foreground-color renderer while effective color
-    ///    output is enabled (the application's effective color state, not
-    ///    the raw flag), and the pure renderer otherwise.
-    fn render_art(
+    /// Resolution and density generation happen exactly once in this method.
+    /// The legacy `generate_scene` wrapper remains the source for every
+    /// non-Quadrant renderer, while Quadrant keeps its existing split path so
+    /// its concrete seed and sampling shape are preserved. The returned rows
+    /// and threshold are immutable presentation state shared by all frames.
+    fn prepare_art(
         &self,
-        terminal: &Terminal,
         colors_enabled: bool,
         engine_model: EngineModel,
         art_width: usize,
         art_height: usize,
-    ) -> Result<Vec<String>, AppError> {
+    ) -> Result<PreparedArt, AppError> {
         if engine_model == EngineModel::Random && self.args.renderer == RendererChoice::Quadrant {
             return Err(AppError::Cli(
                 "the quadrant renderer cannot be combined with the random model; choose a concrete model (e.g. --model spiral)".to_string(),
             ));
         }
 
-        let (resolved_model, density, effective_renderer, shape) = if self.args.renderer
+        let (resolved_model, scene_seed, density, effective_renderer, shape) = if self.args.renderer
             == RendererChoice::Quadrant
         {
             // Split path: the concrete seed from resolve_scene is
@@ -308,7 +388,13 @@ impl App {
                 Self::resolve_effective_renderer(self.args.renderer, resolved.resolved_model)?;
             let shape = sampling_shape_for(resolved.resolved_model, effective_renderer);
             let density = engine_model.generate_density(&resolved, art_width, art_height, shape);
-            (resolved.resolved_model, density, effective_renderer, shape)
+            (
+                resolved.resolved_model,
+                resolved.seed,
+                density,
+                effective_renderer,
+                shape,
+            )
         } else {
             // Legacy path: unchanged for every existing renderer.
             let scene = engine_model.generate_scene(art_width, art_height, self.args.seed);
@@ -316,6 +402,7 @@ impl App {
                 Self::resolve_effective_renderer(self.args.renderer, scene.resolved_model)?;
             (
                 scene.resolved_model,
+                scene.seed,
                 scene.density,
                 effective_renderer,
                 CellSamplingShape::HALF_BLOCK,
@@ -332,13 +419,165 @@ impl App {
         };
         let effective_palette = resolve_color_palette(self.args.palette);
 
-        Self::render_prepared_density(
-            prepared,
+        let prepared_density = match prepared {
+            PreparedDensity::Starfield { density } => PreparedArtDensity::Starfield {
+                canvas: density.into_rows(),
+            },
+            PreparedDensity::Galaxy { density, threshold } => PreparedArtDensity::Galaxy {
+                canvas: density.into_rows(),
+                threshold,
+            },
+        };
+
+        Ok(PreparedArt {
+            resolved_model,
+            scene_seed,
+            sampling_shape: shape,
             effective_renderer,
+            prepared_density,
             colors_enabled,
-            terminal,
-            effective_palette,
-        )
+            palette: effective_palette,
+        })
+    }
+
+    /// Renders one frame from prepared art without resolving or generating it.
+    fn render_prepared_art(
+        prepared: &PreparedArt,
+        terminal: &Terminal,
+        frame: Option<StarTwinkleFrame>,
+    ) -> Result<Vec<String>, AppError> {
+        debug_assert_eq!(
+            sampling_shape_for(prepared.resolved_model, prepared.effective_renderer),
+            prepared.sampling_shape
+        );
+
+        let effective_colors = prepared.colors_enabled && terminal.colors_enabled();
+        match (&prepared.prepared_density, prepared.effective_renderer) {
+            (PreparedArtDensity::Starfield { canvas }, EffectiveRenderer::Starfield) => {
+                Ok(match frame {
+                    Some(frame) => render_starfield_with_twinkle(
+                        canvas,
+                        prepared.colors_enabled,
+                        terminal,
+                        prepared.palette,
+                        Some(frame),
+                    ),
+                    None => render_starfield(
+                        canvas,
+                        prepared.colors_enabled,
+                        terminal,
+                        prepared.palette,
+                    ),
+                })
+            }
+            (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::HalfBlock) => {
+                Ok(match frame {
+                    Some(frame) => render_half_blocks_with_twinkle(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        Some(frame),
+                    ),
+                    None => {
+                        render_half_blocks(canvas, *threshold, effective_colors, prepared.palette)
+                    }
+                })
+            }
+            (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::Shade) => {
+                Ok(match frame {
+                    Some(frame) => render_shades_with_twinkle(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        Some(frame),
+                    ),
+                    None => render_shades(canvas, *threshold, effective_colors, prepared.palette),
+                })
+            }
+            (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::Ascii) => {
+                Ok(match frame {
+                    Some(frame) => render_ascii_with_twinkle(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        Some(frame),
+                    ),
+                    None => render_ascii(canvas, *threshold, effective_colors, prepared.palette),
+                })
+            }
+            (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::Quadrant) => {
+                Ok(match frame {
+                    Some(frame) => render_quadrant_with_stars_at_frame(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        Some(frame),
+                    ),
+                    None => render_quadrant_with_stars(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                    ),
+                })
+            }
+            (PreparedArtDensity::Starfield { .. }, _) => Err(AppError::Render(
+                "Starfield density cannot be rendered with galaxy renderers".to_string(),
+            )),
+            (PreparedArtDensity::Galaxy { .. }, EffectiveRenderer::Starfield) => {
+                Err(AppError::Render(
+                    "Galaxy density cannot be rendered with starfield renderer".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Builds the fixed deterministic intro frames from one prepared scene.
+    fn render_animation_frames(
+        &self,
+        terminal: &Terminal,
+        prepared: &PreparedArt,
+    ) -> Result<Vec<Vec<String>>, AppError> {
+        let schedule = crate::animation::intro_schedule();
+        let mut frames = Vec::with_capacity(schedule.frame_count as usize);
+
+        for frame_index in 0..schedule.frame_count {
+            let is_static_endpoint =
+                frame_index == 0 || frame_index == schedule.frame_count.saturating_sub(1);
+            let frame = if is_static_endpoint {
+                None
+            } else {
+                Some(StarTwinkleFrame {
+                    scene_seed: prepared.scene_seed,
+                    frame_index,
+                    frame_count: schedule.frame_count,
+                })
+            };
+            frames.push(Self::render_prepared_art(prepared, terminal, frame)?);
+        }
+
+        Ok(frames)
+    }
+
+    /// Shared art pipeline for logo-only and combined static output.
+    ///
+    /// Static rendering delegates to the same preparation and dispatch used by
+    /// animated frames. Its frame context is absent, so existing renderer
+    /// behavior and byte-level output remain unchanged.
+    fn render_art(
+        &self,
+        terminal: &Terminal,
+        colors_enabled: bool,
+        engine_model: EngineModel,
+        art_width: usize,
+        art_height: usize,
+    ) -> Result<Vec<String>, AppError> {
+        let prepared = self.prepare_art(colors_enabled, engine_model, art_width, art_height)?;
+        Self::render_prepared_art(&prepared, terminal, None)
     }
 
     /// Resolves the effective renderer based on the requested renderer choice and resolved model.
@@ -412,6 +651,7 @@ impl App {
     /// Renders prepared density using the effective renderer.
     ///
     /// Validates that the prepared density and effective renderer are compatible.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn render_prepared_density(
         prepared: PreparedDensity,
         effective_renderer: EffectiveRenderer,
@@ -1643,5 +1883,149 @@ mod tests {
     fn test_collection_profile_mapping_compact() {
         let app = build_test_app(true, true, false);
         assert_eq!(app.collection_profile(), CollectionProfile::Compact);
+    }
+
+    #[test]
+    fn test_animation_frames_have_static_endpoints_and_stable_geometry() {
+        let cases = [
+            (ArtModel::Starfield, RendererChoice::Auto),
+            (ArtModel::Spiral, RendererChoice::HalfBlock),
+            (ArtModel::Spiral, RendererChoice::Shade),
+            (ArtModel::Spiral, RendererChoice::Ascii),
+            (ArtModel::Spiral, RendererChoice::Quadrant),
+        ];
+
+        for (model, renderer) in cases {
+            let engine_model = match &model {
+                ArtModel::Random => EngineModel::Random,
+                ArtModel::Elliptical => EngineModel::Elliptical,
+                ArtModel::Spiral => EngineModel::Spiral,
+                ArtModel::Cluster => EngineModel::Cluster,
+                ArtModel::Starfield => EngineModel::Starfield,
+            };
+            let app = build_test_app_pipeline(model.clone(), renderer, Some(42), true, false);
+            let terminal = Terminal::with_colors(true, false);
+            let prepared = app.prepare_art(false, engine_model, 40, 20).unwrap();
+            let static_frame = app
+                .render_art(&terminal, false, engine_model, 40, 20)
+                .unwrap();
+            let frames = app.render_animation_frames(&terminal, &prepared).unwrap();
+
+            assert_eq!(
+                frames.len(),
+                crate::animation::intro_schedule().frame_count as usize
+            );
+            assert_eq!(frames.first(), Some(&static_frame));
+            assert_eq!(frames.last(), Some(&static_frame));
+
+            let line_count = static_frame.len();
+            let widths: Vec<usize> = static_frame
+                .iter()
+                .map(|line| visible_width(line))
+                .collect();
+            for frame in &frames {
+                assert_eq!(frame.len(), line_count);
+                assert_eq!(
+                    frame
+                        .iter()
+                        .map(|line| visible_width(line))
+                        .collect::<Vec<_>>(),
+                    widths
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_animation_frames_change_only_prepared_star_presentation() {
+        let app = build_test_app_pipeline(
+            ArtModel::Starfield,
+            RendererChoice::Auto,
+            Some(42),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let prepared = app
+            .prepare_art(false, EngineModel::Starfield, 40, 20)
+            .unwrap();
+        let frames = app.render_animation_frames(&terminal, &prepared).unwrap();
+
+        let changed = frames[1..frames.len() - 1]
+            .iter()
+            .any(|frame| frame != &frames[0]);
+        assert!(changed, "the dedicated starfield must visibly twinkle");
+
+        for (static_line, animated_line) in frames[0].iter().zip(frames[1].iter()) {
+            assert_eq!(visible_width(static_line), visible_width(animated_line));
+            for (base, animated) in static_line.chars().zip(animated_line.chars()) {
+                if !matches!(base, '.' | '*' | '+') {
+                    assert_eq!(base, animated);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_animation_frame_sequence_reuses_one_prepared_scene_and_density() {
+        let app = build_test_app_pipeline(
+            ArtModel::Spiral,
+            RendererChoice::Ascii,
+            Some(42),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let prepared = app.prepare_art(false, EngineModel::Spiral, 40, 20).unwrap();
+        let initial_seed = prepared.scene_seed;
+        let initial_density = match &prepared.prepared_density {
+            PreparedArtDensity::Starfield { canvas }
+            | PreparedArtDensity::Galaxy { canvas, .. } => canvas.clone(),
+        };
+
+        let first_sequence = app.render_animation_frames(&terminal, &prepared).unwrap();
+        let second_sequence = app.render_animation_frames(&terminal, &prepared).unwrap();
+
+        assert_eq!(initial_seed, 42);
+        assert_eq!(first_sequence, second_sequence);
+        assert_eq!(prepared.scene_seed, initial_seed);
+        let final_density = match &prepared.prepared_density {
+            PreparedArtDensity::Starfield { canvas }
+            | PreparedArtDensity::Galaxy { canvas, .. } => canvas,
+        };
+        assert_eq!(final_density, &initial_density);
+    }
+
+    #[test]
+    fn test_combined_animation_keeps_system_lines_identical() {
+        let app = build_test_app_pipeline(
+            ArtModel::Starfield,
+            RendererChoice::Auto,
+            Some(42),
+            true,
+            false,
+        );
+        let terminal = Terminal::with_colors(true, false);
+        let info_lines = app.build_info_lines(&base_snapshot());
+        let prepared = app
+            .prepare_art(false, EngineModel::Starfield, 40, 20)
+            .unwrap();
+        let art_frames = app.render_animation_frames(&terminal, &prepared).unwrap();
+        let outputs: Vec<Vec<String>> = art_frames
+            .iter()
+            .map(|art| {
+                compose_layout(
+                    art,
+                    &info_lines,
+                    40,
+                    crate::display_plan::LayoutKind::Stacked,
+                )
+            })
+            .collect();
+
+        let art_height = art_frames[0].len();
+        for output in &outputs {
+            assert_eq!(&output[art_height + 1..], info_lines.as_slice());
+        }
     }
 }

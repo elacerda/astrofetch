@@ -15,6 +15,9 @@ pub const SPIRAL_BAR_V1: &str = "spiral/bar/v1";
 /// Versioned namespace reserved for the deterministic dust-lane configuration.
 pub const SPIRAL_DUST_V1: &str = "spiral/dust/v1";
 
+/// Versioned namespace for deterministic presentation-only star twinkling.
+pub const ANIMATION_STAR_TWINKLE_V1: &str = "animation/star-twinkle/v1";
+
 /// Seed context shared with procedural generators without exposing or advancing
 /// the legacy scene RNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +111,35 @@ mod tests {
                 derive_feature_seed(base_seed, SPIRAL_DUST_V1),
                 derive_feature_seed(base_seed, SPIRAL_BAR_V1)
             );
+        }
+    }
+
+    #[test]
+    fn test_twinkle_feature_seed_fixed_anchors() {
+        assert_eq!(
+            derive_feature_seed(0, ANIMATION_STAR_TWINKLE_V1),
+            0x21798956d217ba7a
+        );
+        assert_eq!(
+            derive_feature_seed(4, ANIMATION_STAR_TWINKLE_V1),
+            0x80c562782367720c
+        );
+        assert_eq!(
+            derive_feature_seed(16, ANIMATION_STAR_TWINKLE_V1),
+            0x281fae6ea369a029
+        );
+        assert_eq!(
+            derive_feature_seed(42, ANIMATION_STAR_TWINKLE_V1),
+            0x315cce45df7cbed2
+        );
+    }
+
+    #[test]
+    fn test_twinkle_namespace_is_distinct_from_morphology_namespaces() {
+        for base_seed in [0_u64, 4, 16, 42] {
+            let twinkle = derive_feature_seed(base_seed, ANIMATION_STAR_TWINKLE_V1);
+            assert_ne!(twinkle, derive_feature_seed(base_seed, SPIRAL_BAR_V1));
+            assert_ne!(twinkle, derive_feature_seed(base_seed, SPIRAL_DUST_V1));
         }
     }
 

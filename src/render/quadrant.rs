@@ -36,7 +36,8 @@
 use crate::render::ansi::AnsiForegroundLine;
 use crate::render::color::{galaxy_foreground_ansi, ColorPalette};
 use crate::render::topology::{CellSamplingShape, Quadrant};
-use crate::render::{star_field_seed, star_glyph_for_local_density};
+use crate::render::StarTwinkleFrame;
+use crate::render::{star_field_seed, star_glyph_for_local_density, twinkle_star_glyph};
 
 /// Quadrant glyph table indexed by the 4-bit visibility mask.
 ///
@@ -252,6 +253,17 @@ pub(crate) fn render_quadrant_with_stars(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
+    render_quadrant_with_stars_at_frame(canvas, threshold, colors_enabled, palette, None)
+}
+
+/// Renders star-aware Quadrant art with an optional deterministic twinkle frame.
+pub(crate) fn render_quadrant_with_stars_at_frame(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    frame: Option<StarTwinkleFrame>,
+) -> Vec<String> {
     let shape = CellSamplingShape::QUADRANT;
     let terminal_width = canvas.first().map_or(0, Vec::len).div_ceil(shape.columns());
     let terminal_height = canvas.len().div_ceil(shape.rows());
@@ -297,7 +309,19 @@ pub(crate) fn render_quadrant_with_stars(
                     local_density,
                     threshold,
                     star_seed,
-                ) {
+                )
+                .and_then(|base| {
+                    frame.map_or(Some(base), |frame| {
+                        twinkle_star_glyph(
+                            Some(base),
+                            frame.scene_seed,
+                            cell_x,
+                            cell_y,
+                            frame.frame_index,
+                            frame.frame_count,
+                        )
+                    })
+                }) {
                     Some(star) => line.push_plain(star),
                     None => line.push_plain(' '),
                 }

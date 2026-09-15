@@ -1,6 +1,8 @@
 use super::ansi::AnsiForegroundLine;
 use super::color::{galaxy_foreground_ansi, ColorPalette};
-use super::{scale_visible, star_field_seed, star_glyph_for_cell};
+use super::{
+    scale_visible, star_field_seed, star_glyph_for_cell, twinkle_star_glyph, StarTwinkleFrame,
+};
 
 /// Shade glyphs ordered from lowest to highest intensity.
 const SHADE_GLYPHS: &[char] = &['░', '▒', '▓', '█'];
@@ -20,6 +22,17 @@ pub fn render_shades(
     threshold: f64,
     colors_enabled: bool,
     palette: ColorPalette,
+) -> Vec<String> {
+    render_shades_with_twinkle(canvas, threshold, colors_enabled, palette, None)
+}
+
+/// Renders shade art with an optional deterministic star-twinkle frame.
+pub(crate) fn render_shades_with_twinkle(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    frame: Option<StarTwinkleFrame>,
 ) -> Vec<String> {
     let star_seed = star_field_seed(canvas);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -57,7 +70,20 @@ pub fn render_shades(
             } else {
                 // Nenhuma galáxia visível - usa estrela de fundo ou espaço
                 if let Some(star_ch) =
-                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
+                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed).and_then(
+                        |base| {
+                            frame.map_or(Some(base), |frame| {
+                                twinkle_star_glyph(
+                                    Some(base),
+                                    frame.scene_seed,
+                                    x,
+                                    y / 2,
+                                    frame.frame_index,
+                                    frame.frame_count,
+                                )
+                            })
+                        },
+                    )
                 {
                     line.push_plain(star_ch);
                 } else {

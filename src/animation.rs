@@ -1,10 +1,9 @@
 //! Minimal terminal frame runner for the opt-in `--animate` intro (Milestone A1).
 //!
-//! This module only replays an already-rendered static frame in place. It
-//! never regenerates scene content, never clears the full terminal, never
-//! owns the alternate screen or a scroll region, never enables raw mode, and
-//! runs the frame loop on the calling thread (no background animation
-//! thread).
+//! This module only presents already-rendered frames in place. It never
+//! regenerates scene content, never clears the full terminal, never owns the
+//! alternate screen or a scroll region, never enables raw mode, and runs the
+//! frame loop on the calling thread (no background animation thread).
 //!
 //! Ctrl+C handling: `ctrlc` only allows installing one handler per process,
 //! so the handler is installed once, when the intro starts, and then kept
@@ -38,7 +37,7 @@ const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// Conventional exit code for a process interrupted by Ctrl+C (128 + SIGINT).
 const INTERRUPTED_EXIT_CODE: i32 = 130;
 
-/// Fixed schedule for the A1 intro: a short replay of the frozen frame.
+/// Fixed schedule for the intro: a short sequence of prepared frames.
 ///
 /// The intro sleeps for `(frame_count - 1) * frame_interval`, which is
 /// currently 5 * 120 ms = 600 ms.
@@ -50,7 +49,7 @@ pub struct IntroSchedule {
     pub frame_interval: Duration,
 }
 
-/// Returns the fixed A1 intro schedule (6 frames, 120 ms interval).
+/// Returns the fixed intro schedule (6 frames, 120 ms interval).
 pub fn intro_schedule() -> IntroSchedule {
     IntroSchedule {
         frame_count: 6,
@@ -319,6 +318,25 @@ fn run_frames(
     )
 }
 
+/// Runs a fixed sequence of prepared frames on the real stdout.
+fn run_frame_sequence(
+    frames: &[Vec<String>],
+    state: &IntroState,
+    initial_size: TerminalDimensions,
+    size_probe: &dyn Fn() -> Option<TerminalDimensions>,
+) -> io::Result<IntroOutcome> {
+    let _cursor_guard = HideCursorGuard::new()?;
+    let mut stdout = io::stdout();
+    replay_frame_sequence(
+        &mut stdout,
+        frames,
+        state,
+        initial_size,
+        intro_schedule(),
+        size_probe,
+    )
+}
+
 /// Runs the frame loop against an arbitrary writer.
 ///
 /// This is the writer-agnostic core of [`run_frames`], separated from the
@@ -333,14 +351,33 @@ fn run_frames(
 /// Ctrl+C request still takes precedence and yields
 /// [`IntroOutcome::Interrupted`].
 fn replay_frames<W: io::Write>(
-    mut w: W,
+    w: W,
     lines: &[String],
     state: &IntroState,
     initial_size: TerminalDimensions,
     schedule: IntroSchedule,
     size_probe: &dyn Fn() -> Option<TerminalDimensions>,
 ) -> io::Result<IntroOutcome> {
-    let mut frame = 0;
+    let frames = vec![lines.to_vec(); schedule.frame_count as usize];
+    replay_frame_sequence(w, &frames, state, initial_size, schedule, size_probe)
+}
+
+/// Replays prepared frames while preserving the A1 geometry and interruption
+/// behavior.
+fn replay_frame_sequence<W: io::Write>(
+    mut w: W,
+    frames: &[Vec<String>],
+    state: &IntroState,
+    initial_size: TerminalDimensions,
+    schedule: IntroSchedule,
+    size_probe: &dyn Fn() -> Option<TerminalDimensions>,
+) -> io::Result<IntroOutcome> {
+    let frame_count = schedule.frame_count.min(frames.len() as u32) as usize;
+    if frame_count == 0 {
+        return Ok(IntroOutcome::Completed);
+    }
+
+    let mut frame = 0usize;
     loop {
         if state.is_interrupted() {
             break;
@@ -351,10 +388,10 @@ fn replay_frames<W: io::Write>(
             // reflow the already-rendered frame on its own.
             break;
         }
-        draw_frame(&mut w, lines, frame == 0)?;
+        draw_frame(&mut w, &frames[frame], frame == 0)?;
         w.flush()?;
         frame += 1;
-        if state.is_interrupted() || frame == schedule.frame_count {
+        if state.is_interrupted() || frame == frame_count {
             break;
         }
         interruptible_sleep(schedule.frame_interval, state);
@@ -409,6 +446,46 @@ pub fn run_intro(lines: &[String]) -> Result<IntroOutcome, IntroError> {
     // Cursor visibility has been restored at this point (the guard inside
     // run_frames has already been dropped). Only now may the signal state
     // be deactivated.
+    state.deactivate();
+
+    outcome.map_err(IntroError::Io)
+}
+
+/// Returns whether every prepared frame shares the same safe terminal geometry.
+fn frame_sequence_fits(frames: &[Vec<String>], size: TerminalDimensions) -> bool {
+    let Some(first) = frames.first() else {
+        return false;
+    };
+
+    let first_widths: Vec<usize> = first.iter().map(|line| visible_width(line)).collect();
+    frames.iter().all(|frame| {
+        frame.len() == first.len()
+            && frame
+                .iter()
+                .map(|line| visible_width(line))
+                .eq(first_widths.iter().copied())
+            && frame_fits(frame, size)
+    })
+}
+
+/// Runs the opt-in intro over a fixed sequence of already-rendered frames.
+///
+/// The first frame is written as the legacy static payload and the final
+/// frame is left frozen after the fixed schedule. The runner remains unaware
+/// of scene generation and only presents the supplied strings.
+pub fn run_intro_frames(frames: &[Vec<String>]) -> Result<IntroOutcome, IntroError> {
+    let initial_size = match query_terminal_size() {
+        Some(size) if frame_sequence_fits(frames, size) => size,
+        _ => return Ok(IntroOutcome::Skipped),
+    };
+
+    let state = Arc::new(IntroState::new());
+    install_interrupt_handler(state.clone()).map_err(IntroError::HandlerInstall)?;
+
+    state.activate();
+    let outcome = run_frame_sequence(frames, &state, initial_size, &query_terminal_size);
+    // Cursor visibility is restored by the RAII guard before deactivation,
+    // preserving the A1 Ctrl+C lifecycle contract.
     state.deactivate();
 
     outcome.map_err(IntroError::Io)
