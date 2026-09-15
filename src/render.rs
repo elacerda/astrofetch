@@ -311,7 +311,7 @@ pub(super) fn scale_visible(value: f64, threshold: f64) -> Option<f64> {
     }
 }
 
-pub(super) fn star_glyph_for_cell(
+pub(crate) fn star_glyph_for_cell(
     x: usize,
     y: usize,
     top: f64,
@@ -357,7 +357,7 @@ pub(super) fn star_glyph_for_cell(
 ///
 /// # Returns
 /// `Some(glyph)` for a star (`+`, `*`, or `.`), or `None` for no star.
-pub(super) fn star_glyph_for_local_density(
+pub(crate) fn star_glyph_for_local_density(
     x: usize,
     y: usize,
     local_density: f64,
@@ -387,7 +387,7 @@ pub(super) fn star_glyph_for_local_density(
     }
 }
 
-pub(super) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
+pub(crate) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
 
     for (i, value) in canvas.iter().flatten().enumerate() {

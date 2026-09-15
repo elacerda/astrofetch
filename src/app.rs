@@ -798,6 +798,8 @@ mod tests {
 
     use crate::density::DensityMap;
 
+    mod animation_audit;
+
     fn build_test_app(compact: bool, no_color: bool, colors_enabled: bool) -> App {
         App {
             args: Args {
