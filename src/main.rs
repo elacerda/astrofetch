@@ -1,3 +1,4 @@
+mod animation;
 mod app;
 #[allow(dead_code)]
 mod bar;
@@ -22,9 +23,15 @@ mod update_check;
 mod visual_baseline;
 
 use app::App;
+use error::AppError;
 
 fn main() {
     if let Err(e) = App::run() {
+        if matches!(e, AppError::Interrupted) {
+            // Conventional interrupted semantics: exit code 128 + SIGINT,
+            // without printing an error message.
+            std::process::exit(130);
+        }
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }

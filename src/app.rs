@@ -119,6 +119,40 @@ impl App {
         }
     }
 
+    /// Emits the final rendered frame.
+    ///
+    /// When `--animate` is enabled and stdout is an interactive terminal,
+    /// the frozen frame is replayed in place through the short intro
+    /// runner. The intro only starts when the whole frame safely fits the
+    /// current terminal viewport without wrapping or scrolling; whenever it
+    /// is skipped (or the handler cannot be installed, or stdout is not a
+    /// TTY), the legacy static path is used unchanged, so non-animated and
+    /// non-TTY output stays byte-identical.
+    fn emit_output(&self, terminal: &Terminal, lines: &[String]) -> Result<(), AppError> {
+        if crate::animation::should_animate(self.args.animate, terminal.is_tty) {
+            match crate::animation::run_intro(lines) {
+                Ok(crate::animation::IntroOutcome::Completed) => return Ok(()),
+                Ok(crate::animation::IntroOutcome::Interrupted) => {
+                    return Err(AppError::Interrupted);
+                }
+                Ok(crate::animation::IntroOutcome::Skipped) => {
+                    // The frame does not safely fit the current terminal
+                    // viewport (or its size is unknown): the intro wrote
+                    // nothing, so fall through to the static path below.
+                }
+                Err(crate::animation::IntroError::HandlerInstall(_)) => {
+                    // No terminal side effects happened yet: fall back to
+                    // the static output instead of failing the run.
+                }
+                Err(crate::animation::IntroError::Io(err)) => {
+                    return Err(AppError::Animation(err.to_string()));
+                }
+            }
+        }
+        terminal.print_lines(lines)?;
+        Ok(())
+    }
+
     /// Returns the collection profile based on CLI compact flag.
     fn collection_profile(&self) -> CollectionProfile {
         if self.args.compact {
@@ -173,8 +207,7 @@ impl App {
             art_height,
         )?;
 
-        terminal.print_lines(&art_lines)?;
-        Ok(())
+        self.emit_output(terminal, &art_lines)
     }
 
     /// Executa em modo Combined: arte ASCII + informações do sistema.
@@ -225,7 +258,7 @@ impl App {
         match display_plan {
             crate::display_plan::DisplayPlan::Combined { art, layout } => {
                 let output_lines = compose_layout(&art_lines, &info_lines, art.width, layout);
-                terminal.print_lines(&output_lines)?;
+                self.emit_output(terminal, &output_lines)?;
             }
             _ => unreachable!(),
         }
@@ -536,6 +569,7 @@ mod tests {
                 no_color,
                 logo_only: false,
                 info_only: false,
+                animate: false,
                 compact,
                 disk_details: false,
                 layout: LayoutChoice::Auto,
@@ -567,6 +601,7 @@ mod tests {
                 no_color,
                 logo_only: false,
                 info_only: false,
+                animate: false,
                 compact: false,
                 disk_details: false,
                 layout: LayoutChoice::Auto,
