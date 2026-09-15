@@ -18,6 +18,9 @@ pub const SPIRAL_DUST_V1: &str = "spiral/dust/v1";
 /// Versioned namespace for deterministic presentation-only star twinkling.
 pub const ANIMATION_STAR_TWINKLE_V1: &str = "animation/star-twinkle/v1";
 
+/// Versioned namespace for deterministic presentation-only Starfield motion.
+pub const ANIMATION_STAR_MOTION_V1: &str = "animation/star-motion/v1";
+
 /// Seed context shared with procedural generators without exposing or advancing
 /// the legacy scene RNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,11 +138,44 @@ mod tests {
     }
 
     #[test]
+    fn test_star_motion_feature_seed_fixed_anchors() {
+        assert_eq!(
+            derive_feature_seed(0, ANIMATION_STAR_MOTION_V1),
+            0xeab3083c389699fe
+        );
+        assert_eq!(
+            derive_feature_seed(4, ANIMATION_STAR_MOTION_V1),
+            0xe3c87b8c60a54391
+        );
+        assert_eq!(
+            derive_feature_seed(16, ANIMATION_STAR_MOTION_V1),
+            0x01db084f2cc85ecb
+        );
+        assert_eq!(
+            derive_feature_seed(42, ANIMATION_STAR_MOTION_V1),
+            0x01d37dcc40aa50d4
+        );
+    }
+
+    #[test]
     fn test_twinkle_namespace_is_distinct_from_morphology_namespaces() {
         for base_seed in [0_u64, 4, 16, 42] {
             let twinkle = derive_feature_seed(base_seed, ANIMATION_STAR_TWINKLE_V1);
             assert_ne!(twinkle, derive_feature_seed(base_seed, SPIRAL_BAR_V1));
             assert_ne!(twinkle, derive_feature_seed(base_seed, SPIRAL_DUST_V1));
+        }
+    }
+
+    #[test]
+    fn test_star_motion_namespace_is_distinct_from_other_animation_features() {
+        for base_seed in [0_u64, 4, 16, 42] {
+            let motion = derive_feature_seed(base_seed, ANIMATION_STAR_MOTION_V1);
+            assert_ne!(
+                motion,
+                derive_feature_seed(base_seed, ANIMATION_STAR_TWINKLE_V1)
+            );
+            assert_ne!(motion, derive_feature_seed(base_seed, SPIRAL_BAR_V1));
+            assert_ne!(motion, derive_feature_seed(base_seed, SPIRAL_DUST_V1));
         }
     }
 

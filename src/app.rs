@@ -1956,14 +1956,47 @@ mod tests {
             .any(|frame| frame != &frames[0]);
         assert!(changed, "the dedicated starfield must visibly twinkle");
 
-        for (static_line, animated_line) in frames[0].iter().zip(frames[1].iter()) {
-            assert_eq!(visible_width(static_line), visible_width(animated_line));
-            for (base, animated) in static_line.chars().zip(animated_line.chars()) {
-                if !matches!(base, '.' | '*' | '+') {
-                    assert_eq!(base, animated);
-                }
-            }
+        let star_count = |frame: &[String]| {
+            frame
+                .iter()
+                .flat_map(|line| line.chars())
+                .filter(|ch| matches!(ch, '.' | '*' | '+'))
+                .count()
+        };
+        let star_positions = |frame: &[String]| {
+            frame
+                .iter()
+                .enumerate()
+                .flat_map(|(y, line)| {
+                    line.chars()
+                        .enumerate()
+                        .filter_map(move |(x, ch)| matches!(ch, '.' | '*' | '+').then_some((x, y)))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let static_count = star_count(&frames[0]);
+        let static_positions = star_positions(&frames[0]);
+        let mut spatially_changed = false;
+        for frame in &frames[1..frames.len() - 1] {
+            assert_eq!(star_count(frame), static_count);
+            assert_eq!(frame.len(), frames[0].len());
+            assert_eq!(
+                frame
+                    .iter()
+                    .map(|line| visible_width(line))
+                    .collect::<Vec<_>>(),
+                frames[0]
+                    .iter()
+                    .map(|line| visible_width(line))
+                    .collect::<Vec<_>>()
+            );
+            spatially_changed |= star_positions(frame) != static_positions;
         }
+        assert!(
+            spatially_changed,
+            "the dedicated starfield must include spatial micro-motion"
+        );
     }
 
     #[test]
