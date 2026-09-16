@@ -400,16 +400,24 @@ projected radial profile:
 I(r) = exp(−b_n · (r / Re)^(1/n)),   b_n ≈ 2n − 1/3
 ```
 
-where `r` is the rotated elliptical radius on the sky plane, `Re` is the
+where `r` is the shaped elliptical radius on the sky plane, `Re` is the
 (approximate) 2-D half-light radius, and `n` is the family-constrained profile
 index. Per scene it derives a morphology family (CompactDisky, Classical,
 GiantBoxy, CdLike) and applies:
 
 - a random ellipticity (axis ratio) and sky-plane position angle;
-- a geometric visible support: cells with `r <= k(family) · Re` are visible,
-  where `k` is a deterministic per-family contract constant (1.75 / 1.40 /
-  1.00 / 1.30); outside support the density is exactly zero and no grain
-  draw is consumed;
+- a fourth-harmonic isophote shape: in intrinsic (deprojected) coordinates
+  `u` (major-axis direction) and `v = y_rot/q` (minor axis stretched to the
+  unit semi-axis), the radius is `r_shape = r_ell / (1 + c·cos 4θ)` with
+  `θ = atan2(v, u)` and `c = isophote_shape` (range −0.045…+0.045).
+  Positive `c` is disky, negative `c` is boxy, and `c = 0` reproduces the
+  pure ellipse; the pattern is defined in the intrinsic frame and rotates
+  with the galaxy;
+- a geometric visible support: cells with `r_shape <= k(family) · Re` are
+  visible, where `k` is a deterministic per-family contract constant (1.75 /
+  1.40 / 1.00 / 1.30); outside support the density is exactly zero and no
+  grain draw is consumed. The *same* `r_shape` also feeds the Sersic
+  intensity, so support and profile can never disagree;
 - multiplicative local grain: every visible cell is scaled by a random
   factor `1 + U(−g, +g)` and clamped to [0, 1], applied only inside the
   visible support (one row-major draw per visible cell), with a fixed
