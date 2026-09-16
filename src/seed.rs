@@ -21,6 +21,9 @@ pub const ANIMATION_STAR_TWINKLE_V1: &str = "animation/star-twinkle/v1";
 /// Versioned namespace for deterministic presentation-only Starfield motion.
 pub const ANIMATION_STAR_MOTION_V1: &str = "animation/star-motion/v1";
 
+/// Versioned namespace for the deterministic Elliptical morphology v2 configuration.
+pub const ELLIPTICAL_MORPHOLOGY_V2: &str = "elliptical/morphology/v2";
+
 /// Seed context shared with procedural generators without exposing or advancing
 /// the legacy scene RNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +108,26 @@ mod tests {
         assert_eq!(derive_feature_seed(4, SPIRAL_DUST_V1), 0xc3cda9552d50d49d);
         assert_eq!(derive_feature_seed(16, SPIRAL_DUST_V1), 0x1922363ae2281581);
         assert_eq!(derive_feature_seed(42, SPIRAL_DUST_V1), 0x4e82cd2b7b78b452);
+    }
+
+    #[test]
+    fn test_elliptical_morphology_feature_seed_fixed_anchors() {
+        assert_eq!(
+            derive_feature_seed(0, ELLIPTICAL_MORPHOLOGY_V2),
+            0xd66324c2e94bbe99
+        );
+        assert_eq!(
+            derive_feature_seed(4, ELLIPTICAL_MORPHOLOGY_V2),
+            0xa044cc10d3d59101
+        );
+        assert_eq!(
+            derive_feature_seed(16, ELLIPTICAL_MORPHOLOGY_V2),
+            0x8b5033f7226bff1c
+        );
+        assert_eq!(
+            derive_feature_seed(42, ELLIPTICAL_MORPHOLOGY_V2),
+            0x0793627b0a6126f8
+        );
     }
 
     #[test]

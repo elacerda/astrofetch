@@ -7,6 +7,10 @@ mod density;
 mod display_plan;
 // Phase 2B: deterministic dust-lane configuration, consumed as Spiral extinction.
 mod dust;
+// Elliptical Morphology v2, B1: deterministic morphology contract (config +
+// derivation) that the Elliptical density generator will consume in B2.
+#[allow(dead_code)]
+mod elliptical;
 mod engine;
 mod error;
 mod galaxy;
