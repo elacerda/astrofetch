@@ -1,17 +1,49 @@
-//! Deterministic Elliptical morphology configuration for the v2 generator.
+//! Deterministic Elliptical morphology for the v2 generator.
 //!
-//! B1.2 introduces the morphology contract only: an immutable
+//! The v2 Elliptical body is a central-value-normalized Sersic-like
+//! profile. This module owns the whole generation path: an immutable
 //! [`EllipticalGalaxyConfig`] derived once per scene from the versioned
-//! `elliptical/morphology/v2` feature namespace. The density generator
-//! consumes this config in B2; until then nothing in the render pipeline
-//! reads this module, so Elliptical rendered output stays byte-identical to
-//! baseline `85ca173`.
-//!
-//! B2.1 adds the pure mathematical body kernel to this module
+//! `elliptical/morphology/v2` feature namespace; the pure body kernel
 //! ([`elliptical_radius`], [`sersic_body_profile`],
-//! [`elliptical_body_profile`]). It is still not consumed by
-//! `src/engine.rs` or any renderer, so ordinary Elliptical output remains
-//! byte-identical to the B1.2 checkpoint.
+//! [`elliptical_body_profile`]); and the scene generation that
+//! `src/engine.rs` dispatches the Elliptical model to
+//! ([`generate_elliptical_density`]).
+//!
+//! [`elliptical_cell`] is the single per-cell seam that establishes the
+//! elliptical radius, the geometric support decision and the Sersic
+//! intensity from one radius evaluation;
+//! [`elliptical_density_profile`] maps it to the post-support,
+//! pre-render-normalization body, and [`generate_elliptical_density`]
+//! applies the multiplicative local grain on supported cells only. The
+//! legacy fixed double-Gaussian body and the legacy `0.018` brightness
+//! cutoff are both retired; the config is derived exactly once per scene
+//! from the versioned feature namespace and is never drawn from the
+//! legacy scene RNG; only the per-supported-cell grain consumes that RNG
+//! (see [`generate_elliptical_density`]).
+//!
+//! Geometric support contract:
+//!
+//! * A cell is visible **iff** `r_ell <= support_re_multiplier(family) ·
+//!   Re` (boundary inclusive), with `r_ell` from [`elliptical_radius`] and
+//!   the multiplier from [`EllipticalFamily::support_re_multiplier`] — a
+//!   deterministic family contract constant, not a measurement and not an
+//!   RNG draw. It is deliberately not stored in
+//!   [`EllipticalGalaxyConfig`].
+//! * Why the legacy `0.018` cutoff was retired: as an absolute brightness
+//!   threshold on the peak-normalized Sersic body it coupled visibility to
+//!   the profile amplitude — the body crosses 0.018 at ≈1.20·Re for
+//!   `n = 2` but ≈0.075·Re for `n = 4` and ≈0.002·Re for `n = 6` — so the
+//!   profile index silently *defined* the support. Geometric support
+//!   decouples visibility from amplitude: Sersic `n` changes concentration
+//!   without moving the support boundary.
+//! * Support multipliers are family-specific presentation-contract
+//!   constants expressed as multiples of `Re` (CompactDisky 1.75,
+//!   Classical 1.40, GiantBoxy 1.00, CdLike 1.30).
+//! * Inside support: pure Sersic intensity perturbed by the
+//!   multiplicative local grain (`factor = 1 + U(−g, +g)`, clamped to
+//!   [0, 1]; one row-major unit draw per supported cell from the legacy
+//!   scene RNG). Outside support: density is exactly 0.0 and no grain
+//!   draw is consumed.
 //!
 //! Derivation contract:
 //!
@@ -41,7 +73,7 @@
 //!   canvas-fraction coordinates, where `dx = (x − w/2)/w` and
 //!   `dy = (y − h/2)/render_height`, so the canvas half-extents are 0.5.
 //! * `profile_index` is a dimensionless Sersic-like shape parameter in
-//!   `[2, 6]`; B2.1 evaluates the pure body kernel
+//!   `[2, 6]`; the v2 body kernel is
 //!   `I_body(dx, dy) = exp(−b_n·(r_ell/Re)^(1/n))`, where `r_ell` is the
 //!   rotated elliptical radius from [`elliptical_radius`]; see
 //!   [`sersic_body_profile`] for the chosen normalization and [`sersic_b`]
@@ -55,9 +87,9 @@
 //!   scale as a multiple of Re.
 //! * `isophote_shape` is the amplitude, as a fraction of Re, of a
 //!   fourth-order `cos(4θ)` perturbation to the isophote radius. Sign
-//!   convention per the research note: positive = disky, negative = boxy
-//!   (to be visually verified at the B2 seed-panel gate).
+//!   convention: positive = disky, negative = boxy.
 
+use crate::density::DensityMap;
 use crate::seed::{GenerationContext, ELLIPTICAL_MORPHOLOGY_V2};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -86,12 +118,35 @@ impl EllipticalFamily {
         (Self::GiantBoxy, 0.20),
         (Self::CdLike, 0.20),
     ];
+
+    /// Geometric-support multiplier of the family presentation contract.
+    ///
+    /// The v2 body is visible **iff** `r_ell <= k · Re`, where `r_ell` is
+    /// [`elliptical_radius`] and `Re` is
+    /// [`EllipticalGalaxyConfig::effective_radius`].
+    ///
+    /// `k` is a deterministic family contract constant — a presentation
+    /// contract, not a measurement and not an RNG draw. It is intentionally never stored in
+    /// [`EllipticalGalaxyConfig`]: the family alone determines it, and a
+    /// per-scene draw would add a latent the seven-draw contract does not
+    /// have.
+    pub(crate) fn support_re_multiplier(self) -> f64 {
+        match self {
+            Self::CompactDisky => 1.75,
+            Self::Classical => 1.40,
+            Self::GiantBoxy => 1.00,
+            Self::CdLike => 1.30,
+        }
+    }
 }
 
-/// Frozen initial parameter ranges of the v2 morphology contract, per family.
+/// Per-family parameter ranges of the v2 morphology contract.
 ///
-/// These are conservative starting ranges for the B2 tuning sweep; they are
-/// part of the B1 contract and must not drift silently.
+/// With geometric family support (module docs) the visible extent is
+/// `support_re_multiplier(family) · Re`, so the body ranges
+/// (`axis_ratio`, `effective_radius`, `profile_index`) do not have to
+/// keep a brightness isophote inside any occupancy band. `Re` remains the
+/// (approximate) 2-D half-light radius per [`sersic_b`].
 struct FamilyRanges {
     axis_ratio: (f64, f64),
     effective_radius: (f64, f64),
@@ -151,7 +206,7 @@ impl FamilyRanges {
     }
 }
 
-/// Immutable morphology prepared once per Elliptical scene (B1.2 contract).
+/// Immutable morphology prepared once per Elliptical scene.
 ///
 /// Every field is a frozen draw from the versioned feature namespace; nothing
 /// here is RNG state. Re-deriving from the same scene seed is
@@ -283,7 +338,7 @@ fn lerp(range: (f64, f64), u: f64) -> f64 {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// B2.1 — pure body kernel (math only; not yet connected to src/engine.rs)
+// Pure body kernel (math only)
 // ────────────────────────────────────────────────────────────────────
 
 /// Sersic concentration parameter `b_n` for the v2 body kernel.
@@ -294,8 +349,8 @@ fn lerp(range: (f64, f64), u: f64) -> f64 {
 /// b_n ≈ 2n − 1/3
 /// ```
 ///
-/// for a Sersic shape parameter `n` (dimensionless; B1.2 draws produce
-/// `n` in `[2, 6]`).
+/// for a Sersic shape parameter `n` (dimensionless; v2 draws produce `n`
+/// in `[2, 6]`).
 ///
 /// Intended meaning, documented precisely: the *exact* `b_n` is the value
 /// satisfying the half-light condition
@@ -316,7 +371,7 @@ fn lerp(range: (f64, f64), u: f64) -> f64 {
 ///
 /// # Preconditions
 /// `profile_index` must be positive; the approximation is validated for
-/// `n` in `[2, 6]` (the B1.2 range).
+/// `n` in `[2, 6]` (the v2 range).
 pub(crate) fn sersic_b(profile_index: f64) -> f64 {
     2.0 * profile_index - 1.0 / 3.0
 }
@@ -334,11 +389,12 @@ pub(crate) fn sersic_b(profile_index: f64) -> f64 {
 /// i.e. the canvas spans `dx ∈ [−0.5, 0.5)`, `dy ∈ [−0.5, 0.5)` with the
 /// origin at the canvas centre and `+x` to the right. The mapping from
 /// generated-map pixel indices to `(dx, dy)` (including the render-height
-/// convention of the generated density map) belongs to the B2.2
-/// integrator; this helper is pure math on the fractions themselves.
+/// convention of the generated density map) belongs to
+/// [`generate_elliptical_density`]; this helper is pure math on the
+/// fractions themselves.
 ///
-/// Axis convention (matches the legacy `generate_elliptical_density` in
-/// `src/engine.rs` exactly — do not swap major/minor in B2.2):
+/// Axis convention (matches the legacy v1 generator in `src/engine.rs`
+/// exactly — do not swap major/minor):
 ///
 /// 1. Rotate the point into the ellipse frame with the legacy convention:
 ///
@@ -366,7 +422,7 @@ pub(crate) fn sersic_b(profile_index: f64) -> f64 {
 /// finite and non-negative for all finite inputs in the preconditions.
 ///
 /// # Preconditions
-/// `axis_ratio` in `(0, 1]` (B1.2 draws produce `(0.55, 0.95)`),
+/// `axis_ratio` in `(0, 1]` (v2 draws produce `(0.55, 0.95)`),
 /// `position_angle` in `[0, π)` (any finite value works mathematically),
 /// `dx` and `dy` finite.
 pub(crate) fn elliptical_radius(dx: f64, dy: f64, axis_ratio: f64, position_angle: f64) -> f64 {
@@ -389,8 +445,8 @@ pub(crate) fn elliptical_radius(dx: f64, dy: f64, axis_ratio: f64, position_angl
 
 /// Central-value-normalized Sersic-like body profile.
 ///
-/// Chosen convention (fixed here so B2.2 cannot silently pick another
-/// one): the **central-value-normalized** form
+/// Chosen convention (fixed here; do not change it silently): the
+/// **central-value-normalized** form
 ///
 /// ```text
 /// I_norm(r) = exp( −b_n · (r / Re)^(1/n) )
@@ -417,7 +473,7 @@ pub(crate) fn elliptical_radius(dx: f64, dy: f64, axis_ratio: f64, position_angl
 ///   finite range before the existing downstream render normalization;
 /// * strictly decreasing (hence monotonic non-increasing) and smooth in
 ///   `r` for `r > 0`;
-/// * supports every B1.2 `n` in `[2, 6]` and Re range.
+/// * supports every v2 `n` in `[2, 6]` and Re range.
 ///
 /// # Units and shapes
 /// `r` and `Re` are in the same units (legacy canvas-fraction units when
@@ -441,8 +497,9 @@ pub(crate) fn sersic_body_profile(r: f64, effective_radius: f64, profile_index: 
 ///     effective_radius, profile_index)
 /// ```
 ///
-/// Consumes only the four B1.2 body parameters; the B3 parameters
-/// (`core_softening_fraction`, `central_excess`, `outer_halo_*`,
+/// Consumes only the four body parameters (`axis_ratio`,
+/// `position_angle`, `effective_radius`, `profile_index`); the remaining
+/// fields (`core_softening_fraction`, `central_excess`, `outer_halo_*`,
 /// `isophote_shape`) are deliberately not used here. Returns a value in
 /// `(0, 1]` with maximum 1.0 at the centre. Pure function: no RNG, no
 /// I/O, no mutation.
@@ -456,6 +513,224 @@ pub(crate) fn elliptical_body_profile(
 ) -> f64 {
     let r = elliptical_radius(dx, dy, axis_ratio, position_angle);
     sersic_body_profile(r, effective_radius, profile_index)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Elliptical scene generation (geometric support + grain)
+// ────────────────────────────────────────────────────────────────────
+
+/// Multiplicative local grain fraction of the Elliptical v2 grain
+/// equation.
+///
+/// Elliptical v2 uses a multiplicative grain with a fixed 5% local
+/// modulation: every geometrically supported cell is scaled by
+/// `1 + U(−g, +g)` and the result is clamped to [0, 1]. The factor is
+/// relative to the local Sersic intensity, so the grain amplitude stays
+/// bounded relative to the local signal at every cell (it replaces the
+/// legacy absolute additive ±0.012 grain). `g` is a
+/// presentation-contract constant — never an RNG draw and never stored in
+/// [`EllipticalGalaxyConfig`].
+const ELLIPTICAL_GRAIN_FRACTION: f64 = 0.05;
+
+/// Multiplicative grain equation, as a pure helper that keeps the RNG
+/// mapping separate from the math.
+///
+/// One legacy unit draw `unit_draw ∈ [0, 1)` (a single
+/// `StdRng::random::<f64>()` sample) is mapped to the local factor
+///
+/// ```text
+/// factor = 1 + (2·unit_draw − 1) · fraction   ∈   1 + U(−fraction, +fraction)
+/// value' = clamp(value · factor, 0, 1)
+/// ```
+///
+/// `value` is the supported Sersic intensity in `(0, 1]`; `fraction` ≥ 0
+/// is the grain amplitude in *local* (relative) units. For `fraction < 1`
+/// and `value > 0` the factor is always positive, so the lower clamp is
+/// inert in production and clamping can only bite at the upper bound
+/// 1.0, when `value · factor > 1.0` (which implies `value ≥ 1/(1+g)`).
+///
+/// # Properties
+/// * `unit_draw = 0.5` reproduces `value` exactly (factor 1.0);
+/// * `abs(value' − value) ≤ fraction · value` — the grain can never
+///   dominate the local signal, also when the upper clamp is active;
+/// * `value' > 0` for `value > 0` (grain can never zero out a supported
+///   cell).
+///
+/// Pure: no RNG, no I/O, no mutation; the caller owns draw order and
+/// count (row-major, supported cells only).
+pub(crate) fn apply_multiplicative_grain(value: f64, unit_draw: f64, fraction: f64) -> f64 {
+    let factor = 1.0 + (2.0 * unit_draw - 1.0) * fraction;
+    (value * factor).clamp(0.0_f64, 1.0_f64)
+}
+
+/// One Elliptical cell through the single per-cell seam.
+///
+/// Combines the three per-cell facts — rotated elliptical radius, geometric
+/// support decision, Sersic intensity — from ONE [`elliptical_radius`]
+/// evaluation, so the support boundary and the body profile can never be
+/// computed from inconsistent radii.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct EllipticalCell {
+    /// `true` iff the cell is inside the family's geometric support:
+    /// `r_ell <= support_re_multiplier(family) · Re` (boundary inclusive).
+    pub(crate) inside_support: bool,
+    /// Pure Sersic body intensity in `(0, 1]` when `inside_support`,
+    /// exactly 0.0 otherwise.
+    pub(crate) intensity: f64,
+}
+
+/// Per-cell seam: elliptical radius → geometric support decision →
+/// Sersic intensity, all from a single radius evaluation.
+///
+/// The support is **geometric** and independent of the Sersic amplitude:
+///
+/// ```text
+/// inside_support  iff  r_ell <= k(family) · Re
+/// intensity       =  sersic_body_profile(r_ell, Re, n)   (inside support)
+///                   0.0                                  (outside support)
+/// ```
+///
+/// with `k(family) = [`EllipticalFamily::support_re_multiplier`]` and the
+/// boundary inclusive (`<=`) per the geometric support contract. Because
+/// [`sersic_body_profile`] is strictly positive for every finite radius
+/// (and `r_ell` is finite for finite `dx`/`dy`), the map built from this
+/// seam satisfies the invariant
+///
+/// ```text
+/// cell intensity > 0.0  iff  inside_support
+/// ```
+///
+/// which [`generate_elliptical_density`] relies on to spend exactly one
+/// grain draw, in row-major order, per supported cell.
+///
+/// # Units and conventions
+/// `dx`/`dy` in legacy canvas-fraction units (canvas half-extent = 0.5);
+/// `Re` in the same units; `k` dimensionless. Scalar in, scalar out; no
+/// RNG, no I/O, no mutation.
+pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) -> EllipticalCell {
+    let r_ell = elliptical_radius(dx, dy, config.axis_ratio, config.position_angle);
+    let support_limit = config.family.support_re_multiplier() * config.effective_radius;
+
+    if r_ell <= support_limit {
+        EllipticalCell {
+            inside_support: true,
+            intensity: sersic_body_profile(r_ell, config.effective_radius, config.profile_index),
+        }
+    } else {
+        EllipticalCell {
+            inside_support: false,
+            intensity: 0.0,
+        }
+    }
+}
+
+/// Pure per-scene Sersic body map after geometric support: the per-cell
+/// seam [`elliptical_cell`] evaluated at every cell of a `width` ×
+/// `height` canvas.
+///
+/// Coordinate convention (identical to the legacy v1 generator):
+///
+/// ```text
+/// dx = (x − width/2) / width
+/// dy = (y − height/2) / height
+/// ```
+///
+/// where `height` is the generated density-map height (2× terminal height
+/// in the ordinary half-block path). The canvas therefore spans
+/// `dx, dy ∈ [−0.5, 0.5)` with the origin at the centre, `+x` to the right,
+/// and no width/height aspect distortion is introduced.
+///
+/// `config` is consumed by value: the caller derives it exactly once per
+/// scene (see [`EllipticalGalaxyConfig::from_context`]) and this function
+/// performs no re-derivation and touches no RNG. This is the
+/// **post-geometric-support, pre-render-normalization** body: cells inside
+/// family support carry the pure Sersic intensity in `(0, 1]` (exactly
+/// 1.0 at the canvas centre), cells outside support carry exactly 0.0 —
+/// the raw-positive-support diagnostic is the positive-cell fraction of
+/// this map.
+///
+/// # Side effects
+/// None (pure allocation of the returned [`DensityMap`]).
+pub(crate) fn elliptical_density_profile(
+    width: usize,
+    height: usize,
+    config: EllipticalGalaxyConfig,
+) -> DensityMap {
+    DensityMap::from_fn(width, height, |x, y| {
+        let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+        let dy = (y as f64 - height as f64 / 2.0) / height as f64;
+        elliptical_cell(dx, dy, config).intensity
+    })
+}
+
+/// Generates the Elliptical v2 density map for one scene.
+///
+/// The Sersic body with geometric family support replaces the legacy
+/// fixed double-Gaussian body:
+///
+/// * **Morphology**: [`EllipticalGalaxyConfig::from_context`] is called
+///   exactly once per scene, from the versioned
+///   `elliptical/morphology/v2` feature namespace. Only `axis_ratio`,
+///   `position_angle`, `effective_radius` and `profile_index` enter the
+///   density equation; the remaining fields
+///   (`core_softening_fraction`, `central_excess`, `outer_halo_*`,
+///   `isophote_shape`) stay frozen and are deliberately unused here.
+/// * **Per-pixel math**: [`elliptical_density_profile`] (the per-cell
+///   seam [`elliptical_cell`] with the legacy canvas-fraction convention);
+///   `height` is the render height (2× terminal height in the half-block
+///   path).
+/// * **Post-profile**: the multiplicative local grain
+///   ([`apply_multiplicative_grain`] at the fixed 5% local-modulation
+///   fraction [`ELLIPTICAL_GRAIN_FRACTION`], one unit draw in row-major
+///   order per supported cell) replaces the legacy absolute additive
+///   ±0.012 grain;
+///   the legacy `0.018` brightness cutoff is retired and replaced by the
+///   geometric family support (`r_ell <= k(family) · Re`, see
+///   [`elliptical_cell`]). The result stays bounded in `[0, 1]` because
+///   the central-value-normalized body profile is in `(0, 1]` and the
+///   helper clamps to `[0, 1]`.
+///
+/// # RNG contract
+/// The morphology config is **never** drawn from the legacy scene RNG:
+/// it comes from `context.feature_seed(ELLIPTICAL_MORPHOLOGY_V2)`. The
+/// only consumer of `rng` (the legacy scene RNG created in
+/// `ArtModel::generate_density`) is the per-supported-cell grain unit
+/// draw (`rng.random::<f64>()`), in row-major order. Grain draws occur
+/// **only** for cells inside geometric support; outside support the
+/// density is exactly 0.0 and no draw is consumed — no dummy or
+/// discarded draws are inserted.
+///
+/// # Side effects
+/// Returns the filled [`DensityMap`]; mutates only `rng`'s internal state
+/// via the grain draws.
+pub(crate) fn generate_elliptical_density(
+    width: usize,
+    height: usize,
+    context: GenerationContext,
+    rng: &mut StdRng,
+) -> DensityMap {
+    let config = EllipticalGalaxyConfig::from_context(context);
+    let mut map = elliptical_density_profile(width, height, config);
+
+    for y in 0..height {
+        for x in 0..width {
+            let value = map.get(x, y);
+
+            // Positive iff inside geometric support (invariant of
+            // `elliptical_cell`): supported cells draw one grain in
+            // row-major order; unsupported cells stay exactly 0.0 and
+            // consume no RNG.
+            let value = if value > 0.0 {
+                apply_multiplicative_grain(value, rng.random::<f64>(), ELLIPTICAL_GRAIN_FRACTION)
+            } else {
+                0.0
+            };
+
+            map.set(x, y, value);
+        }
+    }
+
+    map
 }
 
 #[cfg(test)]
@@ -747,7 +1022,7 @@ mod tests {
         }
     }
 
-    /// Diagnostic seed panel for the B1.2 report (not a golden test).
+    /// Diagnostic seed panel (not a golden test).
     #[allow(clippy::print_literal)]
     #[test]
     fn test_seed_panel_diagnostic_b12() {
@@ -772,7 +1047,7 @@ mod tests {
         }
     }
 
-    // ── B2.1 — pure body kernel ─────────────────────────────────────
+    // ── Pure body kernel ─────────────────────────────────────
 
     #[test]
     fn test_elliptical_radius_q_one_is_rotationally_symmetric() {
@@ -1080,5 +1355,658 @@ mod tests {
                 "kernel value out of range: {direct}"
             );
         }
+    }
+
+    // ── Scene generation integration ─────────────────────────
+
+    use crate::engine::ArtModel;
+    use crate::render::{prepare_density, PreparedDensity, RenderProfile};
+
+    /// Elliptical generation is deterministic per seed, different seeds
+    /// still differ, and the density-map geometry is unchanged
+    /// (W × 2·H), checked on the canonical 40×20 scene.
+    #[test]
+    fn test_b22_generation_deterministic_and_seeded() {
+        for seed in [0_u64, 1, 7, 42, 137, 2026] {
+            let a = ArtModel::Elliptical.generate_scene(40, 20, Some(seed));
+            let b = ArtModel::Elliptical.generate_scene(40, 20, Some(seed));
+            assert_eq!(a.density, b.density, "seed {seed} must be deterministic");
+            assert_eq!(
+                (a.density.width, a.density.height),
+                (40, 40),
+                "seed {seed}: density geometry changed"
+            );
+        }
+
+        let d42 = ArtModel::Elliptical
+            .generate_scene(40, 20, Some(42))
+            .density;
+        let d43 = ArtModel::Elliptical
+            .generate_scene(40, 20, Some(43))
+            .density;
+        assert_ne!(d42, d43, "different seeds must still differ");
+    }
+
+    /// Every generated density value is finite, non-negative and bounded
+    /// by 1.0.
+    #[test]
+    fn test_b22_all_values_finite_nonnegative_bounded() {
+        for seed in [0_u64, 1, 7, 42, 137, 2026] {
+            let scene = ArtModel::Elliptical.generate_scene(40, 20, Some(seed));
+            for (idx, &value) in scene.density.data.iter().enumerate() {
+                assert!(
+                    value.is_finite() && (0.0_f64..=1.0).contains(&value),
+                    "seed {seed} cell {idx}: {value}"
+                );
+            }
+        }
+    }
+
+    /// The body has positive (but not full) support and the
+    /// central-value-normalized kernel keeps the canvas centre as the
+    /// strictly brightest cell.
+    #[test]
+    fn test_b22_body_positive_support_and_central_structure() {
+        for seed in [0_u64, 1, 7, 42, 137, 2026] {
+            let scene = ArtModel::Elliptical.generate_scene(40, 20, Some(seed));
+            let map = &scene.density;
+            let total = map.width * map.height;
+            let visible = map.data.iter().filter(|&&v| v > 0.0).count();
+            assert!(visible > 0, "seed {seed}: body collapsed to empty");
+            assert!(visible < total, "seed {seed}: canvas fully filled");
+
+            // Centre pixel: dx = dy = 0 → profile exactly 1.0 (≥ 1 − g
+            // after the multiplicative grain at the fixed grain
+            // fraction). The nearest neighbour stays ≤ ~0.137 in the
+            // most diffuse corner case (q = 0.55, Re = 0.20, n = 2 on the
+            // canonical 40×40 grid), far below the centre, so the centre
+            // remains the unique global maximum.
+            let (cx, cy) = (map.width / 2, map.height / 2);
+            let center = map.get(cx, cy);
+            assert!(
+                center >= 1.0 - ELLIPTICAL_GRAIN_FRACTION - 1.0e-12,
+                "seed {seed}: centre {center} lost its peak"
+            );
+            assert!(
+                map.data.iter().all(|&v| v <= center + 1.0e-12),
+                "seed {seed}: a cell is brighter than the centre"
+            );
+        }
+    }
+
+    /// The pure profile stage equals the per-cell seam
+    /// [`elliptical_cell`] (geometric support + Sersic kernel) evaluated
+    /// with ONE config derived per scene (via the same `for_scene_seed`
+    /// path), recomputed for several seeds and several canvas sizes (odd
+    /// included) — so neither per-pixel nor size-dependent re-derivation
+    /// is possible.
+    #[test]
+    fn test_b22_profile_is_scene_config_times_kernel() {
+        for seed in [0_u64, 42, 137, 2026] {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            for (width, render_height) in [(40usize, 40usize), (33, 34), (50, 42)] {
+                let profile = elliptical_density_profile(width, render_height, config);
+                for y in 0..render_height {
+                    for x in 0..width {
+                        let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                        let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                        let expected = elliptical_cell(dx, dy, config).intensity;
+                        assert_eq!(profile.get(x, y), expected, "seed {seed} ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cells inside geometric support equal the pure Sersic profile times
+    /// a multiplicative grain factor in `[1 − g, 1 + g]`, clamped to
+    /// [0, 1]; cells outside support stay exactly 0.0 (asserted by
+    /// `test_b22f_cells_outside_geometric_support_are_exactly_zero`).
+    #[test]
+    fn test_b22h_cells_inside_support_are_sersic_times_bounded_factor() {
+        let g = ELLIPTICAL_GRAIN_FRACTION;
+        for seed in [0_u64, 7, 42, 2026] {
+            let (width, terminal_height) = (40usize, 20usize);
+            let render_height = terminal_height * 2;
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let k = config.family.support_re_multiplier();
+            let scene = ArtModel::Elliptical.generate_scene(width, terminal_height, Some(seed));
+            assert_eq!(scene.density.width, width);
+            assert_eq!(scene.density.height, render_height);
+            let mut inside = 0usize;
+            for y in 0..render_height {
+                for x in 0..width {
+                    let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                    let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                    let r_ell = elliptical_radius(dx, dy, config.axis_ratio, config.position_angle);
+                    if r_ell <= k * config.effective_radius {
+                        inside += 1;
+                        let p = sersic_body_profile(
+                            r_ell,
+                            config.effective_radius,
+                            config.profile_index,
+                        );
+                        let v = scene.density.get(x, y);
+                        assert!(
+                            v >= p * (1.0 - g) - 1.0e-12
+                                && v <= (p * (1.0 + g)).min(1.0) + 1.0e-12,
+                            "seed {seed} ({x},{y}): multiplicative grain out of bounds (profile {p}, got {v})"
+                        );
+                    }
+                }
+            }
+            assert!(inside > 0, "seed {seed}: support collapsed to empty");
+        }
+    }
+
+    // ── Multiplicative local grain ───────────────────────────
+
+    /// Grain equation on the pure helper: unit-draw → factor mapping,
+    /// exact factor application, and clamping only at the upper bound
+    /// where necessary.
+    #[test]
+    fn test_b22h_helper_equation_and_upper_clamp() {
+        for g in [0.03_f64, 0.05, 0.08] {
+            // unit_draw 0.5 → factor exactly 1 → value reproduced exactly.
+            for v in [1.0_f64, 0.5, 1.0e-6] {
+                assert_eq!(apply_multiplicative_grain(v, 0.5, g), v);
+            }
+            // factor endpoints: unit 0 → 1 − g, unit 1 → 1 + g.
+            for v in [1.0_f64, 0.4, 0.02] {
+                assert_eq!(apply_multiplicative_grain(v, 0.0, g), v * (1.0 - g));
+                assert_eq!(
+                    apply_multiplicative_grain(v, 1.0, g),
+                    (v * (1.0 + g)).min(1.0)
+                );
+            }
+            // Upper clamp bites only when v · (1 + g) > 1.
+            assert_eq!(apply_multiplicative_grain(1.0, 1.0, g), 1.0);
+            assert_eq!(apply_multiplicative_grain(1.0, 0.5, g), 1.0);
+            assert!(apply_multiplicative_grain(0.9, 1.0, g) < 1.0);
+            // Lower clamp is inert for positive values with g < 1.
+            assert!(apply_multiplicative_grain(1.0e-12, 0.0, g) > 0.0);
+        }
+    }
+
+    /// The grain can never dominate the local signal —
+    /// `abs(value' − value) ≤ g · value` at every supported cell, also
+    /// where the upper clamp is active (clamping at 1.0 implies
+    /// `value ≥ 1/(1+g)`, which makes `1 − value ≤ g · value` hold).
+    #[test]
+    fn test_b22h_grain_never_dominates_local_signal() {
+        let g = ELLIPTICAL_GRAIN_FRACTION;
+        for seed in [0_u64, 1, 7, 42, 137, 2026] {
+            let (width, terminal_height) = (40usize, 20usize);
+            let render_height = terminal_height * 2;
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let profile = elliptical_density_profile(width, render_height, config);
+            let scene = ArtModel::Elliptical
+                .generate_scene(width, terminal_height, Some(seed))
+                .density;
+            let mut checked = 0usize;
+            for y in 0..render_height {
+                for x in 0..width {
+                    let p = profile.get(x, y);
+                    if p > 0.0 {
+                        checked += 1;
+                        let v = scene.get(x, y);
+                        assert!(
+                            (v - p).abs() <= g * p + 1.0e-12,
+                            "seed {seed} ({x},{y}): grain dominated the local signal (profile {p}, got {v})"
+                        );
+                    }
+                }
+            }
+            assert!(checked > 0, "seed {seed}: no supported cells");
+        }
+    }
+
+    /// Grain can never zero out a supported cell (all supported cells
+    /// stay strictly positive) and the geometric support is unchanged by
+    /// the grain (scene support == config support, unsupported cells
+    /// exactly 0.0).
+    #[test]
+    fn test_b22h_supported_cells_stay_positive_and_support_unchanged() {
+        for seed in [0_u64, 1, 2, 5, 7, 13, 42, 64, 99, 137, 2026] {
+            let (width, terminal_height) = (40usize, 20usize);
+            let render_height = terminal_height * 2;
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let k = config.family.support_re_multiplier();
+            let scene = ArtModel::Elliptical.generate_scene(width, terminal_height, Some(seed));
+            let mut inside = 0usize;
+            for y in 0..render_height {
+                for x in 0..width {
+                    let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                    let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                    let r_ell = elliptical_radius(dx, dy, config.axis_ratio, config.position_angle);
+                    let v = scene.density.get(x, y);
+                    if r_ell <= k * config.effective_radius {
+                        inside += 1;
+                        assert!(
+                            v > 0.0,
+                            "seed {seed} ({x},{y}): supported cell zeroed by grain"
+                        );
+                    } else {
+                        assert_eq!(
+                            v, 0.0,
+                            "seed {seed} ({x},{y}): unsupported cell must stay 0"
+                        );
+                    }
+                }
+            }
+            assert!(inside > 0, "seed {seed}: support collapsed to empty");
+        }
+    }
+
+    /// Same seed stays deterministic; exactly ONE unit draw is consumed
+    /// from the legacy scene RNG per supported cell, in row-major order;
+    /// unsupported cells consume no draw; the config never draws from
+    /// the scene RNG.
+    ///
+    /// Proof strategy: rebuild the scene from the pure profile plus a
+    /// fresh `StdRng::seed_from_u64(seed)` — the exact legacy scene-RNG
+    /// construction of `ArtModel::generate_density` — drawing one unit
+    /// sample per supported cell in row-major order; every scene cell
+    /// must then be bit-equal. Any extra (dummy) draw, skipped draw, or
+    /// config draw on the scene RNG would desynchronize the draw sequence
+    /// and break the bit-equality.
+    #[test]
+    fn test_b22h_exactly_one_draw_per_supported_cell_row_major() {
+        for seed in [0_u64, 1, 2, 5, 13, 42, 64, 99, 137, 2026] {
+            let (width, terminal_height) = (40usize, 20usize);
+            let render_height = terminal_height * 2;
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let profile = elliptical_density_profile(width, render_height, config);
+            let scene = ArtModel::Elliptical
+                .generate_scene(width, terminal_height, Some(seed))
+                .density;
+
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut draws = 0usize;
+            for y in 0..render_height {
+                for x in 0..width {
+                    let p = profile.get(x, y);
+                    let v = scene.get(x, y);
+                    if p > 0.0 {
+                        draws += 1;
+                        let expected = apply_multiplicative_grain(
+                            p,
+                            rng.random::<f64>(),
+                            ELLIPTICAL_GRAIN_FRACTION,
+                        );
+                        assert_eq!(
+                            v, expected,
+                            "seed {seed} ({x},{y}): grain draw stream desynchronized (got {v}, expected {expected})"
+                        );
+                    } else {
+                        assert_eq!(
+                            v, 0.0,
+                            "seed {seed} ({x},{y}): unsupported cell must stay 0"
+                        );
+                    }
+                }
+            }
+            assert!(draws > 0, "seed {seed}: no supported cells");
+
+            // Determinism: a second generation from the same seed
+            // matches bit-for-bit.
+            let scene_again = ArtModel::Elliptical
+                .generate_scene(width, terminal_height, Some(seed))
+                .density;
+            assert_eq!(scene, scene_again, "seed {seed} must be deterministic");
+        }
+    }
+
+    /// The Elliptical `RenderProfile` is frozen — it must not tune
+    /// normalization/stretch/threshold to the new morphology
+    fn test_b22_elliptical_render_profile_frozen() {
+        let profile = RenderProfile::for_model(ArtModel::Elliptical);
+        assert_eq!(
+            format!("{profile:?}"),
+            "RenderProfile { normalization: Robust { low_percentile: 0.02, high_percentile: 0.98 }, stretch: Gamma(0.7), threshold: TargetOccupancy(0.23), preparation: Galaxy }"
+        );
+    }
+
+    // ── Geometric support ─────────────────────────
+
+    /// All four family support multipliers are pinned.
+    #[test]
+    fn test_b22f_support_re_multiplier_pinned_per_family() {
+        assert_eq!(EllipticalFamily::CompactDisky.support_re_multiplier(), 1.75);
+        assert_eq!(EllipticalFamily::Classical.support_re_multiplier(), 1.40);
+        assert_eq!(EllipticalFamily::GiantBoxy.support_re_multiplier(), 1.00);
+        assert_eq!(EllipticalFamily::CdLike.support_re_multiplier(), 1.30);
+    }
+
+    /// The seven-draw config order and its deterministic anchors: the full
+    /// config of pinned seeds is bit-for-bit reproducible. The
+    /// feature-seed anchors themselves remain pinned in `src/seed.rs`.
+    #[test]
+    fn test_b22f_config_draw_order_and_anchors_unchanged() {
+        const ANCHORS: [(u64, &str); 7] = [
+            (
+                0,
+                "EllipticalGalaxyConfig { family: Classical, axis_ratio: 0.7922141726904416, position_angle: 2.7349944778684883, effective_radius: 0.31714324884824063, profile_index: 3.7857208141373446, core_softening_fraction: 0.07963755080049664, central_excess: 0.020362449199503363, outer_halo_strength: 0.06804772495101992, outer_halo_scale: 2.5670643745918325, isophote_shape: 0.01952848621465633 }",
+            ),
+            (
+                1,
+                "EllipticalGalaxyConfig { family: CdLike, axis_ratio: 0.7187286785842384, position_angle: 0.3612497561493311, effective_radius: 0.2690225770773009, profile_index: 3.080451541546018, core_softening_fraction: 0.014506915655063079, central_excess: 0.0, outer_halo_strength: 0.26480373577801164, outer_halo_scale: 4.296074715560233, isophote_shape: -0.00229782971640426 }",
+            ),
+            (
+                7,
+                "EllipticalGalaxyConfig { family: CdLike, axis_ratio: 0.8716400230786168, position_angle: 1.8732514003598573, effective_radius: 0.292127286822845, profile_index: 3.5425457364569, core_softening_fraction: 0.07196528044769114, central_excess: 0.0, outer_halo_strength: 0.3908099722988442, outer_halo_scale: 6.816199445976883, isophote_shape: -0.0004682081698133972 }",
+            ),
+            (
+                42,
+                "EllipticalGalaxyConfig { family: CompactDisky, axis_ratio: 0.6979070049426946, position_angle: 2.6080678795592602, effective_radius: 0.2480912889700056, profile_index: 2.721369334550084, core_softening_fraction: 0.0, central_excess: 0.11320637748671084, outer_halo_strength: 0.021174744082507982, outer_halo_scale: 1.7646843010313498, isophote_shape: 0.020024323438672137 }",
+            ),
+            (
+                137,
+                "EllipticalGalaxyConfig { family: CompactDisky, axis_ratio: 0.6089154479330066, position_angle: 1.647669306451919, effective_radius: 0.2716019400455035, profile_index: 3.0740291006825524, core_softening_fraction: 0.0, central_excess: 0.03926587968957436, outer_halo_strength: 0.0013602622613769634, outer_halo_scale: 1.517003278267212, isophote_shape: 0.013310737681865161 }",
+            ),
+            (
+                2026,
+                "EllipticalGalaxyConfig { family: CdLike, axis_ratio: 0.8758507651335193, position_angle: 0.22797724168566566, effective_radius: 0.3044651119524691, profile_index: 3.7893022390493822, core_softening_fraction: 0.019105624377492202, central_excess: 0.0, outer_halo_strength: 0.3840641724222741, outer_halo_scale: 6.681283448445481, isophote_shape: -0.019336383537374803 }",
+            ),
+            (
+                4095,
+                "EllipticalGalaxyConfig { family: CompactDisky, axis_ratio: 0.6300084683581262, position_angle: 0.789710790860876, effective_radius: 0.23182756909420327, profile_index: 2.477413536413049, core_softening_fraction: 0.0, central_excess: 0.053620597323756194, outer_halo_strength: 0.0446990875181028, outer_halo_scale: 2.058738593976285, isophote_shape: 0.03920249948055765 }",
+            ),
+        ];
+        for (seed, expected) in ANCHORS {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            assert_eq!(
+                format!("{config:?}"),
+                expected,
+                "seed {seed} config drifted from the B1.2 anchor"
+            );
+        }
+    }
+
+    /// The v2 body ranges (q, Re, n) are frozen exactly.
+    #[test]
+    fn test_b22f_b12_body_ranges_restored_exactly() {
+        fn expected_ranges(family: EllipticalFamily) -> ((f64, f64), (f64, f64), (f64, f64)) {
+            match family {
+                EllipticalFamily::CompactDisky => ((0.55, 0.80), (0.20, 0.30), (2.0, 3.5)),
+                EllipticalFamily::Classical => ((0.62, 0.88), (0.24, 0.36), (2.5, 4.5)),
+                EllipticalFamily::GiantBoxy => ((0.72, 0.95), (0.30, 0.44), (4.0, 6.0)),
+                EllipticalFamily::CdLike => ((0.65, 0.90), (0.24, 0.34), (2.5, 4.5)),
+            }
+        }
+        for family in [
+            EllipticalFamily::CompactDisky,
+            EllipticalFamily::Classical,
+            EllipticalFamily::GiantBoxy,
+            EllipticalFamily::CdLike,
+        ] {
+            let ranges = FamilyRanges::for_family(family);
+            let (q, re, n) = expected_ranges(family);
+            assert_eq!(ranges.axis_ratio, q, "{family:?} axis_ratio range changed");
+            assert_eq!(
+                ranges.effective_radius, re,
+                "{family:?} effective_radius range changed"
+            );
+            assert_eq!(
+                ranges.profile_index, n,
+                "{family:?} profile_index range changed"
+            );
+        }
+    }
+
+    /// Every cell outside `k(family) · Re` is exactly 0.0 in both the
+    /// pure profile map and the generated scene.
+    #[test]
+    fn test_b22f_cells_outside_geometric_support_are_exactly_zero() {
+        for seed in [0_u64, 7, 42, 137, 2026, 4095] {
+            let (width, render_height) = (40usize, 40usize);
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let k = config.family.support_re_multiplier();
+            let profile = elliptical_density_profile(width, render_height, config);
+            let scene = ArtModel::Elliptical
+                .generate_scene(width, render_height / 2, Some(seed))
+                .density;
+            let mut outside = 0usize;
+            for y in 0..render_height {
+                for x in 0..width {
+                    let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                    let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                    let r_ell = elliptical_radius(dx, dy, config.axis_ratio, config.position_angle);
+                    if r_ell > k * config.effective_radius {
+                        outside += 1;
+                        assert_eq!(
+                            profile.get(x, y),
+                            0.0,
+                            "seed {seed} ({x},{y}): profile outside support must be 0"
+                        );
+                        assert_eq!(
+                            scene.get(x, y),
+                            0.0,
+                            "seed {seed} ({x},{y}): scene outside support must be 0"
+                        );
+                    }
+                }
+            }
+            // The 40×40 canvas spans ±0.5 canvas units while k·Re ≤ 0.525
+            // on a semi-axis: at least the corners are always outside.
+            assert!(outside > 0, "seed {seed}: expected outside-support cells");
+        }
+    }
+
+    /// The support boundary depends only on q, Re, pa and the family
+    /// multiplier — never on the Sersic amplitude (profile index `n`),
+    /// which changes concentration without defining support.
+    #[test]
+    fn test_b22f_support_boundary_independent_of_profile_index() {
+        let base = EllipticalGalaxyConfig {
+            family: EllipticalFamily::CompactDisky,
+            axis_ratio: 0.63,
+            position_angle: 1.07,
+            effective_radius: 0.24,
+            profile_index: 2.0,
+            core_softening_fraction: 0.0,
+            central_excess: 0.0,
+            outer_halo_strength: 0.0,
+            outer_halo_scale: 1.0,
+            isophote_shape: 0.0,
+        };
+        for n_hi in [3.0_f64, 4.5, 6.0] {
+            let hi = EllipticalGalaxyConfig {
+                profile_index: n_hi,
+                ..base
+            };
+            let k = base.family.support_re_multiplier();
+            for gy in 0..41usize {
+                for gx in 0..41usize {
+                    let dx = -0.5 + gx as f64 * 0.025;
+                    let dy = -0.5 + gy as f64 * 0.025;
+                    let lo = elliptical_cell(dx, dy, base);
+                    let hi_cell = elliptical_cell(dx, dy, hi);
+                    assert_eq!(
+                        lo.inside_support, hi_cell.inside_support,
+                        "support differs at ({dx},{dy}) between n=2.0 and n={n_hi}"
+                    );
+                    let r_ell = elliptical_radius(dx, dy, base.axis_ratio, base.position_angle);
+                    assert_eq!(
+                        lo.inside_support,
+                        r_ell <= k * base.effective_radius,
+                        "boundary must be r_ell <= k·Re at ({dx},{dy})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The positive-iff-supported invariant the grain pass relies on,
+    /// verified at every family range corner on a 40×40 canvas.
+    #[test]
+    fn test_b22f_profile_positive_iff_inside_support() {
+        for family in [
+            EllipticalFamily::CompactDisky,
+            EllipticalFamily::Classical,
+            EllipticalFamily::GiantBoxy,
+            EllipticalFamily::CdLike,
+        ] {
+            let ranges = FamilyRanges::for_family(family);
+            for q in [ranges.axis_ratio.0, ranges.axis_ratio.1] {
+                for re in [ranges.effective_radius.0, ranges.effective_radius.1] {
+                    for n in [ranges.profile_index.0, ranges.profile_index.1] {
+                        for pa in [0.0_f64, 1.1, std::f64::consts::PI - 1.0e-9] {
+                            let config = EllipticalGalaxyConfig {
+                                family,
+                                axis_ratio: q,
+                                position_angle: pa,
+                                effective_radius: re,
+                                profile_index: n,
+                                core_softening_fraction: 0.0,
+                                central_excess: 0.0,
+                                outer_halo_strength: 0.0,
+                                outer_halo_scale: 1.0,
+                                isophote_shape: 0.0,
+                            };
+                            let profile = elliptical_density_profile(40, 40, config);
+                            let k = family.support_re_multiplier();
+                            let mut inside = 0usize;
+                            let mut outside = 0usize;
+                            for y in 0..40usize {
+                                for x in 0..40usize {
+                                    let dx = (x as f64 - 20.0) / 40.0;
+                                    let dy = (y as f64 - 20.0) / 40.0;
+                                    let r_ell = elliptical_radius(dx, dy, q, pa);
+                                    let v = profile.get(x, y);
+                                    assert!(
+                                        v.is_finite() && (0.0_f64..=1.0).contains(&v),
+                                        "corner value {v} at ({x},{y})"
+                                    );
+                                    if r_ell <= k * re {
+                                        inside += 1;
+                                        assert!(v > 0.0, "inside support must be positive");
+                                    } else {
+                                        outside += 1;
+                                        assert_eq!(v, 0.0, "outside support must be exactly 0");
+                                    }
+                                }
+                            }
+                            assert!(inside > 0 && outside > 0, "degenerate corner");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Raw-support population invariant (morphology diagnostic): over a
+    /// broad deterministic population (4096 sequential base seeds)
+    /// the *raw positive support* — post-geometric-support,
+    /// pre-render-normalization positive-cell fraction of the 40×40 body
+    /// map — stays far above pathological near-empty values.
+    ///
+    /// This is a documented lower bound on the discrete grid, not an
+    /// occupancy objective: no scene is required to sit near any specific
+    /// fraction (the renderer's 23% target is NOT a morphology goal), and
+    /// the bound is deliberately broad — it only catches a near-empty
+    /// morphology collapse.
+    #[allow(clippy::print_literal)]
+    #[test]
+    fn test_b22f_raw_support_population_bounded_below() {
+        const GRID: usize = 40;
+        const SEEDS: u64 = 4096;
+        const MIN_RAW_SUPPORT: f64 = 0.15;
+
+        let mut min = (f64::INFINITY, 0_u64, EllipticalFamily::Classical);
+        let mut max = (0.0_f64, 0_u64, EllipticalFamily::Classical);
+        for seed in 0..SEEDS {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let profile = elliptical_density_profile(GRID, GRID, config);
+            let positive = profile.data.iter().filter(|&&v| v > 0.0).count() as f64;
+            let fraction = positive / (GRID * GRID) as f64;
+            assert!(
+                fraction >= MIN_RAW_SUPPORT,
+                "seed {seed} ({}): raw positive support {fraction:.4} < {MIN_RAW_SUPPORT}",
+                family_name(config.family)
+            );
+            if fraction < min.0 {
+                min = (fraction, seed, config.family);
+            }
+            if fraction > max.0 {
+                max = (fraction, seed, config.family);
+            }
+        }
+        println!(
+            "B2.2F raw support population (40×40, {SEEDS} seeds):              min {:.4} (seed {} = {}), max {:.4} (seed {} = {}), bound ≥ {MIN_RAW_SUPPORT}",
+            min.0,
+            min.1,
+            family_name(min.2),
+            max.0,
+            max.1,
+            family_name(max.2)
+        );
+    }
+
+    /// Diagnostic seed panel (not a golden test): the 14-seed panel with
+    /// per-seed morphology parameters, the geometric support multiplier,
+    /// the raw post-geometric-support positive fraction (pre-render,
+    /// 40×40 body map) and the post-render visible terminal-cell
+    /// occupancy at 40×20.
+    #[allow(clippy::print_literal)]
+    #[test]
+    fn test_seed_panel_diagnostic_b22() {
+        let panel: [u64; 14] = [0, 1, 2, 3, 4, 5, 8, 13, 16, 21, 42, 64, 99, 128];
+        let (width, terminal_height) = (40usize, 20usize);
+        let render_height = terminal_height * 2;
+        println!("B2.2F seed panel (diagnostic, {width}x{terminal_height}):");
+        println!(
+            "  {:>4} | {:<13} | {:>5} | {:>5} | {:>4} | {:>5} | {:>4} | {:>8} | {:>8}",
+            "seed", "family", "q", "Re", "n", "pa", "k", "raw+", "visible"
+        );
+        for seed in panel {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let profile = elliptical_density_profile(width, render_height, config);
+            let raw_positive = profile
+                .data
+                .iter()
+                .filter(|&&v| v.is_finite() && v > 0.0)
+                .count() as f64
+                / (width * render_height) as f64;
+            let scene = ArtModel::Elliptical.generate_scene(width, terminal_height, Some(seed));
+            let visible = post_render_visible_occupancy(&scene.density);
+            println!(
+                "  {seed:>4} | {:<13} | {:.3} | {:.3} | {:.2} | {:.3} | {:.2} | {:.4} | {:.4}",
+                family_name(config.family),
+                config.axis_ratio,
+                config.effective_radius,
+                config.profile_index,
+                config.position_angle,
+                config.family.support_re_multiplier(),
+                raw_positive,
+                visible
+            );
+        }
+    }
+
+    /// Post-render visible terminal-cell occupancy: runs the scene
+    /// density through the production pipeline (robust normalization,
+    /// gamma stretch, target-occupancy threshold) and counts vertical
+    /// pair-maxima at or above the threshold — the same quantity
+    /// `test_canonical_occupancy` reports for the renderer sanity band.
+    fn post_render_visible_occupancy(density: &DensityMap) -> f64 {
+        let profile = RenderProfile::for_model(ArtModel::Elliptical);
+        let prepared = prepare_density(density.clone(), profile);
+        let (processed, threshold) = match prepared {
+            PreparedDensity::Starfield { density } => (density, 0.0),
+            PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+        };
+        let mut visible = 0usize;
+        let mut total = 0usize;
+        for y in (0..processed.height).step_by(2) {
+            for x in 0..processed.width {
+                let pair_max = processed.get(x, y).max(processed.get(x, y + 1));
+                total += 1;
+                if pair_max.is_finite() && pair_max > 0.0 && pair_max >= threshold {
+                    visible += 1;
+                }
+            }
+        }
+        visible as f64 / total as f64
     }
 }

@@ -393,14 +393,32 @@ The model preserves its native positive density. Mathematically invalid negative
 
 ## Elliptical galaxy model
 
-The elliptical model uses a smooth projected radial profile. It applies:
+The elliptical model (v2, deterministic morphology contract) uses a Sersic-like
+projected radial profile:
 
-- a random ellipticity;
-- a random sky-plane rotation;
-- a broad Gaussian-like component;
-- a compact central core;
-- a faint-outskirts cutoff;
-- very light noise only where the galaxy is visible.
+```text
+I(r) = exp(−b_n · (r / Re)^(1/n)),   b_n ≈ 2n − 1/3
+```
+
+where `r` is the rotated elliptical radius on the sky plane, `Re` is the
+(approximate) 2-D half-light radius, and `n` is the family-constrained profile
+index. Per scene it derives a morphology family (CompactDisky, Classical,
+GiantBoxy, CdLike) and applies:
+
+- a random ellipticity (axis ratio) and sky-plane position angle;
+- a geometric visible support: cells with `r <= k(family) · Re` are visible,
+  where `k` is a deterministic per-family contract constant (1.75 / 1.40 /
+  1.00 / 1.30); outside support the density is exactly zero and no grain
+  draw is consumed;
+- multiplicative local grain: every visible cell is scaled by a random
+  factor `1 + U(−g, +g)` and clamped to [0, 1], applied only inside the
+  visible support (one row-major draw per visible cell), with a fixed
+  `g = 0.05` — a 5% local modulation relative to the local Sersic
+  intensity.
+
+The profile index `n` changes the concentration of the body without changing
+its support. The v1 generator's legacy faint-outskirts brightness cutoff was
+retired in favour of this geometric family support.
 
 This creates a diffuse, centrally concentrated object with smoother morphology than the spiral model.
 

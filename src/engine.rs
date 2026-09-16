@@ -110,9 +110,12 @@ impl ArtModel {
                 let canvas = generate_starfield(width, render_height, &mut generation_rng);
                 DensityMap::from_rows(canvas).unwrap()
             }
-            ArtModel::Elliptical => {
-                generate_elliptical_density(width, render_height, &mut generation_rng)
-            }
+            ArtModel::Elliptical => crate::elliptical::generate_elliptical_density(
+                width,
+                render_height,
+                generation_context,
+                &mut generation_rng,
+            ),
             ArtModel::Spiral => generate_spiral_galaxy_with_shape(
                 width,
                 height,
@@ -180,63 +183,6 @@ fn generate_starfield(width: usize, height: usize, rng: &mut StdRng) -> Vec<Vec<
     canvas[0][0] = canvas[0][0].max(seed_signature);
 
     canvas
-}
-
-/// Gera uma galáxia elíptica com elipticidade e rotação.
-fn generate_elliptical_density(width: usize, height: usize, rng: &mut StdRng) -> DensityMap {
-    let mut map = DensityMap::new(width, height);
-
-    let center_x = width as f64 / 2.0;
-    let center_y = height as f64 / 2.0;
-
-    let ellipticity = 0.2 + rng.random_range(0.0..1.0) * 0.6;
-    let rotation = rng.random_range(0.0..std::f64::consts::PI);
-
-    let cos_rot = rotation.cos();
-    let sin_rot = rotation.sin();
-
-    let a = 1.0;
-    let b = 1.0 - ellipticity * 0.5;
-
-    for y in 0..height {
-        for x in 0..width {
-            let dx = (x as f64 - center_x) / width as f64;
-            let dy = (y as f64 - center_y) / height as f64;
-
-            let x_rot = dx * cos_rot + dy * sin_rot;
-            let y_rot = -dx * sin_rot + dy * cos_rot;
-
-            let x_elliptical = x_rot / a;
-            let y_elliptical = y_rot / b;
-
-            let r = (x_elliptical * x_elliptical + y_elliptical * y_elliptical).sqrt();
-            let intensity = (-(r * 3.0).powf(2.0)).exp() * 0.8;
-            let core = (-(r * 8.0).powf(2.0)).exp() * 0.3;
-
-            map.set(x, y, (intensity + core).min(1.0));
-        }
-    }
-
-    for y in 0..height {
-        for x in 0..width {
-            let mut value = map.get(x, y);
-
-            // Cut very faint outskirts so the renderer does not turn the whole
-            // terminal area into a noisy filled cloud.
-            if value < 0.018 {
-                value = 0.0;
-            }
-
-            // Very light grain only where the galaxy is actually visible.
-            if value > 0.0 {
-                value += rng.random_range(-0.012_f64..0.012_f64);
-            }
-
-            map.set(x, y, value.clamp(0.0_f64, 1.0_f64));
-        }
-    }
-
-    map
 }
 
 /// Gera um aglomerado de estrelas.
