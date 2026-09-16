@@ -168,6 +168,10 @@ impl PreparedSpiralScene {
     /// proven no-op at zero. Same scene + same phase + same terminal size
     /// + same shape always yields a byte-identical `DensityMap`.
     ///
+    /// The coarse/fine OpenSimplex noise texture stays stationary in disk
+    /// coordinates; only the arms, bar, and dust receive the phase, which is
+    /// intentional for the current subtle animation.
+    ///
     /// Parameters
     /// ----------
     /// terminal_width : terminal cells requested by the user.

@@ -500,7 +500,7 @@ fn assert_galaxy_invariants(scene_name: &str, metrics: &FrameMetrics, spiral_mot
         // Broad regression/diagnostic ceiling, not a "subtle drift"
         // guarantee: on the audit fixtures the A5 drift (2.5 deg phase)
         // peaks at 33% of visible cells for HalfBlock, 41% for Shade, and
-        // 61% for Ascii (the finer glyph ladder quantizes the same angular
+        // 71% for Ascii (the finer glyph ladder quantizes the same angular
         // shift more visibly), so the 75% budget sits well above the
         // expected motion. Its job is to catch catastrophic full-frame
         // structural movement: any appreciable rotation (tens of degrees)
