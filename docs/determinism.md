@@ -48,6 +48,17 @@ The legacy HalfBlock, Shade, and ASCII anchors for seeds 16 and 42 remain unchan
 
 Intentional morphology changes update visual expectations only when their changed behavior is explicitly accepted. The legacy RNG checkpoint remains a separate guard against accidentally perturbing unrelated random streams.
 
+## Animation frame determinism
+
+The opt-in `--animate` intro renders a short 6-frame sequence (~600 ms) on interactive terminals. Animation uses two additional versioned presentation streams, both derived with the existing `derive_feature_seed` algorithm:
+
+- `animation/star-twinkle/v1`: deterministic presentation stream for star twinkle, used by the dedicated Starfield and galaxy background stars.
+- `animation/star-motion/v1`: deterministic presentation stream for the bounded, collision-safe dedicated Starfield micro-motion; maximum displacement is one terminal cell.
+
+Both streams are isolated from the legacy scene RNG, `spiral/bar/v1`, and `spiral/dust/v1`; rendering animation frames consumes no legacy scene RNG draws. The Spiral A5 phase motion does not use a new RNG stream: its small phase excursion is a deterministic function of the animation frame, and the prepared Spiral morphology, bar, dust configuration, noise seed, scene seed, and sampling geometry remain frozen; the first and final phase are exactly zero.
+
+Static rendering remains unchanged: frame 0 and the final animation frame are exactly the normal static render. Non-TTY runs (pipes and redirections) fall back to that static frame without animation. The existing fixed feature-seed anchors in `src/seed.rs` cover both animation namespaces for seeds 0, 4, 16, and 42.
+
 ## Scope of the guarantee
 
 This contract protects feature-stream isolation and the explicitly anchored derivation algorithm. It does not promise that every AstroFetch release will render every seed byte-for-byte forever: intentional model changes can alter morphology.

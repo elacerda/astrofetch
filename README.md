@@ -91,7 +91,13 @@ astrofetch --compact
 astrofetch --logo-only
 astrofetch --info-only
 astrofetch --no-color
+astrofetch --animate
 ```
+
+Use `astrofetch --animate` for a short (~600 ms) deterministic terminal
+intro. Animation is opt-in and runs only on an interactive TTY; pipes and
+redirections fall back to the normal static output, and the intro finishes on
+the exact static frame. Ctrl+C is handled safely.
 
 Choose a visual model:
 

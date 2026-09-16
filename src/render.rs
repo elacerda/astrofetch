@@ -12,15 +12,20 @@ mod stretch;
 pub(crate) mod topology;
 
 pub use ascii::render_ascii;
+pub(crate) use ascii::render_ascii_with_twinkle;
 pub use color::ColorPalette;
 pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
-pub(crate) use quadrant::render_quadrant_with_stars;
+pub(crate) use profile::{prepare_galaxy_density_pinned, robust_normalization_bounds};
+pub(crate) use quadrant::{render_quadrant_with_stars, render_quadrant_with_stars_at_frame};
 pub use shade::render_shades;
+pub(crate) use shade::render_shades_with_twinkle;
 pub use starfield::render_starfield;
+pub(crate) use starfield::render_starfield_with_twinkle;
 
 use crate::engine::ArtModel;
 use crate::render::ansi::AnsiHalfBlockLine;
 use crate::render::topology::CellSamplingShape;
+use crate::seed::{derive_feature_seed, ANIMATION_STAR_TWINKLE_V1};
 use color::{galaxy_background_ansi, galaxy_foreground_ansi};
 use hash::{hash_cell, hash_to_unit};
 
@@ -54,6 +59,91 @@ pub enum EffectiveRenderer {
     Ascii,
     /// Experimental 2×2 quadrant renderer (Spiral only).
     Quadrant,
+}
+
+/// Deterministic presentation context for one star-twinkle frame.
+///
+/// The context is derived from one resolved scene and is consumed only by
+/// renderers at presentation time. It never changes the prepared density or
+/// any generation RNG stream. `frame_count` includes both static endpoint
+/// frames, so frame `0` and frame `frame_count - 1` are always the exact base
+/// render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StarTwinkleFrame {
+    /// Concrete seed captured from the resolved scene.
+    pub(crate) scene_seed: u64,
+    /// Zero-based frame index in the fixed intro sequence.
+    pub(crate) frame_index: u32,
+    /// Total number of frames in the fixed intro sequence.
+    pub(crate) frame_count: u32,
+}
+
+const TWINKLE_CYCLE_STEPS: u64 = 8;
+
+/// Applies subtle, deterministic tier modulation to an existing star glyph.
+///
+/// The existing star decision remains authoritative: `None` and a space stay
+/// empty, and only the three allowed tiers (`.`, `*`, `+`) are modulated. A
+/// stable phase derived from the resolved scene seed, the versioned twinkle
+/// namespace, and terminal-cell coordinates drives a short temporal cycle.
+/// Modulation is clamped at the faint/bright endpoints and is disabled for
+/// frame `0` and the final frame.
+pub(crate) fn twinkle_star_glyph(
+    base: Option<char>,
+    scene_seed: u64,
+    x: usize,
+    y: usize,
+    frame_index: u32,
+    frame_count: u32,
+) -> Option<char> {
+    let base = base?;
+
+    if base == ' ' {
+        return Some(base);
+    }
+
+    let (tier, tiers): (i8, [char; 3]) = match base {
+        '.' => (0, ['.', '*', '+']),
+        '*' => (1, ['.', '*', '+']),
+        '+' => (2, ['.', '*', '+']),
+        _ => return Some(base),
+    };
+
+    if frame_count <= 1 || frame_index == 0 || frame_index >= frame_count.saturating_sub(1) {
+        return Some(base);
+    }
+
+    let twinkle_seed = derive_feature_seed(scene_seed, ANIMATION_STAR_TWINKLE_V1);
+    let phase = hash_cell(x, y, twinkle_seed) % TWINKLE_CYCLE_STEPS;
+    let cycle_step = (phase + u64::from(frame_index)) % TWINKLE_CYCLE_STEPS;
+    let delta = match cycle_step {
+        2 | 3 => 1,
+        6 | 7 => -1,
+        _ => 0,
+    };
+
+    let modulated_tier = (tier + delta).clamp(0, 2) as usize;
+    Some(tiers[modulated_tier])
+}
+
+/// Applies a frame context to a base star when animation is enabled.
+fn maybe_twinkle_star(
+    base: Option<char>,
+    x: usize,
+    y: usize,
+    frame: Option<StarTwinkleFrame>,
+) -> Option<char> {
+    match frame {
+        Some(frame) => twinkle_star_glyph(
+            base,
+            frame.scene_seed,
+            x,
+            y,
+            frame.frame_index,
+            frame.frame_count,
+        ),
+        None => base,
+    }
 }
 
 /// Maps a resolved model and effective renderer to the terminal-cell
@@ -98,7 +188,26 @@ pub fn render_half_blocks(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
-    let star_seed = star_field_seed(canvas);
+    render_half_blocks_with_twinkle(canvas, threshold, colors_enabled, palette, None, None)
+}
+
+/// Renders half-block art with an optional deterministic star-twinkle frame.
+///
+/// `star_canvas` optionally pins the background-star decision (star seed and
+/// per-cell local density) to a reference canvas, so that a frame sequence
+/// whose structure canvas varies per frame still shows the exact same
+/// background stars. When `None`, the star decision uses `canvas` itself
+/// (the legacy behavior).
+pub(crate) fn render_half_blocks_with_twinkle(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    frame: Option<StarTwinkleFrame>,
+    star_canvas: Option<&[Vec<f64>]>,
+) -> Vec<String> {
+    let star_source = star_canvas.unwrap_or(canvas);
+    let star_seed = star_field_seed(star_source);
 
     let width = canvas.first().map_or(0, Vec::len);
     let mut lines = Vec::with_capacity(canvas.len().div_ceil(2));
@@ -122,10 +231,25 @@ pub fn render_half_blocks(
             if !colors_enabled {
                 let galaxy_ch = glyph_for_half_block(top_visible, bottom_visible);
                 if galaxy_ch == ' ' {
-                    // Only inject background star if neither half is visible
-                    if let Some(star_ch) =
-                        star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed)
-                    {
+                    // Only inject background star if neither half is visible.
+                    // The star decision reads the (pinned) star canvas, not
+                    // the per-frame structure canvas.
+                    let star_top = star_source
+                        .get(y)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let star_bottom = star_source
+                        .get(y + 1)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    if let Some(star_ch) = maybe_twinkle_star(
+                        star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
+                        x,
+                        y / 2,
+                        frame,
+                    ) {
                         // Keep stars uncolored for portability
                         line.push_cell(star_ch, None, None);
                         continue;
@@ -156,9 +280,25 @@ pub fn render_half_blocks(
                 line.push_cell('▄', Some(fg), None);
             } else {
                 // Neither visible: plain space or background star
-                // Always emit a cell to preserve terminal width
-                let ch =
-                    star_glyph_for_cell(x, y / 2, top, bottom, threshold, star_seed).unwrap_or(' ');
+                // Always emit a cell to preserve terminal width. The star
+                // decision reads the (pinned) star canvas.
+                let star_top = star_source
+                    .get(y)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
+                let star_bottom = star_source
+                    .get(y + 1)
+                    .and_then(|row| row.get(x))
+                    .copied()
+                    .unwrap_or(0.0);
+                let ch = maybe_twinkle_star(
+                    star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
+                    x,
+                    y / 2,
+                    frame,
+                )
+                .unwrap_or(' ');
                 line.push_cell(ch, None, None);
             }
         }
@@ -203,7 +343,7 @@ pub(super) fn scale_visible(value: f64, threshold: f64) -> Option<f64> {
     }
 }
 
-pub(super) fn star_glyph_for_cell(
+pub(crate) fn star_glyph_for_cell(
     x: usize,
     y: usize,
     top: f64,
@@ -249,7 +389,7 @@ pub(super) fn star_glyph_for_cell(
 ///
 /// # Returns
 /// `Some(glyph)` for a star (`+`, `*`, or `.`), or `None` for no star.
-pub(super) fn star_glyph_for_local_density(
+pub(crate) fn star_glyph_for_local_density(
     x: usize,
     y: usize,
     local_density: f64,
@@ -279,7 +419,7 @@ pub(super) fn star_glyph_for_local_density(
     }
 }
 
-pub(super) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
+pub(crate) fn star_field_seed(canvas: &[Vec<f64>]) -> u64 {
     let mut hash = 0xcbf29ce484222325_u64;
 
     for (i, value) in canvas.iter().flatten().enumerate() {
@@ -682,6 +822,195 @@ mod tests {
             "Star glyph should be one of '.', '*', or '+', got '{}'",
             star_glyph
         );
+    }
+
+    #[test]
+    fn test_twinkle_helper_is_deterministic_and_preserves_endpoints() {
+        let base = Some('*');
+        let first = twinkle_star_glyph(base, 42, 7, 3, 2, 6);
+        let second = twinkle_star_glyph(base, 42, 7, 3, 2, 6);
+
+        assert_eq!(first, second);
+        assert_eq!(twinkle_star_glyph(base, 42, 7, 3, 0, 6), base);
+        assert_eq!(twinkle_star_glyph(base, 42, 7, 3, 5, 6), base);
+    }
+
+    #[test]
+    fn test_twinkle_helper_never_invents_or_hides_stars() {
+        for frame_index in 0..6 {
+            assert_eq!(twinkle_star_glyph(None, 42, 0, 0, frame_index, 6), None);
+            assert_eq!(
+                twinkle_star_glyph(Some(' '), 42, 0, 0, frame_index, 6),
+                Some(' ')
+            );
+
+            for base in ['.', '*', '+'] {
+                let glyph = twinkle_star_glyph(Some(base), 42, 0, 0, frame_index, 6)
+                    .expect("existing star must remain present");
+                assert!(
+                    matches!(glyph, '.' | '*' | '+'),
+                    "unexpected twinkle glyph {glyph:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_twinkle_helper_uses_asynchronous_per_star_phases() {
+        let outputs: Vec<Option<char>> = (0..64)
+            .map(|x| twinkle_star_glyph(Some('*'), 42, x, 0, 1, 6))
+            .collect();
+
+        assert!(
+            outputs.windows(2).any(|pair| pair[0] != pair[1]),
+            "different star coordinates must not all blink in lockstep"
+        );
+    }
+
+    #[test]
+    fn test_twinkle_helper_changes_a_controlled_intermediate_tier() {
+        let changed = (0..64).any(|x| twinkle_star_glyph(Some('.'), 42, x, 0, 1, 6) != Some('.'));
+
+        assert!(changed, "the deterministic fixture must visibly twinkle");
+    }
+
+    #[test]
+    fn test_twinkle_render_keeps_starfield_positions_fixed() {
+        let terminal = crate::terminal::Terminal::with_colors(true, false);
+        let canvas = vec![
+            vec![0.05, 0.10, 0.20, 0.0, 0.05, 0.10, 0.20, 0.0],
+            vec![0.0; 8],
+        ];
+        let static_frame = render_starfield(&canvas, false, &terminal, DEFAULT_PALETTE);
+        let intermediate = render_starfield_with_twinkle(
+            &canvas,
+            false,
+            &terminal,
+            DEFAULT_PALETTE,
+            Some(StarTwinkleFrame {
+                scene_seed: 42,
+                frame_index: 1,
+                frame_count: 6,
+            }),
+        );
+
+        let static_chars: Vec<char> = static_frame[0].chars().collect();
+        let intermediate_chars: Vec<char> = intermediate[0].chars().collect();
+        assert_eq!(static_chars.len(), intermediate_chars.len());
+        for (base, animated) in static_chars.iter().zip(intermediate_chars.iter()) {
+            assert_eq!(base.is_whitespace(), animated.is_whitespace());
+            if base.is_whitespace() {
+                assert_eq!(*animated, ' ');
+            } else {
+                assert!(matches!(animated, '.' | '*' | '+'));
+            }
+        }
+        assert!(
+            static_chars
+                .iter()
+                .zip(intermediate_chars.iter())
+                .any(|(base, animated)| base != animated),
+            "the controlled starfield fixture must change an intermediate tier"
+        );
+    }
+
+    #[test]
+    fn test_twinkle_render_preserves_galaxy_background_star_existence() {
+        let frame = Some(StarTwinkleFrame {
+            scene_seed: 42,
+            frame_index: 1,
+            frame_count: 6,
+        });
+        let fixture_canvas = |logical_columns_per_cell: usize| {
+            (2..=800)
+                .map(|terminal_width| terminal_width * logical_columns_per_cell)
+                .find_map(|logical_width| {
+                    let canvas = vec![vec![0.0; logical_width], vec![0.0; logical_width]];
+                    let star_seed = star_field_seed(&canvas);
+                    let terminal_width = logical_width / logical_columns_per_cell;
+                    let has_changed_star = (0..terminal_width).any(|x| {
+                        let base = star_glyph_for_local_density(x, 0, 0.0, 0.5, star_seed);
+                        base.is_some()
+                            && twinkle_star_glyph(Some(base.unwrap()), 42, x, 0, 1, 6) != base
+                    });
+                    has_changed_star.then_some(canvas)
+                })
+                .expect("bounded empty-galaxy fixture must contain a twinkling star")
+        };
+        let half_canvas = fixture_canvas(1);
+        let quadrant_canvas = fixture_canvas(2);
+
+        let cases = [
+            (
+                render_half_blocks(&half_canvas, 0.5, false, DEFAULT_PALETTE),
+                render_half_blocks_with_twinkle(
+                    &half_canvas,
+                    0.5,
+                    false,
+                    DEFAULT_PALETTE,
+                    frame,
+                    None,
+                ),
+            ),
+            (
+                crate::render::render_shades(&half_canvas, 0.5, false, DEFAULT_PALETTE),
+                crate::render::render_shades_with_twinkle(
+                    &half_canvas,
+                    0.5,
+                    false,
+                    DEFAULT_PALETTE,
+                    frame,
+                    None,
+                ),
+            ),
+            (
+                crate::render::render_ascii(&half_canvas, 0.5, false, DEFAULT_PALETTE),
+                crate::render::render_ascii_with_twinkle(
+                    &half_canvas,
+                    0.5,
+                    false,
+                    DEFAULT_PALETTE,
+                    frame,
+                    None,
+                ),
+            ),
+            (
+                render_quadrant_with_stars(&quadrant_canvas, 0.5, false, DEFAULT_PALETTE),
+                render_quadrant_with_stars_at_frame(
+                    &quadrant_canvas,
+                    0.5,
+                    false,
+                    DEFAULT_PALETTE,
+                    frame,
+                    None,
+                ),
+            ),
+        ];
+
+        for (case_index, (static_frame, animated_frame)) in cases.into_iter().enumerate() {
+            assert_eq!(static_frame.len(), animated_frame.len());
+            let mut saw_star = false;
+            let mut saw_change = false;
+            for (static_line, animated_line) in static_frame.iter().zip(animated_frame.iter()) {
+                for (base, animated) in static_line.chars().zip(animated_line.chars()) {
+                    if matches!(base, '.' | '*' | '+') {
+                        saw_star = true;
+                        assert!(matches!(animated, '.' | '*' | '+'));
+                    } else {
+                        assert_eq!(base, animated);
+                    }
+                    saw_change |= base != animated;
+                }
+            }
+            assert!(
+                saw_star,
+                "synthetic empty galaxy case {case_index} must contain a star"
+            );
+            assert!(
+                saw_change,
+                "an existing background star in case {case_index} must twinkle"
+            );
+        }
     }
 
     #[test]

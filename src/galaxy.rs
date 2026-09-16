@@ -5,7 +5,7 @@ use crate::render::topology::CellSamplingShape;
 use crate::seed::GenerationContext;
 use noise::{NoiseFn, OpenSimplex};
 use rand::rngs::StdRng;
-use rand::RngExt;
+use rand::{RngExt, SeedableRng};
 
 const TAU: f64 = std::f64::consts::PI * 2.0;
 
@@ -52,6 +52,164 @@ impl SpiralGalaxyConfig {
             arm_strength: rng.random_range(2.0..3.4),
             noise_scale: rng.random_range(3.5..6.0),
         }
+    }
+}
+
+/// Maximum angular excursion of the A5 spiral animation phase, in radians.
+///
+/// This is 2.5 degrees. At the outer edge of the disk (`r ~ 1.2` in
+/// normalized scene units, roughly one terminal cell per 0.1 units for the
+/// common art sizes) the corresponding arc is well below one terminal cell,
+/// so the motion reads as a slow living drift rather than a rotation.
+pub const SPIRAL_ANIMATION_MAX_PHASE_RAD: f64 = 2.5 * std::f64::consts::PI / 180.0;
+
+/// Deterministic angular phase of the A5 spiral animation at one frame.
+///
+/// The sequence is a symmetric bump that is exactly `0.0` at the first and
+/// the final frame, so both animation endpoints remain the static render.
+/// The middle of the sequence peaks at
+/// [`SPIRAL_ANIMATION_MAX_PHASE_RAD`]. The index is mirrored about the
+/// midpoint (`min(i, n-1-i)`) so frames equidistant from the endpoints are
+/// bit-identical, not merely mathematically symmetric.
+///
+/// For the current fixed 6-frame intro schedule this yields:
+/// frame 0: 0, frame 1: +1.4697 deg, frame 2: +2.3777 deg,
+/// frame 3: +2.3777 deg, frame 4: +1.4697 deg, frame 5: 0.
+///
+/// Parameters
+/// ----------
+/// frame_index : zero-based frame index in the intro sequence.
+/// frame_count : total number of frames in the intro sequence.
+///
+/// Returns
+/// -------
+/// Phase in radians, in `[0, SPIRAL_ANIMATION_MAX_PHASE_RAD]`, exactly
+/// `0.0` for the endpoint frames, a single-frame sequence, or indices
+/// outside the sequence.
+pub fn spiral_animation_phase_rad(frame_index: u32, frame_count: u32) -> f64 {
+    let last = frame_count.saturating_sub(1);
+    if frame_count <= 1 || frame_index == 0 || frame_index >= last {
+        return 0.0;
+    }
+
+    let mirrored = frame_index.min(last - frame_index);
+    let t = mirrored as f64 / last as f64;
+    SPIRAL_ANIMATION_MAX_PHASE_RAD * (std::f64::consts::PI * t).sin()
+}
+
+/// Minimum immutable morphology prepared once per Spiral scene (A5).
+///
+/// Captures everything the legacy generation pipeline derives before the
+/// density loop: the `SpiralGalaxyConfig` drawn from the legacy RNG, the
+/// optional bar and dust configurations drawn from their isolated feature
+/// streams, and the legacy `noise_seed`. Nothing in this struct is RNG state:
+/// it is the frozen, reusable result of one deterministic derivation, so an
+/// animated sequence re-evaluates the *same* morphology at several
+/// animation phases instead of re-rolling the RNG per frame.
+///
+/// The draw order in [`PreparedSpiralScene::draw`] is frozen to be identical
+/// to the pre-A5 `generate_spiral_galaxy_impl` pipeline, so every static
+/// render remains bit-identical.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedSpiralScene {
+    /// Morphology drawn from the legacy scene RNG.
+    pub config: SpiralGalaxyConfig,
+    /// Optional central bar from the `spiral/bar/v1` feature stream.
+    pub bar: Option<BarConfig>,
+    /// Optional dust lanes from the `spiral/dust/v1` feature stream.
+    pub dust: Option<DustLaneConfig>,
+    /// Legacy noise seed drawn after the bar/dust derivations.
+    pub noise_seed: u32,
+}
+
+impl PreparedSpiralScene {
+    /// Draws the prepared scene, consuming exactly the same RNG draws as the
+    /// legacy `generate_spiral_galaxy_impl` pipeline, in the same order:
+    ///
+    /// 1. `SpiralGalaxyConfig::from_rng` on the legacy RNG (9 draws).
+    /// 2. `BarConfig::from_context` on the isolated `spiral/bar/v1` stream
+    ///    (only when a context is supplied).
+    /// 3. `DustLaneConfig::from_context` on the isolated `spiral/dust/v1`
+    ///    stream (only when a context is supplied).
+    /// 4. One `u32` noise seed draw on the legacy RNG.
+    ///
+    /// The bar and dust derivations never advance the legacy RNG, so steps
+    /// 1 and 4 are bit-for-bit the same draws the legacy pipeline made.
+    pub fn draw(rng: &mut StdRng, context: Option<GenerationContext>) -> Self {
+        let config = SpiralGalaxyConfig::from_rng(rng);
+        let bar = context.and_then(BarConfig::from_context);
+        let dust = context.and_then(DustLaneConfig::from_context);
+        let noise_seed = rng.random::<u32>();
+
+        Self {
+            config,
+            bar,
+            dust,
+            noise_seed,
+        }
+    }
+
+    /// Prepares the scene from a concrete scene seed, mirroring exactly how
+    /// `engine::ArtModel::generate_density` seeds the Spiral generator:
+    /// a fresh `StdRng` from the concrete seed and a `GenerationContext`
+    /// from the same seed. Repeating the call with the same seed reproduces
+    /// the same scene bit-for-bit; no other RNG stream is touched.
+    pub fn for_scene_seed(seed: u64) -> Self {
+        let mut rng = StdRng::seed_from_u64(seed);
+        Self::draw(&mut rng, Some(GenerationContext::new(seed)))
+    }
+
+    /// Evaluates the Spiral density field for one animation phase.
+    ///
+    /// `animation_phase_rad` is the A5 angular phase: it rotates the spiral
+    /// pattern (arms plus dust lanes, and the bar when present) in the
+    /// intrinsic disk plane. A phase of exactly `0.0` reproduces the legacy
+    /// density bit-for-bit, because every phase-dependent expression is a
+    /// proven no-op at zero. Same scene + same phase + same terminal size
+    /// + same shape always yields a byte-identical `DensityMap`.
+    ///
+    /// The coarse/fine OpenSimplex noise texture stays stationary in disk
+    /// coordinates; only the arms, bar, and dust receive the phase, which is
+    /// intentional for the current subtle animation.
+    ///
+    /// Parameters
+    /// ----------
+    /// terminal_width : terminal cells requested by the user.
+    /// terminal_height : terminal cells requested by the user.
+    /// shape : terminal-cell sampling shape (HALF_BLOCK production, QUADRANT
+    ///   for the quadrant renderer).
+    /// animation_phase_rad : angular phase in radians (A5); `0.0` is the
+    ///   static render.
+    ///
+    /// Returns
+    /// -------
+    /// Density field at the shape's logical dimensions
+    /// (`max(W,1)*shape.columns() x max(H,1)*shape.rows()`).
+    pub fn density_at(
+        &self,
+        terminal_width: usize,
+        terminal_height: usize,
+        shape: CellSamplingShape,
+        animation_phase_rad: f64,
+    ) -> DensityMap {
+        let geometry = SamplingGeometry::for_terminal(terminal_width, terminal_height, shape);
+        let coarse_noise = OpenSimplex::new(self.noise_seed);
+        let fine_noise = OpenSimplex::new(self.noise_seed.wrapping_add(1));
+
+        let high = DensityMap::from_fn(geometry.high_width(), geometry.high_height(), |sx, sy| {
+            spiral_density(
+                geometry.normalized_x(sx),
+                geometry.normalized_y(sy),
+                &self.config,
+                self.bar,
+                self.dust,
+                &coarse_noise,
+                &fine_noise,
+                animation_phase_rad,
+            )
+        });
+
+        high.downsample_average(geometry.logical_width(), geometry.logical_height())
     }
 }
 
@@ -233,49 +391,23 @@ fn generate_spiral_galaxy_impl(
     context: Option<GenerationContext>,
     shape: CellSamplingShape,
 ) -> DensityMap {
-    let config = SpiralGalaxyConfig::from_rng(rng);
-
-    // Derive the optional central bar exactly once per scene from the isolated
-    // feature stream. `BarConfig::from_context` never advances the legacy RNG,
-    // so the existing `SpiralGalaxyConfig` and `noise_seed` draws are preserved
-    // bit-for-bit.
-    let bar = context.and_then(BarConfig::from_context);
-
-    // Derive the optional dust lanes exactly once per scene from the isolated
-    // dust feature stream, independently of the bar stream.
-    // `DustLaneConfig::from_context` never advances the legacy RNG, so the
-    // existing `SpiralGalaxyConfig` and `noise_seed` draws are preserved
-    // bit-for-bit. When no context is supplied (the legacy test path) the dust
-    // is absent and the density reduces exactly to the pre-dust Spiral model.
-    let dust = context.and_then(DustLaneConfig::from_context);
-
-    // The sampling geometry owns the dimension chain:
-    //   terminal W×H
-    //     -> logical max(W,1)*shape.columns() × max(H,1)*shape.rows()
-    //     -> supersampled logical_width*3 × logical_height*3
-    //     -> average reduction back to the logical dimensions.
-    // The production shape is HALF_BLOCK (1×2), which reproduces the legacy
-    // W×2H logical field and 3W×6H supersampled field bit-for-bit.
-    let geometry = SamplingGeometry::for_terminal(terminal_width, terminal_height, shape);
-
-    let noise_seed = rng.random::<u32>();
-    let coarse_noise = OpenSimplex::new(noise_seed);
-    let fine_noise = OpenSimplex::new(noise_seed.wrapping_add(1));
-
-    let high = DensityMap::from_fn(geometry.high_width(), geometry.high_height(), |sx, sy| {
-        let x = geometry.normalized_x(sx);
-        let y = geometry.normalized_y(sy);
-
-        spiral_density(x, y, &config, bar, dust, &coarse_noise, &fine_noise)
-    });
-
-    high.downsample_average(geometry.logical_width(), geometry.logical_height())
+    // Derive the prepared scene exactly once with the frozen draw order
+    // (`PreparedSpiralScene::draw`), then evaluate the static density at a
+    // zero animation phase, which is a bit-for-bit no-op. The sampling
+    // geometry, supersampling, and reduction live in `density_at` and are
+    // unchanged from the legacy pipeline.
+    let scene = PreparedSpiralScene::draw(rng, context);
+    scene.density_at(terminal_width, terminal_height, shape, 0.0)
 }
 
 fn normalized_coord(i: usize, n: usize) -> f64 {
     2.0 * ((i as f64 + 0.5) / n as f64 - 0.5)
 }
 
+// Eight parameters are inherent to the per-sample signature: the field must
+// stay a pure function of (position, frozen morphology, noise, phase) so the
+// animated frames and the static render share one code path.
+#[allow(clippy::too_many_arguments)]
 fn spiral_density(
     x: f64,
     y: f64,
@@ -284,6 +416,7 @@ fn spiral_density(
     dust: Option<DustLaneConfig>,
     coarse_noise: &OpenSimplex,
     fine_noise: &OpenSimplex,
+    animation_phase_rad: f64,
 ) -> f64 {
     // Half-block glyphs already double the vertical sampling. If this model is
     // later rendered in pure ASCII, increase this factor toward ~2.0.
@@ -313,7 +446,26 @@ fn spiral_density(
 
     // The bar is evaluated in the same intrinsic disk plane as the arms. When
     // absent, the composition reduces exactly to the legacy Spiral model.
-    let bar_term = bar.map(|b| bar_density(xr, yd, b)).unwrap_or(0.0);
+    // With a non-zero A5 animation phase the bar renders at
+    // `angle_rad + phase` so that it co-rotates rigidly with the spiral
+    // pattern: arm 0 keeps reaching the bar orientation at
+    // `r = bar.half_length` for every phase. At a zero phase the legacy
+    // expression is used verbatim, so the static density stays bit-identical.
+    let bar_term = if animation_phase_rad == 0.0 {
+        bar.map(|b| bar_density(xr, yd, b)).unwrap_or(0.0)
+    } else {
+        bar.map(|b| {
+            bar_density(
+                xr,
+                yd,
+                BarConfig {
+                    angle_rad: b.angle_rad + animation_phase_rad,
+                    ..b
+                },
+            )
+        })
+        .unwrap_or(0.0)
+    };
 
     // When a bar is present, the arms are gated by a smooth radial transition
     // centered near the bar end so arm 0 does not run at full strength through
@@ -322,10 +474,10 @@ fn spiral_density(
     // no-ops when the bar is absent.
     let (arms, arm_gate_value) = if let Some(b) = bar {
         let gate = arm_gate(r, b);
-        let arms = spiral_arm_density(r, theta, config, Some(b));
+        let arms = spiral_arm_density(r, theta, config, Some(b), animation_phase_rad);
         (arms, gate)
     } else {
-        let arms = spiral_arm_density(r, theta, config, None);
+        let arms = spiral_arm_density(r, theta, config, None, animation_phase_rad);
         (arms, 1.0)
     };
 
@@ -361,7 +513,7 @@ fn spiral_density(
             let arm_clump = arms * arm_gate_value * clumpiness;
             let luminous_disk = disk + arm_clump;
             let tau = dust.strength
-                * dust_lane_profile(r, theta, config, bar, &dust)
+                * dust_lane_profile(r, theta, config, bar, &dust, animation_phase_rad)
                 * dust_radial_gate(r, bar, config);
             let extinction = (-tau).exp();
             bulge + bar_term + luminous_disk * extinction + stellar_knots
@@ -503,7 +655,7 @@ fn dust_radial_gate(r: f64, bar: Option<BarConfig>, config: &SpiralGalaxyConfig)
 ///
 /// The dust lanes are a signed phase-offset copy of the stellar-arm geometry:
 /// each dust ridge sits at
-/// `spiral_base_theta(r, config, bar) + arm * (TAU / arms) + dust.offset`,
+/// `spiral_base_theta(r, config, bar, animation_phase_rad) + arm * (TAU / arms) + dust.offset`,
 /// evaluated in the same intrinsic/deprojected disk frame as the stellar
 /// arms (including the bar phase alignment when a bar is present). Each arm
 /// contributes
@@ -523,6 +675,10 @@ fn dust_radial_gate(r: f64, bar: Option<BarConfig>, config: &SpiralGalaxyConfig)
 /// config : spiral configuration (uses `arms`, `pitch`, `arm_width`).
 /// bar : optional bar configuration (bar phase alignment is inherited).
 /// dust : dust-lane configuration (uses `offset`, `width_factor`).
+/// animation_phase_rad : A5 angular phase in radians; `0.0` is the static
+///   render. The whole dust pattern shifts by exactly the same phase as the
+///   stellar arms (the offset `dust.offset` is preserved), so no arm/dust
+///   phase separation can occur.
 ///
 /// Returns
 /// -------
@@ -534,8 +690,9 @@ fn dust_lane_profile(
     config: &SpiralGalaxyConfig,
     bar: Option<BarConfig>,
     dust: &DustLaneConfig,
+    animation_phase_rad: f64,
 ) -> f64 {
-    let base_theta = spiral_base_theta(r, config, bar);
+    let base_theta = spiral_base_theta(r, config, bar, animation_phase_rad);
     let arm_spacing = TAU / config.arms as f64;
     let width = local_arm_width(r, config) * dust.width_factor;
 
@@ -581,20 +738,42 @@ fn bar_phase_offset(bar: BarConfig, pitch: f64) -> f64 {
 /// `spiral_arm_density`; the dust-lane profile reuses it so stellar-arm and
 /// dust geometry cannot diverge.
 ///
+/// The A5 animation phase is applied here, in this single shared seam, so
+/// every consumer that derives its angular position from the spiral base
+/// angle (the stellar arms and the dust lanes) moves in lockstep. When a bar
+/// is present, the bar itself is rendered at `angle_rad + phase` by
+/// `spiral_density`, which preserves the arm-0-to-bar anchoring at
+/// `r = bar.half_length` for every phase.
+///
 /// Parameters
 /// ----------
 /// r : radius in the intrinsic disk plane (dimensionless scene units).
 /// config : spiral configuration (uses `pitch`).
 /// bar : optional bar configuration (uses `half_length` and `angle_rad`).
+/// animation_phase_rad : A5 angular phase in radians; `0.0` is the static
+///   render. The phase is appended only when non-zero, so a zero phase
+///   leaves the legacy evaluation order bit-for-bit untouched.
 ///
 /// Returns
 /// -------
-/// Base angle of arm 0 in radians (unwrapped; arm `k` adds `k * TAU / arms`).
-fn spiral_base_theta(r: f64, config: &SpiralGalaxyConfig, bar: Option<BarConfig>) -> f64 {
+/// Base angle of arm 0 in radians (unwrapped; arm `k` adds `k * TAU / arms`),
+/// plus the animation phase when non-zero.
+fn spiral_base_theta(
+    r: f64,
+    config: &SpiralGalaxyConfig,
+    bar: Option<BarConfig>,
+    animation_phase_rad: f64,
+) -> f64 {
     let mut base_theta = (r / SPIRAL_LOG_A).max(1.0e-4).ln() / config.pitch;
 
     if let Some(bar) = bar {
         base_theta += bar_phase_offset(bar, config.pitch);
+    }
+
+    // A5 animation phase: added only when non-zero so that a zero phase
+    // performs no extra operation at all (bit-for-bit legacy no-op).
+    if animation_phase_rad != 0.0 {
+        base_theta += animation_phase_rad;
     }
 
     base_theta
@@ -624,6 +803,7 @@ fn spiral_arm_density(
     theta: f64,
     config: &SpiralGalaxyConfig,
     bar: Option<BarConfig>,
+    animation_phase_rad: f64,
 ) -> f64 {
     if r < 0.045 {
         return 0.0;
@@ -631,7 +811,10 @@ fn spiral_arm_density(
 
     // Logarithmic spiral: r = a * exp(b * theta).
     // We invert it to compare the observed angle against the nearest arm angle.
-    let base_theta = spiral_base_theta(r, config, bar);
+    // The A5 animation phase is applied through `spiral_base_theta`, the
+    // shared seam with the dust-lane profile, so arms and dust move in
+    // lockstep.
+    let base_theta = spiral_base_theta(r, config, bar, animation_phase_rad);
 
     let arm_spacing = TAU / config.arms as f64;
     let radial_fade = (-r / config.disk_scale).exp();
@@ -1086,8 +1269,17 @@ mod tests {
         let x = xr * cos_r - yr * sin_r;
         let y = xr * sin_r + yr * cos_r;
 
-        let barred = spiral_density(x, y, &config, Some(bar), None, &coarse_noise, &fine_noise);
-        let legacy = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise);
+        let barred = spiral_density(
+            x,
+            y,
+            &config,
+            Some(bar),
+            None,
+            &coarse_noise,
+            &fine_noise,
+            0.0,
+        );
+        let legacy = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise, 0.0);
         let bar_term = bar_density(xr, yd, bar);
 
         assert!(bar_term > 0.0, "test point must lie inside the bar support");
@@ -1139,7 +1331,7 @@ mod tests {
             let theta = TAU * (i as f64) / 720.0;
             let x = r0 * theta.cos();
             let y = r0 * theta.sin();
-            let arms_ungated = spiral_arm_density(r0, theta, &config, Some(bar));
+            let arms_ungated = spiral_arm_density(r0, theta, &config, Some(bar), 0.0);
             let fine = normalized_noise(
                 fine_noise.get([x * config.noise_scale * 5.0, y * config.noise_scale * 5.0]),
             );
@@ -1150,7 +1342,16 @@ mod tests {
         }
         let (knot, x, y) = best.expect("no sample with ungated arms and non-zero fine noise");
 
-        let full = spiral_density(x, y, &config, Some(bar), None, &coarse_noise, &fine_noise);
+        let full = spiral_density(
+            x,
+            y,
+            &config,
+            Some(bar),
+            None,
+            &coarse_noise,
+            &fine_noise,
+            0.0,
+        );
         let r = (x * x + y * y).sqrt();
         let reference = gaussian(r, config.bulge_sigma) * 0.30
             + (-r / config.disk_scale).exp() * 0.035
@@ -1220,7 +1421,7 @@ mod tests {
             for r in [0.05, 0.1, 0.2, 0.5, 1.0] {
                 for i in 0..360 {
                     let theta = TAU * (i as f64) / 360.0;
-                    let p = dust_lane_profile(r, theta, &config, bar, &dust);
+                    let p = dust_lane_profile(r, theta, &config, bar, &dust, 0.0);
                     assert!(p.is_finite(), "profile not finite at r={r} theta={theta}");
                     assert!(p >= 0.0, "profile negative at r={r} theta={theta}");
                     assert!(p <= 1.0, "profile above 1 at r={r} theta={theta}");
@@ -1235,8 +1436,8 @@ mod tests {
         let dust = sample_dust();
         let r = 0.3;
 
-        let lane_theta = spiral_base_theta(r, &config, None) + dust.offset;
-        let p = dust_lane_profile(r, lane_theta, &config, None, &dust);
+        let lane_theta = spiral_base_theta(r, &config, None, 0.0) + dust.offset;
+        let p = dust_lane_profile(r, lane_theta, &config, None, &dust, 0.0);
         assert!(
             (p - 1.0).abs() < 1.0e-12,
             "profile on the offset lane must be ~1: {p}"
@@ -1249,12 +1450,12 @@ mod tests {
         let dust = sample_dust();
         let r = 0.3;
 
-        let lane_theta = spiral_base_theta(r, &config, None) + dust.offset;
-        let on_lane = dust_lane_profile(r, lane_theta, &config, None, &dust);
+        let lane_theta = spiral_base_theta(r, &config, None, 0.0) + dust.offset;
+        let on_lane = dust_lane_profile(r, lane_theta, &config, None, &dust, 0.0);
 
         // Halfway between the two arm ridges (2 arms => spacing TAU/2).
         let off_lane_theta = lane_theta + TAU / (2.0 * config.arms as f64);
-        let off_lane = dust_lane_profile(r, off_lane_theta, &config, None, &dust);
+        let off_lane = dust_lane_profile(r, off_lane_theta, &config, None, &dust, 0.0);
 
         assert!(on_lane > off_lane, "off-lane profile must be lower");
         assert!(
@@ -1268,7 +1469,7 @@ mod tests {
         let config = sample_spiral_config();
         let r = 0.3;
         // A fixed non-zero off-lane point (0.05 rad from the lane ridge).
-        let theta = spiral_base_theta(r, &config, None) + 0.10 + 0.05;
+        let theta = spiral_base_theta(r, &config, None, 0.0) + 0.10 + 0.05;
 
         let narrow = DustLaneConfig {
             strength: 0.40,
@@ -1281,8 +1482,8 @@ mod tests {
             width_factor: 1.2,
         };
 
-        let p_narrow = dust_lane_profile(r, theta, &config, None, &narrow);
-        let p_wide = dust_lane_profile(r, theta, &config, None, &wide);
+        let p_narrow = dust_lane_profile(r, theta, &config, None, &narrow, 0.0);
+        let p_wide = dust_lane_profile(r, theta, &config, None, &wide, 0.0);
 
         assert!(p_wide >= p_narrow, "wider lane must not lower the profile");
         assert!(
@@ -1300,7 +1501,7 @@ mod tests {
         // twice.
         let config = sample_spiral_config();
         let r = 0.3;
-        let base_theta = spiral_base_theta(r, &config, None);
+        let base_theta = spiral_base_theta(r, &config, None, 0.0);
 
         let zero_offset = DustLaneConfig {
             strength: 0.40,
@@ -1313,8 +1514,8 @@ mod tests {
             width_factor: 0.5,
         };
 
-        let p_zero_on_arm = dust_lane_profile(r, base_theta, &config, None, &zero_offset);
-        let p_shifted_on_arm = dust_lane_profile(r, base_theta, &config, None, &shifted);
+        let p_zero_on_arm = dust_lane_profile(r, base_theta, &config, None, &zero_offset, 0.0);
+        let p_shifted_on_arm = dust_lane_profile(r, base_theta, &config, None, &shifted, 0.0);
 
         assert!(
             (p_zero_on_arm - 1.0).abs() < 1.0e-12,
@@ -1326,7 +1527,8 @@ mod tests {
         );
 
         // The shifted lane must sit exactly at base_theta + offset.
-        let p_shifted_on_lane = dust_lane_profile(r, base_theta + 0.20, &config, None, &shifted);
+        let p_shifted_on_lane =
+            dust_lane_profile(r, base_theta + 0.20, &config, None, &shifted, 0.0);
         assert!(
             (p_shifted_on_lane - 1.0).abs() < 1.0e-12,
             "shifted lane must be at base_theta + offset: {p_shifted_on_lane}"
@@ -1344,7 +1546,7 @@ mod tests {
         let r = bar.half_length;
 
         let expected_lane = bar.angle_rad + dust.offset;
-        let p = dust_lane_profile(r, expected_lane, &config, Some(bar), &dust);
+        let p = dust_lane_profile(r, expected_lane, &config, Some(bar), &dust, 0.0);
         assert!(
             p > 0.99,
             "dust lane must inherit the bar phase alignment: {p}"
@@ -1427,7 +1629,7 @@ mod tests {
                 for i in 0..120 {
                     let theta = TAU * (i as f64) / 120.0;
                     let tau = dust.strength
-                        * dust_lane_profile(r, theta, &config, bar, &dust)
+                        * dust_lane_profile(r, theta, &config, bar, &dust, 0.0)
                         * dust_radial_gate(r, bar, &config);
                     let extinction = (-tau).exp();
 
@@ -1464,16 +1666,25 @@ mod tests {
         // boundary (2 * bulge_sigma = 0.12) so the radial gate is exactly 1,
         // and theta sits on the dust lane so the profile is exactly 1.
         let r = 0.30;
-        let theta = spiral_base_theta(r, &config, None) + dust.offset;
+        let theta = spiral_base_theta(r, &config, None, 0.0) + dust.offset;
         let x = r * theta.cos();
         let y = r * theta.sin();
 
-        let dusty = spiral_density(x, y, &config, None, Some(dust), &coarse_noise, &fine_noise);
-        let dustless = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise);
+        let dusty = spiral_density(
+            x,
+            y,
+            &config,
+            None,
+            Some(dust),
+            &coarse_noise,
+            &fine_noise,
+            0.0,
+        );
+        let dustless = spiral_density(x, y, &config, None, None, &coarse_noise, &fine_noise, 0.0);
 
         let bulge = gaussian(r, config.bulge_sigma) * 0.30;
         let disk = (-r / config.disk_scale).exp() * 0.035;
-        let arms = spiral_arm_density(r, theta, &config, None);
+        let arms = spiral_arm_density(r, theta, &config, None, 0.0);
         let coarse =
             normalized_noise(coarse_noise.get([x * config.noise_scale, y * config.noise_scale]));
         let fine = normalized_noise(
@@ -1485,7 +1696,7 @@ mod tests {
         let arm_clump = arms * clumpiness;
         let luminous_disk = disk + arm_clump;
         let tau = dust.strength
-            * dust_lane_profile(r, theta, &config, None, &dust)
+            * dust_lane_profile(r, theta, &config, None, &dust, 0.0)
             * dust_radial_gate(r, None, &config);
         let extinction = (-tau).exp();
 
@@ -1887,6 +2098,486 @@ mod tests {
                 legacy.density, shape_aware,
                 "generate_scene (HALF_BLOCK) must equal the shape-aware HALF_BLOCK path for seed {seed}"
             );
+        }
+    }
+
+    // ---- A5: prepared scene and animation phase ----
+
+    #[test]
+    fn test_spiral_animation_phase_schedule_shape_and_bounds() {
+        // Endpoints are exactly zero (bit-for-bit), never negative, never
+        // above the 2.5-degree cap, and the sequence is bit-symmetric about
+        // the midpoint for the fixed 6-frame schedule.
+        let n = 6_u32;
+        let phases: Vec<f64> = (0..n).map(|i| spiral_animation_phase_rad(i, n)).collect();
+
+        assert_eq!(
+            phases[0].to_bits(),
+            0f64.to_bits(),
+            "frame 0 must be exactly 0.0"
+        );
+        assert_eq!(
+            phases[5].to_bits(),
+            0f64.to_bits(),
+            "final frame must be exactly 0.0"
+        );
+        for (i, p) in phases.iter().enumerate() {
+            assert!(*p >= 0.0, "phase must be non-negative at frame {i}");
+            assert!(
+                *p <= SPIRAL_ANIMATION_MAX_PHASE_RAD,
+                "phase must stay within the cap at frame {i}"
+            );
+        }
+        // Bit-identical symmetry about the midpoint.
+        assert_eq!(phases[1].to_bits(), phases[4].to_bits(), "frames 1 and 4");
+        assert_eq!(phases[2].to_bits(), phases[3].to_bits(), "frames 2 and 3");
+        // Monotone rise to the middle, then the mirrored fall.
+        assert!(phases[1] < phases[2], "phase must rise toward the middle");
+        // The whole excursion stays in the "few degrees" band.
+        const { assert!(SPIRAL_ANIMATION_MAX_PHASE_RAD < 0.06_f64) };
+        // Degenerate schedules never emit a phase.
+        assert_eq!(spiral_animation_phase_rad(0, 1), 0.0);
+        assert_eq!(spiral_animation_phase_rad(1, 1), 0.0);
+        assert_eq!(spiral_animation_phase_rad(0, 2), 0.0);
+        assert_eq!(spiral_animation_phase_rad(1, 2), 0.0);
+    }
+
+    #[test]
+    fn test_prepared_scene_draw_order_is_frozen() {
+        // The prepared scene must consume exactly the legacy draws, in the
+        // legacy order: config from the legacy RNG, bar and dust from their
+        // isolated feature streams, noise seed from the legacy RNG.
+        for seed in [4_u64, 16, 42] {
+            let context = GenerationContext::new(seed);
+
+            let mut rng_a = StdRng::seed_from_u64(seed);
+            let scene = PreparedSpiralScene::draw(&mut rng_a, Some(context));
+
+            let mut rng_b = StdRng::seed_from_u64(seed);
+            let config = SpiralGalaxyConfig::from_rng(&mut rng_b);
+            let bar = BarConfig::from_context(context);
+            let dust = DustLaneConfig::from_context(context);
+            let noise_seed = rng_b.random::<u32>();
+
+            assert_eq!(scene.config, config, "config for seed {seed}");
+            assert_eq!(scene.bar, bar, "bar for seed {seed}");
+            assert_eq!(scene.dust, dust, "dust for seed {seed}");
+            assert_eq!(scene.noise_seed, noise_seed, "noise seed for seed {seed}");
+        }
+    }
+
+    #[test]
+    fn test_prepared_scene_matches_legacy_generation_bit_for_bit() {
+        // Refactor guard: evaluating the prepared scene at a zero phase must
+        // be byte-identical to the legacy generation pipeline for the frozen
+        // audit seeds (unbarred 4, barred 16, barred+dusty 42) in both
+        // production sampling shapes.
+        for seed in [4_u64, 16, 42] {
+            for shape in [CellSamplingShape::HALF_BLOCK, CellSamplingShape::QUADRANT] {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let legacy = generate_spiral_galaxy_with_shape(
+                    30,
+                    15,
+                    &mut rng,
+                    GenerationContext::new(seed),
+                    shape,
+                );
+
+                let scene = PreparedSpiralScene::for_scene_seed(seed);
+                let prepared = scene.density_at(30, 15, shape, 0.0);
+
+                assert_eq!(
+                    legacy, prepared,
+                    "seed {seed} {shape:?}: zero-phase prepared density must match legacy"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_prepared_scene_is_deterministic_per_seed() {
+        // Same concrete scene seed always reproduces the same immutable
+        // morphology; different seeds produce different scenes.
+        for seed in [4_u64, 16, 42] {
+            let a = PreparedSpiralScene::for_scene_seed(seed);
+            let b = PreparedSpiralScene::for_scene_seed(seed);
+            assert_eq!(a, b, "scene must be deterministic for seed {seed}");
+        }
+        let s4 = PreparedSpiralScene::for_scene_seed(4);
+        let s16 = PreparedSpiralScene::for_scene_seed(16);
+        let s42 = PreparedSpiralScene::for_scene_seed(42);
+        assert_ne!(s4.config, s16.config);
+        assert_ne!(s4.config, s42.config);
+        assert_ne!(s16.config, s42.config);
+    }
+
+    #[test]
+    fn test_animation_frame_sequence_density_contract() {
+        // Core A5 density contract on a controlled fixture (seed 16 is
+        // barred; 4 is unbarred+dusty; 42 is barred+dusty):
+        // - frame 0 and frame 5 are byte-identical to the static render;
+        // - intermediate frames differ from the static render;
+        // - mirrored frames are byte-identical to each other.
+        for seed in [4_u64, 16, 5] {
+            let scene = PreparedSpiralScene::for_scene_seed(seed);
+            let static_density = scene.density_at(30, 15, CellSamplingShape::HALF_BLOCK, 0.0);
+
+            let mut frames = Vec::with_capacity(6);
+            for frame in 0..6_u32 {
+                let phase = spiral_animation_phase_rad(frame, 6);
+                frames.push(scene.density_at(30, 15, CellSamplingShape::HALF_BLOCK, phase));
+            }
+
+            assert_eq!(
+                frames[0], static_density,
+                "seed {seed}: frame 0 must equal the static density"
+            );
+            assert_eq!(
+                frames[5], frames[0],
+                "seed {seed}: final frame must equal frame 0"
+            );
+            assert_eq!(
+                frames[1], frames[4],
+                "seed {seed}: mirrored frames 1/4 must be identical"
+            );
+            assert_eq!(
+                frames[2], frames[3],
+                "seed {seed}: mirrored frames 2/3 must be identical"
+            );
+            for (frame, intermediate) in frames.iter().enumerate().skip(1).take(4) {
+                assert_ne!(
+                    intermediate, &static_density,
+                    "seed {seed}: intermediate frame {frame} must differ from static"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_same_seed_same_frame_is_byte_identical() {
+        // Determinism across repeated derivations: two independently built
+        // scenes from the same seed must produce byte-identical densities at
+        // every animation frame.
+        for seed in [4_u64, 42] {
+            for frame in 0..6_u32 {
+                let phase = spiral_animation_phase_rad(frame, 6);
+                let a = PreparedSpiralScene::for_scene_seed(seed).density_at(
+                    30,
+                    15,
+                    CellSamplingShape::HALF_BLOCK,
+                    phase,
+                );
+                let b = PreparedSpiralScene::for_scene_seed(seed).density_at(
+                    30,
+                    15,
+                    CellSamplingShape::HALF_BLOCK,
+                    phase,
+                );
+                assert_eq!(
+                    a, b,
+                    "seed {seed} frame {frame}: repeated derivation must be byte-identical"
+                );
+            }
+        }
+    }
+
+    /// Counts the angular maxima of the spiral-arm density at a fixed
+    /// radius: a robust proxy for the effective arm count at that radius.
+    fn count_arm_peaks(
+        r: f64,
+        config: &SpiralGalaxyConfig,
+        bar: Option<BarConfig>,
+        phase: f64,
+    ) -> usize {
+        const STEPS: usize = 3600;
+        let mut values = Vec::with_capacity(STEPS);
+        for step in 0..STEPS {
+            let theta = TAU * (step as f64) / STEPS as f64;
+            values.push(spiral_arm_density(r, theta, config, bar, phase));
+        }
+        let max = values.iter().cloned().fold(0.0_f64, f64::max);
+        values
+            .iter()
+            .enumerate()
+            .filter(|&(i, &v)| {
+                let prev = values[(i + STEPS - 1) % STEPS];
+                let next = values[(i + 1) % STEPS];
+                v > prev && v >= next && v > 0.5 * max
+            })
+            .count()
+    }
+
+    #[test]
+    fn test_arm_count_is_invariant_across_animation_frames() {
+        // The phase may move the arms but must never change their count:
+        // the angular peak count at several radii is identical at every
+        // animation phase for the frozen audit seeds.
+        for seed in [4_u64, 16, 42] {
+            let scene = PreparedSpiralScene::for_scene_seed(seed);
+            for r in [0.25, 0.5, 0.8] {
+                let base = count_arm_peaks(r, &scene.config, scene.bar, 0.0);
+                assert_eq!(
+                    base, scene.config.arms,
+                    "seed {seed} r={r}: static arm count must match the configured count"
+                );
+                for frame in 1..5_u32 {
+                    let phase = spiral_animation_phase_rad(frame, 6);
+                    let peaks = count_arm_peaks(r, &scene.config, scene.bar, phase);
+                    assert_eq!(
+                        peaks, scene.config.arms,
+                        "seed {seed} r={r} frame {frame}: arm count must not change"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_spiral_base_theta_applies_animation_phase_exactly_once() {
+        // Exact phase seam: at a representative radius and configuration the
+        // base angle at phase `p` must exceed the static base angle by
+        // exactly `p` — a missing phase, a double application, or an
+        // accidental scaling would all shift the difference measurably.
+        // Terminal quantization makes rendered-glyph displacement a poor
+        // invariant, so the analytical seam is asserted directly. Covers the
+        // unbarred (seed 4) and barred (seed 16) configurations; the bar only
+        // adds a phase-independent offset, so the exact-once property must
+        // hold identically in both.
+        for (seed, expect_bar) in [(4_u64, false), (16_u64, true)] {
+            let scene = PreparedSpiralScene::for_scene_seed(seed);
+            assert_eq!(
+                scene.bar.is_some(),
+                expect_bar,
+                "seed {seed} bar fixture assumption must hold"
+            );
+            for r in [0.02, 0.25, 0.5, 0.85] {
+                for frame in 1..5_u32 {
+                    let phase = spiral_animation_phase_rad(frame, 6);
+                    let phased = spiral_base_theta(r, &scene.config, scene.bar, phase);
+                    let static_theta = spiral_base_theta(r, &scene.config, scene.bar, 0.0);
+                    assert!(
+                        (phased - static_theta - phase).abs() < 1.0e-12,
+                        "seed {seed} r={r} frame {frame}: phase must be applied exactly once                          (difference {} for phase {})",
+                        phased - static_theta,
+                        phase
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_bar_arm_anchoring_is_preserved_under_animation_phase() {
+        // Barred coherence: at r = bar.half_length, arm 0 must sit at the bar
+        // orientation for every phase. The bar itself renders at
+        // `angle_rad + phase`, so the relative bar-to-arm anchoring
+        // (base_theta - bar orientation) must be phase-invariant at every
+        // radius.
+        let scene = PreparedSpiralScene::for_scene_seed(16);
+        let Some(bar) = scene.bar else {
+            panic!("seed 16 must be barred for this fixture");
+        };
+        let reference =
+            spiral_base_theta(bar.half_length, &scene.config, Some(bar), 0.0) - bar.angle_rad;
+
+        for frame in 0..6_u32 {
+            let phase = spiral_animation_phase_rad(frame, 6);
+            let base_at_bar_end =
+                spiral_base_theta(bar.half_length, &scene.config, Some(bar), phase);
+            assert!(
+                (base_at_bar_end - (bar.angle_rad + phase) - reference).abs() < 1.0e-12,
+                "frame {frame}: arm 0 must stay anchored to the bar orientation at r = half_length"
+            );
+
+            // Phase-invariant relative anchoring at several radii.
+            for r in [0.1, 0.2, 0.35, 0.5] {
+                let relative_static =
+                    spiral_base_theta(r, &scene.config, Some(bar), 0.0) - bar.angle_rad;
+                let relative_phased =
+                    spiral_base_theta(r, &scene.config, Some(bar), phase) - (bar.angle_rad + phase);
+                assert!(
+                    (relative_static - relative_phased).abs() < 1.0e-12,
+                    "frame {frame} r={r}: relative bar-arm phase must be invariant"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_bar_density_major_axis_follows_the_animation_phase() {
+        // The rendered bar must co-rotate with the arms: at a non-zero phase
+        // the bar's major axis (maximum density direction at fixed radius)
+        // moves by exactly the phase, while the bar shape (length/width) is
+        // unchanged.
+        let scene = PreparedSpiralScene::for_scene_seed(16);
+        let Some(bar) = scene.bar else {
+            panic!("seed 16 must be barred for this fixture");
+        };
+        let r = 0.5 * bar.half_length;
+
+        for frame in 0..6_u32 {
+            let phase = spiral_animation_phase_rad(frame, 6);
+            let oriented = BarConfig {
+                angle_rad: bar.angle_rad + phase,
+                ..bar
+            };
+            // On the rotated major axis the bar is much denser than along the
+            // unrotated direction (the minor axis is short, so a 2.5-degree
+            // off-axis point sits measurably closer to the boundary).
+            let on_axis = bar_density(
+                r * (bar.angle_rad + phase).cos(),
+                r * (bar.angle_rad + phase).sin(),
+                oriented,
+            );
+            let off_axis = bar_density(r * bar.angle_rad.cos(), r * bar.angle_rad.sin(), oriented);
+            if phase == 0.0 {
+                // Zero phase: the two probe points coincide, so the densities
+                // must be exactly equal.
+                assert_eq!(
+                    on_axis, off_axis,
+                    "frame {frame}: zero phase must leave the bar untouched"
+                );
+            } else {
+                assert!(
+                    on_axis > off_axis,
+                    "frame {frame}: the bar major axis must follow the phase (on={on_axis} off={off_axis})"
+                );
+            }
+            // Shape constants are untouched by the phase.
+            assert_eq!(oriented.half_length, bar.half_length);
+            assert_eq!(oriented.axis_ratio, bar.axis_ratio);
+            assert_eq!(oriented.strength, bar.strength);
+        }
+    }
+
+    /// Finds the angular position of the strongest arm ridge (density
+    /// maximum) at a fixed radius, searching a fine circle.
+    fn arm_ridge_theta(
+        r: f64,
+        config: &SpiralGalaxyConfig,
+        bar: Option<BarConfig>,
+        phase: f64,
+    ) -> f64 {
+        let mut best_theta = 0.0_f64;
+        let mut best = -1.0_f64;
+        for step in 0..7200 {
+            let theta = TAU * (step as f64) / 7200.0;
+            let v = spiral_arm_density(r, theta, config, bar, phase);
+            if v > best {
+                best = v;
+                best_theta = theta;
+            }
+        }
+        best_theta
+    }
+
+    /// Finds the angular position of the strongest profile maximum inside
+    /// `center +/- window` on a fine local grid. A local (continuity-anchored)
+    /// search is used instead of a global circle scan because a two-arm
+    /// spiral has symmetric ridges separated by exactly half a turn, so a
+    /// global maximum could jump to the opposite arm between phases.
+    fn ridge_theta_near<F>(center: f64, window: f64, steps: usize, probe: F) -> f64
+    where
+        F: Fn(f64) -> f64,
+    {
+        let start = center - window;
+        let mut best_theta = start;
+        let mut best = -1.0_f64;
+        for step in 0..=steps {
+            let theta = start + 2.0 * window * (step as f64) / steps as f64;
+            let v = probe(theta);
+            if v > best {
+                best = v;
+                best_theta = theta;
+            }
+        }
+        best_theta
+    }
+
+    #[test]
+    fn test_arm_and_dust_ridges_move_in_lockstep() {
+        // Dust coherence: the stellar-arm ridge and the dust ridge must both
+        // shift by exactly the same phase, keeping the configured
+        // `dust.offset` between them, for both unbarred (4) and barred (5)
+        // fixtures. Ridges are tracked locally from the static frame so the
+        // comparison always follows the same arm.
+        for seed in [4_u64, 5] {
+            let scene = PreparedSpiralScene::for_scene_seed(seed);
+            let Some(dust) = scene.dust else {
+                panic!("seed {seed} must be dusty for this fixture");
+            };
+
+            let r = 0.5;
+            let arm_static = arm_ridge_theta(r, &scene.config, scene.bar, 0.0);
+            let dust_offset = dust.offset;
+            let dust_static = ridge_theta_near(arm_static + dust_offset, 0.5, 2880, |theta| {
+                dust_lane_profile(r, theta, &scene.config, scene.bar, &dust, 0.0)
+            });
+
+            // Static anchor: the measured dust-to-arm offset must be the
+            // configured offset (within the local grid resolution).
+            let offset_static = angular_distance(dust_static, arm_static);
+            assert!(
+                (offset_static - dust_offset).abs() < 2.0e-3,
+                "seed {seed}: static dust offset {offset_static} must equal the configured {dust_offset}"
+            );
+
+            let mut arm_prev = arm_static;
+            let mut phase_prev = 0.0_f64;
+            for frame in 1..5_u32 {
+                let phase = spiral_animation_phase_rad(frame, 6);
+                let arm = ridge_theta_near(arm_prev + (phase - phase_prev), 0.15, 2880, |theta| {
+                    spiral_arm_density(r, theta, &scene.config, scene.bar, phase)
+                });
+                let dust_theta = ridge_theta_near(arm + dust_offset, 0.5, 2880, |theta| {
+                    dust_lane_profile(r, theta, &scene.config, scene.bar, &dust, phase)
+                });
+                let offset_phased = angular_distance(dust_theta, arm);
+                assert!(
+                    (offset_phased - dust_offset).abs() < 2.0e-3,
+                    "seed {seed} frame {frame}: the dust offset relative to the arm must stay {dust_offset} (measured {offset_phased})"
+                );
+                // Both ridges advanced by exactly the phase excursion.
+                let arm_shift = angular_distance(arm, arm_static);
+                let dust_shift = angular_distance(dust_theta, dust_static);
+                assert!(
+                    (arm_shift - phase).abs() < 2.0e-3,
+                    "seed {seed} frame {frame}: the arm ridge must shift by the phase (shift {arm_shift}, phase {phase})"
+                );
+                assert!(
+                    (dust_shift - phase).abs() < 2.0e-3,
+                    "seed {seed} frame {frame}: the dust ridge must shift by the same phase (shift {dust_shift}, phase {phase})"
+                );
+                arm_prev = arm;
+                phase_prev = phase;
+            }
+        }
+    }
+
+    #[test]
+    fn test_zero_phase_density_is_bit_identical_to_static_generation() {
+        // The acceptance anchor: a zero animation phase must be exactly the
+        // static density, bit-for-bit, in both sampling shapes and for all
+        // morphology classes.
+        for seed in [4_u64, 16, 42] {
+            for shape in [CellSamplingShape::HALF_BLOCK, CellSamplingShape::QUADRANT] {
+                let scene = PreparedSpiralScene::for_scene_seed(seed);
+                let zero = scene.density_at(30, 15, shape, 0.0);
+
+                let mut rng = StdRng::seed_from_u64(seed);
+                let static_density = generate_spiral_galaxy_with_shape(
+                    30,
+                    15,
+                    &mut rng,
+                    GenerationContext::new(seed),
+                    shape,
+                );
+
+                assert_eq!(
+                    zero, static_density,
+                    "seed {seed} {shape:?}: zero phase must be bit-identical to static"
+                );
+            }
         }
     }
 }

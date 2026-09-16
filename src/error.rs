@@ -12,6 +12,13 @@ pub enum AppError {
     Cli(String),
     /// IO error.
     Io(String),
+    /// The `--animate` intro was interrupted by Ctrl+C.
+    ///
+    /// The process exits with conventional interrupted semantics (exit code
+    /// 130) without printing an error message.
+    Interrupted,
+    /// The `--animate` intro failed.
+    Animation(String),
 }
 
 impl fmt::Display for AppError {
@@ -21,6 +28,8 @@ impl fmt::Display for AppError {
             AppError::Render(msg) => write!(f, "failed to render art: {}", msg),
             AppError::Cli(msg) => write!(f, "CLI error: {}", msg),
             AppError::Io(msg) => write!(f, "IO error: {}", msg),
+            AppError::Interrupted => write!(f, "interrupted (Ctrl+C)"),
+            AppError::Animation(msg) => write!(f, "animation failed: {}", msg),
         }
     }
 }

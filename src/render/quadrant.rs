@@ -36,7 +36,8 @@
 use crate::render::ansi::AnsiForegroundLine;
 use crate::render::color::{galaxy_foreground_ansi, ColorPalette};
 use crate::render::topology::{CellSamplingShape, Quadrant};
-use crate::render::{star_field_seed, star_glyph_for_local_density};
+use crate::render::StarTwinkleFrame;
+use crate::render::{star_field_seed, star_glyph_for_local_density, twinkle_star_glyph};
 
 /// Quadrant glyph table indexed by the 4-bit visibility mask.
 ///
@@ -252,10 +253,33 @@ pub(crate) fn render_quadrant_with_stars(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
+    render_quadrant_with_stars_at_frame(canvas, threshold, colors_enabled, palette, None, None)
+}
+
+/// Renders star-aware Quadrant art with an optional deterministic twinkle frame.
+///
+/// `star_canvas` optionally pins the background-star decision (star seed and
+/// the four-subcell local-density suppression) to a reference canvas, so
+/// that a frame sequence whose structure canvas varies per frame still
+/// shows the exact same background stars. The structure visibility mask
+/// always reads `canvas`. When `None`, the star decision uses `canvas`
+/// itself (the legacy behavior).
+pub(crate) fn render_quadrant_with_stars_at_frame(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    frame: Option<StarTwinkleFrame>,
+    star_canvas: Option<&[Vec<f64>]>,
+) -> Vec<String> {
+    // The background-star decision is pinned to the reference star canvas
+    // when one is supplied (A5), so the star field never re-rolls between
+    // frames of an animated sequence.
+    let star_source = star_canvas.unwrap_or(canvas);
     let shape = CellSamplingShape::QUADRANT;
     let terminal_width = canvas.first().map_or(0, Vec::len).div_ceil(shape.columns());
     let terminal_height = canvas.len().div_ceil(shape.rows());
-    let star_seed = star_field_seed(canvas);
+    let star_seed = star_field_seed(star_source);
     let mut lines = Vec::with_capacity(terminal_height);
 
     for cell_y in 0..terminal_height {
@@ -290,14 +314,41 @@ pub(crate) fn render_quadrant_with_stars(
             } else {
                 // Visually empty cell: the four-subcell generalization of the
                 // two-half star suppression local density (f64::max semantics).
-                let local_density = values[0].max(values[1]).max(values[2]).max(values[3]);
+                // The star decision reads the (pinned) star canvas, not the
+                // per-frame structure canvas.
+                let mut star_values = [0.0f64; 4];
+                for (bit, quadrant) in Quadrant::ALL.iter().enumerate() {
+                    let (sub_x, sub_y) = quadrant.offset();
+                    let (logical_x, logical_y) = shape.logical_index(cell_x, cell_y, sub_x, sub_y);
+                    star_values[bit] = star_source
+                        .get(logical_y)
+                        .and_then(|row| row.get(logical_x))
+                        .copied()
+                        .unwrap_or(0.0);
+                }
+                let local_density = star_values[0]
+                    .max(star_values[1])
+                    .max(star_values[2])
+                    .max(star_values[3]);
                 match star_glyph_for_local_density(
                     cell_x,
                     cell_y,
                     local_density,
                     threshold,
                     star_seed,
-                ) {
+                )
+                .and_then(|base| {
+                    frame.map_or(Some(base), |frame| {
+                        twinkle_star_glyph(
+                            Some(base),
+                            frame.scene_seed,
+                            cell_x,
+                            cell_y,
+                            frame.frame_index,
+                            frame.frame_count,
+                        )
+                    })
+                }) {
                     Some(star) => line.push_plain(star),
                     None => line.push_plain(' '),
                 }

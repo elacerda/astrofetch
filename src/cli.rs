@@ -120,6 +120,14 @@ pub struct Args {
     #[clap(conflicts_with = "logo_only")]
     pub info_only: bool,
 
+    /// Play the final frame as a short terminal intro animation.
+    ///
+    /// Opt-in; only runs on an interactive terminal. Non-TTY stdout (pipes,
+    /// redirections) falls back to the regular single static frame.
+    #[arg(long)]
+    #[clap(conflicts_with = "info_only")]
+    pub animate: bool,
+
     /// Print the compact field set
     #[arg(long)]
     pub compact: bool,
@@ -263,6 +271,31 @@ mod tests {
     fn test_args_logo_only_and_info_only_conflict() {
         let result = Args::try_parse_from(["astrofetch", "--logo-only", "--info-only"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_animate_default_is_false() {
+        let args = Args::try_parse_from(["astrofetch"]).unwrap();
+        assert!(!args.animate);
+    }
+
+    #[test]
+    fn test_args_animate_flag() {
+        let args = Args::try_parse_from(["astrofetch", "--animate"]).unwrap();
+        assert!(args.animate);
+    }
+
+    #[test]
+    fn test_args_animate_conflicts_with_info_only() {
+        let result = Args::try_parse_from(["astrofetch", "--animate", "--info-only"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_args_animate_composes_with_logo_only() {
+        let args = Args::try_parse_from(["astrofetch", "--animate", "--logo-only"]).unwrap();
+        assert!(args.animate);
+        assert!(args.logo_only);
     }
 
     #[test]
