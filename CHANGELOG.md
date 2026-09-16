@@ -6,6 +6,14 @@ Changelog tracking starts with v0.5.0.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `--animate` terminal intro: a short deterministic 6-frame (~600 ms)
+  animation on interactive terminals, with star twinkle, bounded Starfield
+  micro-motion, and subtle coherent Spiral phase sway. Pipes/redirections fall
+  back to static output; Ctrl+C and terminal resize are handled safely, and
+  ordinary non-animated output remains unchanged.
+
 ## [1.0.1] - 2026-09-14
 
 ### Fixed
