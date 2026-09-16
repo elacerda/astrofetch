@@ -7,6 +7,12 @@
 //! reads this module, so Elliptical rendered output stays byte-identical to
 //! baseline `85ca173`.
 //!
+//! B2.1 adds the pure mathematical body kernel to this module
+//! ([`elliptical_radius`], [`sersic_body_profile`],
+//! [`elliptical_body_profile`]). It is still not consumed by
+//! `src/engine.rs` or any renderer, so ordinary Elliptical output remains
+//! byte-identical to the B1.2 checkpoint.
+//!
 //! Derivation contract:
 //!
 //! * Feature seed: `GenerationContext::feature_seed(ELLIPTICAL_MORPHOLOGY_V2)`.
@@ -35,7 +41,11 @@
 //!   canvas-fraction coordinates, where `dx = (x − w/2)/w` and
 //!   `dy = (y − h/2)/render_height`, so the canvas half-extents are 0.5.
 //! * `profile_index` is a dimensionless Sersic-like shape parameter in
-//!   `[2, 6]`; B2 evaluates `I_body(r) = exp(−k(n)·f(r/Re, n))`.
+//!   `[2, 6]`; B2.1 evaluates the pure body kernel
+//!   `I_body(dx, dy) = exp(−b_n·(r_ell/Re)^(1/n))`, where `r_ell` is the
+//!   rotated elliptical radius from [`elliptical_radius`]; see
+//!   [`sersic_body_profile`] for the chosen normalization and [`sersic_b`]
+//!   for the `b_n` approximation.
 //! * `core_softening_fraction` is a core-softening length as a fraction of
 //!   Re; 0.0 means no depleted core.
 //! * `central_excess` is a small central enhancement as a fraction of the
@@ -270,6 +280,182 @@ impl EllipticalGalaxyConfig {
 /// Maps a unit draw `u` in `[0, 1)` monotonically into the range `[lo, hi)`.
 fn lerp(range: (f64, f64), u: f64) -> f64 {
     range.0 + u * (range.1 - range.0)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// B2.1 — pure body kernel (math only; not yet connected to src/engine.rs)
+// ────────────────────────────────────────────────────────────────────
+
+/// Sersic concentration parameter `b_n` for the v2 body kernel.
+///
+/// Returns the analytic approximation
+///
+/// ```text
+/// b_n ≈ 2n − 1/3
+/// ```
+///
+/// for a Sersic shape parameter `n` (dimensionless; B1.2 draws produce
+/// `n` in `[2, 6]`).
+///
+/// Intended meaning, documented precisely: the *exact* `b_n` is the value
+/// satisfying the half-light condition
+///
+/// ```text
+/// ∫₀^{b_n} u^(2n−1) e^(−u) du = Γ(2n) / 2,
+/// ```
+///
+/// i.e. the median of the Gamma(2n, 1) distribution. With that exact
+/// value, `Re` in the conventional Sersic profile is *exactly* the
+/// two-dimensional half-light radius of the body. `2n − 1/3` is the
+/// leading Wilson–Hilferty term of that median and reproduces the exact
+/// value to within 0.15 % for `n` in `[2, 6]` (0.147 % at n = 2, 0.015 %
+/// at n = 6). With the approximation, `Re` therefore remains the 2-D
+/// half-light radius up to that same ~0.1 % error; this is *not* a
+/// mathematical identity, and `Re` is not claimed to be an exact
+/// half-light radius. No special-function dependency is introduced.
+///
+/// # Preconditions
+/// `profile_index` must be positive; the approximation is validated for
+/// `n` in `[2, 6]` (the B1.2 range).
+pub(crate) fn sersic_b(profile_index: f64) -> f64 {
+    2.0 * profile_index - 1.0 / 3.0
+}
+
+/// Rotated elliptical radius of a point in canvas-fraction coordinates.
+///
+/// Computes the elliptical radius of a point `(dx, dy)` given in legacy
+/// canvas-fraction coordinates:
+///
+/// ```text
+/// dx = (x − width/2) / width
+/// dy = (y − height/2) / height
+/// ```
+///
+/// i.e. the canvas spans `dx ∈ [−0.5, 0.5)`, `dy ∈ [−0.5, 0.5)` with the
+/// origin at the canvas centre and `+x` to the right. The mapping from
+/// generated-map pixel indices to `(dx, dy)` (including the render-height
+/// convention of the generated density map) belongs to the B2.2
+/// integrator; this helper is pure math on the fractions themselves.
+///
+/// Axis convention (matches the legacy `generate_elliptical_density` in
+/// `src/engine.rs` exactly — do not swap major/minor in B2.2):
+///
+/// 1. Rotate the point into the ellipse frame with the legacy convention:
+///
+///    ```text
+///    x_rot =  dx·cos(pa) + dy·sin(pa)
+///    y_rot = −dx·sin(pa) + dy·cos(pa)
+///    ```
+///
+/// 2. The **semi-major axis (`a = 1`) lies along `x′`**: the isophote
+///    `r = 1` crosses the major axis at distance 1 from the centre.
+/// 3. The **semi-minor axis is `b = q = axis_ratio` along `y′`**, i.e.
+///    the minor-axis coordinate is divided by `q`:
+///
+///    ```text
+///    r = hypot(x_rot, y_rot / q)
+///    ```
+///
+/// The major axis therefore points along the canvas-fraction direction
+/// `(cos pa, sin pa)` — equivalently, `y_rot = 0` along the major axis —
+/// so the major axis sits at `position_angle` from the `+x` canvas axis,
+/// exactly as the legacy generator rotates it. In canvas-fraction units
+/// (canvas half-extent = 0.5): a point on the major axis at canvas
+/// distance `d` has `r = d`; a point on the minor axis at the same
+/// canvas distance has `r = d/q > d`. `hypot` is used so the result is
+/// finite and non-negative for all finite inputs in the preconditions.
+///
+/// # Preconditions
+/// `axis_ratio` in `(0, 1]` (B1.2 draws produce `(0.55, 0.95)`),
+/// `position_angle` in `[0, π)` (any finite value works mathematically),
+/// `dx` and `dy` finite.
+pub(crate) fn elliptical_radius(dx: f64, dy: f64, axis_ratio: f64, position_angle: f64) -> f64 {
+    debug_assert!(
+        axis_ratio > 0.0 && axis_ratio <= 1.0,
+        "axis_ratio must be in (0, 1]"
+    );
+    debug_assert!(dx.is_finite() && dy.is_finite(), "dx/dy must be finite");
+
+    let cos_angle = position_angle.cos();
+    let sin_angle = position_angle.sin();
+
+    // Legacy rotation: major axis along x′, minor axis compressed by q
+    // along y′ (see doc for the exact axis convention).
+    let x_rot = dx * cos_angle + dy * sin_angle;
+    let y_rot = -dx * sin_angle + dy * cos_angle;
+
+    f64::hypot(x_rot, y_rot / axis_ratio)
+}
+
+/// Central-value-normalized Sersic-like body profile.
+///
+/// Chosen convention (fixed here so B2.2 cannot silently pick another
+/// one): the **central-value-normalized** form
+///
+/// ```text
+/// I_norm(r) = exp( −b_n · (r / Re)^(1/n) )
+/// ```
+///
+/// which is the conventional Sersic profile
+///
+/// ```text
+/// I_conv(r) = exp( −b_n · ((r/Re)^(1/n) − 1) )
+/// ```
+///
+/// divided by its central value `I_conv(0) = exp(b_n)`. The two forms
+/// differ only by a constant factor, so their shapes — and therefore
+/// the radius enclosing half the 2-D light — are identical: `Re` keeps
+/// the (approximate, see [`sersic_b`]) 2-D half-light-radius
+/// interpretation. The normalization is chosen so the central value does
+/// not explode with `n` (the conventional form has `I_conv(0) = e^{b_n}`,
+/// which grows to ~1.1e5 at n = 6).
+///
+/// Properties:
+///
+/// * `I_norm(0) == 1.0` exactly;
+/// * finite, in `(0, 1]`, for every `r ≥ 0` — bounded to a sensible
+///   finite range before the existing downstream render normalization;
+/// * strictly decreasing (hence monotonic non-increasing) and smooth in
+///   `r` for `r > 0`;
+/// * supports every B1.2 `n` in `[2, 6]` and Re range.
+///
+/// # Units and shapes
+/// `r` and `Re` are in the same units (legacy canvas-fraction units when
+/// composed with [`elliptical_radius`]); `Re` > 0; `n` > 0, validated on
+/// `[2, 6]`; `r` ≥ 0. Scalar in, scalar out; no allocations, no I/O.
+pub(crate) fn sersic_body_profile(r: f64, effective_radius: f64, profile_index: f64) -> f64 {
+    debug_assert!(r >= 0.0 && effective_radius > 0.0 && profile_index > 0.0);
+
+    let b_n = sersic_b(profile_index);
+    let scaled = (r / effective_radius).powf(1.0 / profile_index);
+
+    (-b_n * scaled).exp()
+}
+
+/// Pure Elliptical v2 body kernel: rotated elliptical radius passed
+/// through the normalized Sersic body profile.
+///
+/// ```text
+/// I_body(dx, dy) = sersic_body_profile(
+///     elliptical_radius(dx, dy, axis_ratio, position_angle),
+///     effective_radius, profile_index)
+/// ```
+///
+/// Consumes only the four B1.2 body parameters; the B3 parameters
+/// (`core_softening_fraction`, `central_excess`, `outer_halo_*`,
+/// `isophote_shape`) are deliberately not used here. Returns a value in
+/// `(0, 1]` with maximum 1.0 at the centre. Pure function: no RNG, no
+/// I/O, no mutation.
+pub(crate) fn elliptical_body_profile(
+    dx: f64,
+    dy: f64,
+    axis_ratio: f64,
+    position_angle: f64,
+    effective_radius: f64,
+    profile_index: f64,
+) -> f64 {
+    let r = elliptical_radius(dx, dy, axis_ratio, position_angle);
+    sersic_body_profile(r, effective_radius, profile_index)
 }
 
 #[cfg(test)]
@@ -582,6 +768,316 @@ mod tests {
                 config.outer_halo_strength,
                 config.outer_halo_scale,
                 config.isophote_shape
+            );
+        }
+    }
+
+    // ── B2.1 — pure body kernel ─────────────────────────────────────
+
+    #[test]
+    fn test_elliptical_radius_q_one_is_rotationally_symmetric() {
+        let q = 1.0_f64;
+        let (dx, dy) = (0.137_f64, -0.291);
+        for pa in [
+            0.0_f64,
+            0.4,
+            std::f64::consts::FRAC_PI_2,
+            1.7,
+            std::f64::consts::PI - 1.0e-9,
+        ] {
+            // A round ellipse is the plain Euclidean distance, for any PA.
+            assert!(
+                (elliptical_radius(dx, dy, q, pa) - dx.hypot(dy)).abs() < 1.0e-12,
+                "q=1 must be rotationally symmetric (pa={pa})"
+            );
+            // Rotating the point itself must not change the radius either.
+            let alpha = 1.13_f64;
+            let (rx, ry) = (
+                dx * alpha.cos() - dy * alpha.sin(),
+                dx * alpha.sin() + dy * alpha.cos(),
+            );
+            assert!(
+                (elliptical_radius(rx, ry, q, pa) - elliptical_radius(dx, dy, q, pa)).abs()
+                    < 1.0e-12,
+                "q=1 must be invariant under point rotation (pa={pa})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_elliptical_radius_major_minor_axis_relation() {
+        let q = 0.6_f64;
+        let d = 0.3_f64;
+
+        // PA = 0: major axis along +x (the unit semi-axis), minor along +y.
+        let r_major = elliptical_radius(d, 0.0, q, 0.0);
+        let r_minor = elliptical_radius(0.0, d, q, 0.0);
+        assert!(
+            (r_major - d).abs() < 1.0e-15,
+            "major axis is the unit semi-axis: got {r_major}"
+        );
+        assert!(
+            (r_minor - d / q).abs() < 1.0e-15,
+            "minor axis is stretched by 1/q: got {r_minor}"
+        );
+        assert!(r_minor > r_major, "q < 1 must give a shorter minor extent");
+
+        // PA = π/4: the major axis direction is (cos π/4, sin π/4) and the
+        // minor direction is its perpendicular (−sin π/4, cos π/4).
+        let pa = std::f64::consts::FRAC_PI_4;
+        let c = pa.cos();
+        let s = pa.sin();
+        let r_on_major = elliptical_radius(d * c, d * s, q, pa);
+        let r_on_minor = elliptical_radius(-d * s, d * c, q, pa);
+        assert!((r_on_major - d).abs() < 1.0e-12);
+        assert!((r_on_minor - d / q).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn test_position_angle_rotates_major_axis() {
+        let q = 0.7_f64;
+        let pa1 = 0.4_f64;
+        let pa2 = 1.1_f64;
+        let d = 0.37_f64;
+
+        // A point on the major axis of frame 1.
+        let (dx, dy) = (d * pa1.cos(), d * pa1.sin());
+        assert!(
+            (elliptical_radius(dx, dy, q, pa1) - d).abs() < 1.0e-12,
+            "a major-axis point must sit at canvas distance d in its own frame"
+        );
+
+        // In frame 2 the angular offset Δ = pa1 − pa2 enters analytically:
+        // r = d·√(cos²Δ + (sinΔ/q)²) > d.
+        let delta = pa1 - pa2;
+        let expected = d * (delta.cos().powi(2) + (delta.sin() / q).powi(2)).sqrt();
+        assert!(
+            (elliptical_radius(dx, dy, q, pa2) - expected).abs() < 1.0e-12,
+            "rotating the position angle must rotate the major axis"
+        );
+        assert!(expected > d, "off the major axis the radius must grow");
+    }
+
+    #[test]
+    fn test_sersic_profile_central_value() {
+        for re in [0.20_f64, 0.34] {
+            for n in [2.0_f64, 3.0, 4.0, 5.0, 6.0] {
+                let central = sersic_body_profile(0.0, re, n);
+                assert!(central.is_finite(), "central value must be finite");
+                assert_eq!(
+                    central, 1.0,
+                    "normalized central value must be exactly 1 (Re={re}, n={n})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sersic_profile_monotonic_non_increasing() {
+        const STEPS: usize = 4096;
+        let re = 0.30_f64;
+        for n in [2.0_f64, 3.0, 4.0, 5.0, 6.0] {
+            // Dense linear grid 0..10·Re.
+            let mut prev = sersic_body_profile(0.0, re, n);
+            for i in 1..=STEPS {
+                let r = 10.0 * re * (i as f64 / STEPS as f64);
+                let value = sersic_body_profile(r, re, n);
+                assert!(
+                    value <= prev + 1.0e-12,
+                    "n={n}: profile rose at r={r}: {prev} -> {value}"
+                );
+                prev = value;
+            }
+
+            // Log-spaced grid hugging r = 0, where the slope vanishes.
+            prev = sersic_body_profile(0.0, re, n);
+            for i in 0..=96 {
+                let r = re * 10f64.powf(-12.0 + i as f64 / 8.0);
+                let value = sersic_body_profile(r, re, n);
+                assert!(
+                    value <= prev + 1.0e-12,
+                    "n={n}: profile rose at r={r}: {prev} -> {value}"
+                );
+                prev = value;
+            }
+        }
+    }
+
+    #[test]
+    fn test_family_extrema_stay_finite_and_bounded() {
+        let mut corners = 0usize;
+        for family in [
+            EllipticalFamily::CompactDisky,
+            EllipticalFamily::Classical,
+            EllipticalFamily::GiantBoxy,
+            EllipticalFamily::CdLike,
+        ] {
+            let ranges = FamilyRanges::for_family(family);
+            for re in [ranges.effective_radius.0, ranges.effective_radius.1] {
+                for n in [ranges.profile_index.0, ranges.profile_index.1] {
+                    for q in [ranges.axis_ratio.0, ranges.axis_ratio.1] {
+                        for pa in [
+                            0.0_f64,
+                            std::f64::consts::FRAC_PI_2,
+                            std::f64::consts::PI - 1.0e-6,
+                        ] {
+                            corners += 1;
+                            // Sweep the full canvas-fraction domain.
+                            for gy in 0..33usize {
+                                for gx in 0..33usize {
+                                    let dx = -0.5 + gx as f64 * (1.0 / 32.0);
+                                    let dy = -0.5 + gy as f64 * (1.0 / 32.0);
+                                    let r = elliptical_radius(dx, dy, q, pa);
+                                    assert!(
+                                        r.is_finite() && r >= 0.0,
+                                        "radius not finite at family={family:?}, q={q}, pa={pa}, ({dx}, {dy})"
+                                    );
+                                    let value = sersic_body_profile(r, re, n);
+                                    assert!(
+                                        value.is_finite() && value > 0.0 && value <= 1.0,
+                                        "profile out of range: {value} at r={r}, Re={re}, n={n}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(corners, 4 * 2 * 2 * 2 * 3);
+    }
+
+    #[test]
+    fn test_sersic_profile_no_nan_or_infinity() {
+        for n in [2.0_f64, 3.0, 4.0, 5.0, 6.0] {
+            let re = 0.30_f64;
+            let radii = [
+                0.0_f64,
+                1.0e-300 * re,
+                1.0e-9 * re,
+                1.0e-3 * re,
+                0.1 * re,
+                re,
+                2.0 * re,
+                5.0 * re,
+                10.0 * re,
+                50.0 * re,
+            ];
+            for r in radii {
+                let value = sersic_body_profile(r, re, n);
+                assert!(
+                    value.is_finite() && value > 0.0 && value <= 1.0,
+                    "bad value {value} at r={r}, n={n}"
+                );
+            }
+        }
+    }
+
+    /// Fraction of the normalized profile's total 2-D light inside
+    /// `c·Re`, computed as
+    ///
+    /// ```text
+    /// ∫₀^{b·c^(1/n)} u^(2n−1) e^(−u) du / Γ(2n)
+    /// ```
+    ///
+    /// (Simpson, 4000 intervals). The closed form avoids re-integrating
+    /// the whole profile; valid for the integer `n` used by the tests.
+    fn light_fraction_within(c: f64, n: f64) -> f64 {
+        let b_n = sersic_b(n);
+        let upper = b_n * c.powf(1.0 / n);
+        let power = (2.0 * n) as i32 - 1;
+        let integrand = |u: f64| u.powi(power) * (-u).exp();
+
+        const STEPS: usize = 4000;
+        let h = upper / STEPS as f64;
+        let mut sum = integrand(0.0) + integrand(upper);
+        for i in 1..STEPS {
+            let weight = if i % 2 == 1 { 4.0 } else { 2.0 };
+            sum += weight * integrand(i as f64 * h);
+        }
+
+        let gamma_2n: f64 = (1..(2.0 * n) as u32).map(|i| i as f64).product();
+        (h / 3.0) * sum / gamma_2n
+    }
+
+    #[test]
+    fn test_larger_n_concentrated_core_and_broader_wings() {
+        let re = 0.30_f64;
+        let profile_at = |c: f64, n: f64| sersic_body_profile(c * re, re, n);
+
+        // (a) Concentration: for every r in (0, Re] the larger-n profile
+        // is strictly lower — light is packed closer to the centre.
+        for i in 1..=256usize {
+            let c = i as f64 / 256.0;
+            let mut previous_n = 2.0_f64;
+            let mut previous = profile_at(c, previous_n);
+            for n in 3..=6 {
+                let nn = n as f64;
+                let value = profile_at(c, nn);
+                assert!(
+                    previous > value,
+                    "at r = {c}·Re: I_{{n={previous_n}}} must exceed I_{{n={nn}}} ({previous} vs {value})"
+                );
+                previous = value;
+                previous_n = nn;
+            }
+        }
+
+        // (b) Outer wings: n=6 is far below n=2 at intermediate radii,
+        // but the analytic crossover at r ≈ 32.2·Re puts n=6 above n=2
+        // at large radii — the mathematical signature of broader wings.
+        assert!(
+            profile_at(10.0, 2.0) > profile_at(10.0, 6.0),
+            "below the crossover the n=2 profile must be higher"
+        );
+        let wing_ratio = profile_at(40.0, 6.0) / profile_at(40.0, 2.0);
+        assert!(
+            wing_ratio > 2.0,
+            "above the crossover the n=6 wings must clearly exceed n=2 (ratio={wing_ratio})"
+        );
+
+        // (c) Integrated light (the actual physical statement): Re
+        // encloses ~half the 2-D light of every profile, and both the
+        // fraction within 0.5·Re and the fraction beyond 2·Re increase
+        // strictly with n.
+        for n in 2..=6u32 {
+            let within_re = light_fraction_within(1.0, n as f64);
+            assert!(
+                (within_re - 0.5).abs() < 0.01,
+                "n={n}: Re must remain the approximate 2-D half-light radius (frac(<Re)={within_re})"
+            );
+        }
+        let mut frac_inner = 0.0_f64;
+        let mut frac_outer = 0.0_f64;
+        for n in 2..=6u32 {
+            let inner = light_fraction_within(0.5, n as f64);
+            assert!(
+                inner > frac_inner,
+                "light within 0.5·Re must increase with n (n={n}: {inner} vs {frac_inner})"
+            );
+            let outer = 1.0 - light_fraction_within(2.0, n as f64);
+            assert!(
+                outer > frac_outer,
+                "light beyond 2·Re must increase with n (n={n}: {outer} vs {frac_outer})"
+            );
+            frac_inner = inner;
+            frac_outer = outer;
+        }
+    }
+
+    #[test]
+    fn test_composite_kernel_matches_composition() {
+        for (dx, dy) in [(0.0_f64, 0.0), (0.15, -0.08), (-0.32, 0.27), (0.4, 0.4)] {
+            let q = 0.68_f64;
+            let pa = 0.9_f64;
+            let re = 0.27_f64;
+            let n = 3.4_f64;
+            let direct = elliptical_body_profile(dx, dy, q, pa, re, n);
+            let composed = sersic_body_profile(elliptical_radius(dx, dy, q, pa), re, n);
+            assert_eq!(direct, composed);
+            assert!(
+                direct.is_finite() && direct > 0.0 && direct <= 1.0,
+                "kernel value out of range: {direct}"
             );
         }
     }
