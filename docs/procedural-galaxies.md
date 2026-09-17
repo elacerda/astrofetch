@@ -418,6 +418,19 @@ GiantBoxy, CdLike) and applies:
   1.40 / 1.00 / 1.30); outside support the density is exactly zero and no
   grain draw is consumed. The *same* `r_shape` also feeds the Sersic
   intensity, so support and profile can never disagree;
+- a central structure that modifies intensity only — never the geometric
+  support, the isophote geometry, or the grain draw count:
+  `core_softening_fraction` is a fraction of `Re` (softened-core length
+  `rc = f·Re`); the core replaces the radius by `hypot(r, rc)` and
+  re-normalizes by its central value, preserving the centre peak of 1
+  while flattening the central concentration — `Re` therefore remains the
+  support / outer-profile scale but is only approximate as a half-light
+  radius in softened-core scenes. `central_excess` is an additive
+  Gaussian-like radial bump before peak normalization,
+  `I = (I_core + e·K) / (1 + e)`, whose radial e-folding scale is fixed at
+  `0.20·Re` with the exact kernel `K(r) = exp(−(r / (0.20·Re))²)` (an
+  e-folding scale — `K(0.20·Re) = exp(−1)` — not a Gaussian standard
+  deviation);
 - multiplicative local grain: every visible cell is scaled by a random
   factor `1 + U(−g, +g)` and clamped to [0, 1], applied only inside the
   visible support (one row-major draw per visible cell), with a fixed

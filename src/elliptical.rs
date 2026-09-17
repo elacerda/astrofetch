@@ -11,8 +11,9 @@
 //! ([`generate_elliptical_density`]).
 //!
 //! [`elliptical_cell`] is the single per-cell seam that establishes the
-//! elliptical radius, the geometric support decision and the Sersic
-//! intensity from one radius evaluation;
+//! elliptical radius, the geometric support decision and the
+//! central-structure-applied Sersic intensity from one radius evaluation
+//! (body → [`apply_central_structure`] → grain);
 //! [`elliptical_density_profile`] maps it to the post-support,
 //! pre-render-normalization body, and [`generate_elliptical_density`]
 //! applies the multiplicative local grain on supported cells only. The
@@ -44,8 +45,11 @@
 //! * Support multipliers are family-specific presentation-contract
 //!   constants expressed as multiples of `Re` (CompactDisky 1.75,
 //!   Classical 1.40, GiantBoxy 1.00, CdLike 1.30).
-//! * Inside support: pure Sersic intensity evaluated at the same shaped
-//!   radius, perturbed by the multiplicative local grain
+//! * Inside support: Sersic intensity evaluated at the same shaped
+//!   radius, passed through the central structure — the softened core
+//!   (`core_softening_fraction`) and the central excess
+//!   (`central_excess`), intensity only and never support — and then
+//!   perturbed by the multiplicative local grain
 //!   (`factor = 1 + U(−g, +g)`, clamped to [0, 1]; one row-major unit
 //!   draw per supported cell from the legacy scene RNG). Outside support:
 //!   density is exactly 0.0 and no grain draw is consumed.
@@ -89,10 +93,15 @@
 //!   rotated elliptical radius from [`elliptical_radius`]; see
 //!   [`sersic_body_profile`] for the chosen normalization and [`sersic_b`]
 //!   for the `b_n` approximation.
-//! * `core_softening_fraction` is a core-softening length as a fraction of
-//!   Re; 0.0 means no depleted core.
-//! * `central_excess` is a small central enhancement as a fraction of the
-//!   peak density; 0.0 means none.
+//! * `core_softening_fraction` is the core-softening length as a fraction
+//!   of Re (`rc = f·Re`); the core replaces the radius by
+//!   `hypot(r, rc)` and re-centres the ratio so the centre stays at 1
+//!   while the inner profile flattens — 0.0 means no core (bit-for-bit
+//!   B3.1 body).
+//! * `central_excess` is the amplitude (as a fraction of the peak
+//!   density) of an additive radial bump with the fixed e-folding scale
+//!   `0.20·Re` and exact kernel `exp(−(r / (0.20·Re))²)`, applied before
+//!   peak normalization; 0.0 means none.
 //! * `outer_halo_strength` is the halo amplitude relative to the body's
 //!   characteristic surface brightness; `outer_halo_scale` is the halo radial
 //!   scale as a multiple of Re.
@@ -240,9 +249,12 @@ pub(crate) struct EllipticalGalaxyConfig {
     pub(crate) effective_radius: f64,
     /// Sersic-like profile index, dimensionless, in `[2, 6]`.
     pub(crate) profile_index: f64,
-    /// Core-softening length as a fraction of Re; 0.0 = no depleted core.
+    /// Core-softening length as a fraction of Re (`rc = f · Re`);
+    /// 0.0 = no core (bit-for-bit B3.1 body).
     pub(crate) core_softening_fraction: f64,
-    /// Central enhancement as a fraction of the peak density; 0.0 = none.
+    /// Central enhancement amplitude as a fraction of the peak density,
+    /// added with the fixed 0.20·Re e-folding kernel before peak
+    /// normalization; 0.0 = none.
     pub(crate) central_excess: f64,
     /// Outer halo amplitude relative to the body's characteristic brightness.
     pub(crate) outer_halo_strength: f64,
@@ -641,6 +653,140 @@ pub(crate) fn elliptical_body_profile(
 }
 
 // ────────────────────────────────────────────────────────────────────
+// Central structure (softened core + central excess, intensity only)
+// ────────────────────────────────────────────────────────────────────
+
+/// Radial e-folding scale of the central-excess kernel, as a fraction
+/// of `Re`.
+///
+/// The accepted B3.2A central-excess kernel is
+///
+/// ```text
+/// K(r) = exp(−(r / scale)²),   scale = CENTRAL_EXCESS_SCALE_FRACTION · Re
+/// ```
+///
+/// `scale` is the kernel's e-folding scale, **not** a statistical
+/// Gaussian sigma: `K(scale) = exp(−1)`, the half-maximum radius is
+/// `scale·sqrt(ln 2) ≈ 0.16651·Re`, and the full width at half maximum
+/// is `2·scale·sqrt(ln 2) ≈ 0.33302·Re`. (The 0.471·Re half-width
+/// belongs to the different convention `exp(−r²/(2σ²))` and is not used
+/// here.) It is a presentation-contract constant — never an RNG draw and
+/// never stored in [`EllipticalGalaxyConfig`].
+const CENTRAL_EXCESS_SCALE_FRACTION: f64 = 0.20;
+
+/// Central-excess kernel, a pure function of the scaled radius
+/// `x = r / scale`.
+///
+/// ```text
+/// K(x) = exp(−x·x),    scale = CENTRAL_EXCESS_SCALE_FRACTION · Re
+/// ```
+///
+/// Pinned contract (see `test_b32_excess_kernel_contract`):
+///
+/// * `K(0) == 1.0` exactly — the kernel peaks at the centre;
+/// * `K(1) == exp(−1)` — the value at the e-folding scale `r = scale`;
+/// * `K(sqrt(ln 2)) == 0.5` (to 1 ulp) — the half-maximum radius is
+///   `scale·sqrt(ln 2) ≈ 0.16651·Re`;
+/// * `0 < K(x)` and monotone non-increasing for `x ≥ 0` — no detached
+///   component, no ring;
+/// * full half-maximum width `2·scale·sqrt(ln 2) ≈ 0.33302·Re`.
+///
+/// `x` is dimensionless. Pure: no RNG, no I/O, no mutation.
+fn central_excess_kernel(x: f64) -> f64 {
+    (-x * x).exp()
+}
+
+/// Central structure: softened core plus central excess, applied to the
+/// already-computed Sersic body intensity.
+///
+/// Consumes the shaped radius `r_shape` (already computed by
+/// [`elliptical_shaped_radius`]) and changes **intensity only** — it never
+/// rederives coordinates, never recalculates the isophote shape, and never
+/// affects the geometric support decision.
+///
+/// ## Core (`f = core_softening_fraction`, `rc = f · Re`)
+///
+/// For `f == 0`: `I_core == body_intensity` bit-for-bit. For `f > 0`:
+///
+/// ```text
+/// r_soft = hypot(r_shape, rc)
+/// I_core = Sersic(r_soft, Re, n) / Sersic(rc, Re, n)
+/// ```
+///
+/// (centre-normalized softened-radius form, [`sersic_body_profile`]
+/// throughout):
+///
+/// * `I_core(0) == 1.0` exactly (`hypot(0, rc) == rc`, so the ratio is
+///   1);
+/// * `0 < I_core <= 1`, monotone non-increasing in `r_shape`;
+/// * no hole, no ring; stronger `f` flattens the inner profile — the
+///   profile value at every fixed `r > 0` rises toward the (unchanged)
+///   centre value, so the central concentration decreases.
+///
+/// The division by `Sersic(rc, Re, n)` *is* the centre normalization;
+/// no further normalization pass is added.
+///
+/// ## Excess (`e = central_excess`)
+///
+/// With `scale = CENTRAL_EXCESS_SCALE_FRACTION · Re` and
+/// `K = central_excess_kernel(r_shape / scale)`:
+///
+/// ```text
+/// I_final = (I_core + e · K) / (1 + e)
+/// ```
+///
+/// * `e == 0`: returns `I_core` without the additive arithmetic;
+/// * the centre stays exactly 1.0 (both terms are 1.0 at
+///   `r_shape = 0`);
+/// * `(0, 1]` inside support; the kernel peaks at the centre and decays
+///   monotonically — no detached component, no ring;
+/// * peak normalization by `(1 + e)` keeps the centre at 1 while the
+///   outer profile is gently pulled down, sharpening the central
+///   concentration.
+///
+/// # Units and conventions
+/// `r_shape` and `effective_radius` in the same units (legacy
+/// canvas-fraction units when composed with [`elliptical_shaped_radius`]);
+/// `profile_index` the Sersic-like shape index; `f` a fraction of `Re`
+/// (`f = 0` = no core); `e` a fraction of the peak density
+/// (`e = 0` = none). Scalar in, scalar out; no RNG, no I/O, no mutation,
+/// no support decision.
+pub(crate) fn apply_central_structure(
+    body_intensity: f64,
+    r_shape: f64,
+    effective_radius: f64,
+    profile_index: f64,
+    core_softening_fraction: f64,
+    central_excess: f64,
+) -> f64 {
+    debug_assert!(
+        r_shape >= 0.0
+            && effective_radius > 0.0
+            && profile_index > 0.0
+            && core_softening_fraction >= 0.0
+            && central_excess >= 0.0,
+        "apply_central_structure preconditions"
+    );
+
+    let i_core = if core_softening_fraction == 0.0 {
+        body_intensity
+    } else {
+        let rc = core_softening_fraction * effective_radius;
+        let r_soft = f64::hypot(r_shape, rc);
+        sersic_body_profile(r_soft, effective_radius, profile_index)
+            / sersic_body_profile(rc, effective_radius, profile_index)
+    };
+
+    if central_excess == 0.0 {
+        i_core
+    } else {
+        let scale = CENTRAL_EXCESS_SCALE_FRACTION * effective_radius;
+        let x = r_shape / scale;
+        (i_core + central_excess * central_excess_kernel(x)) / (1.0 + central_excess)
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
 // Elliptical scene generation (geometric support + grain)
 // ────────────────────────────────────────────────────────────────────
 
@@ -699,32 +845,41 @@ pub(crate) struct EllipticalCell {
     /// `true` iff the cell is inside the family's geometric support:
     /// `r_shape <= support_re_multiplier(family) · Re` (boundary
     /// inclusive), with `r_shape` from [`elliptical_shaped_radius`].
+    /// Independent of the central-structure fields.
     pub(crate) inside_support: bool,
-    /// Pure Sersic body intensity in `(0, 1]` when `inside_support`,
-    /// exactly 0.0 otherwise.
+    /// Central-structure-applied Sersic body intensity in `(0, 1]` when
+    /// `inside_support` (exactly 1.0 at the canvas centre), exactly 0.0
+    /// otherwise.
     pub(crate) intensity: f64,
 }
 
 /// Per-cell seam: shaped elliptical radius → geometric support
-/// decision → Sersic intensity, all from a single shaped-radius
-/// evaluation.
+/// decision → Sersic body intensity → central structure, all from a
+/// single shaped-radius evaluation.
 ///
 /// The support is **geometric** and independent of the Sersic amplitude:
 ///
 /// ```text
 /// r_shape        =  elliptical_shaped_radius(dx, dy, q, pa, c)
 /// inside_support  iff  r_shape <= k(family) · Re
-/// intensity       =  sersic_body_profile(r_shape, Re, n)  (inside support)
-///                   0.0                                   (outside support)
+/// intensity       =  apply_central_structure(              (inside support)
+///                        sersic_body_profile(r_shape, Re, n),
+///                        r_shape, Re, n, f, e)
+///                   0.0                                     (outside support)
 /// ```
 ///
 /// with `k(family) = [`EllipticalFamily::support_re_multiplier`]` and the
 /// boundary inclusive (`<=`) per the geometric support contract. The
 /// shaped radius is computed exactly once and feeds **both** the support
-/// decision and the Sersic intensity, so the two can never be evaluated
-/// from inconsistent radii. Because [`sersic_body_profile`] is strictly
-/// positive for every finite radius (and `r_shape` is finite for finite
-/// `dx`/`dy`), the map built from this seam satisfies the invariant
+/// decision and the Sersic intensity (and, through
+/// [`apply_central_structure`], the central structure), so the three can
+/// never be evaluated from inconsistent radii. The central structure
+/// changes intensity only — the support decision is made from `r_shape`
+/// alone and is independent of `f` and `e`. Because the Sersic body is
+/// strictly positive for every finite radius, the softened core keeps
+/// `I_core` in `(0, 1]` (ratio of positives), the excess kernel is
+/// strictly positive, and `I_final = (I_core + e·K)/(1 + e)` stays in
+/// `(0, 1]` — so the map built from this seam satisfies the invariant
 ///
 /// ```text
 /// cell intensity > 0.0  iff  inside_support
@@ -748,9 +903,19 @@ pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) 
     let support_limit = config.family.support_re_multiplier() * config.effective_radius;
 
     if r_shape <= support_limit {
+        let body_intensity =
+            sersic_body_profile(r_shape, config.effective_radius, config.profile_index);
+        let intensity = apply_central_structure(
+            body_intensity,
+            r_shape,
+            config.effective_radius,
+            config.profile_index,
+            config.core_softening_fraction,
+            config.central_excess,
+        );
         EllipticalCell {
             inside_support: true,
-            intensity: sersic_body_profile(r_shape, config.effective_radius, config.profile_index),
+            intensity,
         }
     } else {
         EllipticalCell {
@@ -780,10 +945,10 @@ pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) 
 /// scene (see [`EllipticalGalaxyConfig::from_context`]) and this function
 /// performs no re-derivation and touches no RNG. This is the
 /// **post-geometric-support, pre-render-normalization** body: cells inside
-/// family support carry the pure Sersic intensity in `(0, 1]` (exactly
-/// 1.0 at the canvas centre), cells outside support carry exactly 0.0 —
-/// the raw-positive-support diagnostic is the positive-cell fraction of
-/// this map.
+/// family support carry the central-structure-applied Sersic intensity in
+/// `(0, 1]` (exactly 1.0 at the canvas centre), cells outside support
+/// carry exactly 0.0 — the raw-positive-support diagnostic is the
+/// positive-cell fraction of this map.
 ///
 /// # Side effects
 /// None (pure allocation of the returned [`DensityMap`]).
@@ -810,8 +975,10 @@ pub(crate) fn elliptical_density_profile(
 ///   consumes `axis_ratio`, `position_angle`, `effective_radius`,
 ///   `profile_index` and `isophote_shape` (the latter through
 ///   [`elliptical_shaped_radius`], which also sets the geometric support);
-///   the remaining fields (`core_softening_fraction`, `central_excess`,
-///   `outer_halo_*`) stay frozen and are deliberately unused here.
+///   `core_softening_fraction` and `central_excess` are applied by the
+///   per-cell seam through [`apply_central_structure`] (intensity only,
+///   never support); the halo fields (`outer_halo_*`) stay frozen and are
+///   deliberately unused here.
 /// * **Per-pixel math**: [`elliptical_density_profile`] (the per-cell
 ///   seam [`elliptical_cell`] with the legacy canvas-fraction convention);
 ///   `height` is the render height (2× terminal height in the half-block
@@ -1595,10 +1762,11 @@ mod tests {
         }
     }
 
-    /// Cells inside geometric support equal the pure Sersic profile —
-    /// evaluated at the *shaped* radius — times a multiplicative grain
-    /// factor in `[1 − g, 1 + g]`, clamped to [0, 1]; cells outside
-    /// support stay exactly 0.0 (asserted by
+    /// Cells inside geometric support equal the pre-grain intensity
+    /// (the Sersic body at the *shaped* radius, passed through the
+    /// central structure — the `elliptical_cell` intensity) times a
+    /// multiplicative grain factor in `[1 − g, 1 + g]`, clamped to [0,
+    /// 1]; cells outside support stay exactly 0.0 (asserted by
     /// `test_b22f_cells_outside_geometric_support_are_exactly_zero`).
     #[test]
     fn test_b22h_cells_inside_support_are_sersic_times_bounded_factor() {
@@ -1625,11 +1793,7 @@ mod tests {
                     );
                     if r_shape <= k * config.effective_radius {
                         inside += 1;
-                        let p = sersic_body_profile(
-                            r_shape,
-                            config.effective_radius,
-                            config.profile_index,
-                        );
+                        let p = elliptical_cell(dx, dy, config).intensity;
                         let v = scene.density.get(x, y);
                         assert!(
                             v >= p * (1.0 - g) - 1.0e-12
@@ -2674,6 +2838,706 @@ mod tests {
                 raw_positive,
                 visible
             );
+        }
+    }
+
+    // ── B3.2 central structure (softened core + central excess) ─────
+
+    /// Zero degeneracy (helper level): core = 0 AND excess = 0 must
+    /// return the body intensity bit-for-bit at a dense set of radii
+    /// (including the exact centre and the widest family support edge),
+    /// across family Re corners and the full n range.
+    #[test]
+    fn test_b32_zero_central_is_bit_for_bit_body() {
+        for &re in &[0.20_f64, 0.24, 0.30, 0.34, 0.36, 0.44] {
+            for &n in &[2.0_f64, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0] {
+                for &rho in &[
+                    0.0_f64, 1e-9, 0.02, 0.05, 0.1, 0.16651, 0.2, 0.3, 0.5, 0.75, 1.0, 1.4, 1.75,
+                ] {
+                    let r = rho * re;
+                    let body = sersic_body_profile(r, re, n);
+                    assert_eq!(
+                        apply_central_structure(body, r, re, n, 0.0, 0.0),
+                        body,
+                        "zero-central must be bit-for-bit body at r={r}, Re={re}, n={n}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Zero degeneracy (cell level): a directly-built zero-central config
+    /// with a NONZERO isophote shape reproduces the B3.1 seam
+    /// bit-for-bit: exactly `sersic_body_profile(r_shape, Re, n)` inside
+    /// support and 0.0 outside. Built directly (not drawn) because the
+    /// family contract does not generate both-zero central scenes for
+    /// every family.
+    #[test]
+    fn test_b32_zero_central_cell_level_b31_equivalence() {
+        let config = EllipticalGalaxyConfig {
+            family: EllipticalFamily::Classical,
+            axis_ratio: 0.79,
+            position_angle: 2.31,
+            effective_radius: 0.31,
+            profile_index: 3.9,
+            core_softening_fraction: 0.0,
+            central_excess: 0.0,
+            outer_halo_strength: 0.0,
+            outer_halo_scale: 1.0,
+            isophote_shape: 0.02,
+        };
+        let k = config.family.support_re_multiplier();
+        let (width, render_height) = (40usize, 40usize);
+        for y in 0..render_height {
+            for x in 0..width {
+                let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                let cell = elliptical_cell(dx, dy, config);
+                assert_eq!(
+                    cell.inside_support,
+                    r_shape <= k * config.effective_radius,
+                    "support must be r_shape <= k·Re at ({x},{y})"
+                );
+                let expected = if cell.inside_support {
+                    sersic_body_profile(r_shape, config.effective_radius, config.profile_index)
+                } else {
+                    0.0
+                };
+                assert_eq!(cell.intensity, expected, "intensity at ({x},{y})");
+            }
+        }
+    }
+
+    /// Core centre: for every f > 0 the softened core keeps the centre
+    /// exactly 1.0 (`hypot(0, rc) == rc` ⇒ ratio exactly 1), and the
+    /// combined core + excess centre is exactly 1.0 as well.
+    #[test]
+    fn test_b32_core_centre_is_exactly_one() {
+        for &re in &[0.20_f64, 0.30, 0.44] {
+            for &n in &[2.0_f64, 4.0, 6.0] {
+                for &f in &[0.05_f64, 0.10, 0.15, 0.20, 0.25, 0.30] {
+                    let body0 = sersic_body_profile(0.0, re, n);
+                    assert_eq!(body0, 1.0);
+                    assert_eq!(
+                        apply_central_structure(body0, 0.0, re, n, f, 0.0),
+                        1.0,
+                        "core centre must be exactly 1 (Re={re}, n={n}, f={f})"
+                    );
+                    for &e in &[0.05_f64, 0.10, 0.20] {
+                        assert_eq!(
+                            apply_central_structure(body0, 0.0, re, n, f, e),
+                            1.0,
+                            "combined centre must be exactly 1 (Re={re}, n={n}, f={f}, e={e})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Core monotonicity / no ring: dense radial grids across
+    /// n = 2..6, family Re corners, and representative core fractions
+    /// through 0.30 must stay finite, in (0, 1], and non-increasing in
+    /// radius (a ring or a hole would appear as an increase or a zero).
+    #[test]
+    fn test_b32_core_monotone_non_increasing_no_ring() {
+        const STEPS: usize = 4000;
+        let r_max_mul = 1.75_f64; // widest family support (CompactDisky k)
+        for &n in &[2.0_f64, 3.0, 4.0, 5.0, 6.0] {
+            for &re in &[0.20_f64, 0.24, 0.30, 0.34, 0.36, 0.44] {
+                for &f in &[0.05_f64, 0.10, 0.15, 0.20, 0.25, 0.30] {
+                    let mut prev = f64::INFINITY;
+                    for i in 0..=STEPS {
+                        let r = r_max_mul * re * (i as f64 / STEPS as f64);
+                        let v = apply_central_structure(
+                            sersic_body_profile(r, re, n),
+                            r,
+                            re,
+                            n,
+                            f,
+                            0.0,
+                        );
+                        assert!(v.is_finite(), "n={n}, Re={re}, f={f}, r={r}");
+                        assert!(v > 0.0, "no hole: n={n}, Re={re}, f={f}, r={r}");
+                        assert!(v <= 1.0, "n={n}, Re={re}, f={f}, r={r}");
+                        if i == 0 {
+                            assert_eq!(v, 1.0, "centre exactly 1 (n={n}, Re={re}, f={f})");
+                        } else {
+                            assert!(
+                                v <= prev * (1.0 + 1e-12),
+                                "ring / increase at r={r} (n={n}, Re={re}, f={f}): {v} > {prev}"
+                            );
+                        }
+                        prev = v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Core strength ordering. A stronger core softening flattens the
+    /// inner profile. Expressed mathematically (the naive pointwise
+    /// claim "intensity at fixed r decreases with f" would be the WRONG
+    /// direction):
+    ///
+    /// (a) pointwise: for every fixed r > 0, I_core(r; f) is strictly
+    ///     INCREASING in f — the profile at any fixed radius rises
+    ///     toward the (unchanged) centre value, so the centre's
+    ///     relative brightness over radius r, 1 − I_core(r; f),
+    ///     decreases;
+    ///
+    /// (b) enclosed concentration: the 2-D light fraction inside the
+    ///     documented fixed radius r0 = 0.5·Re is strictly DECREASING
+    ///     in f.
+    #[test]
+    fn test_b32_core_strength_ordering_flattens_central_concentration() {
+        // (a) pointwise in f at fixed r > 0.
+        for &n in &[2.0_f64, 3.0, 4.0, 5.0, 6.0] {
+            for &re in &[0.24_f64, 0.36, 0.44] {
+                for &rho in &[0.05_f64, 0.10, 0.20, 0.50, 1.00, 1.40] {
+                    let r = rho * re;
+                    let fs = [0.01_f64, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30];
+                    let mut prev = apply_central_structure(
+                        sersic_body_profile(r, re, n),
+                        r,
+                        re,
+                        n,
+                        fs[0],
+                        0.0,
+                    );
+                    for &f in &fs[1..] {
+                        let v = apply_central_structure(
+                            sersic_body_profile(r, re, n),
+                            r,
+                            re,
+                            n,
+                            f,
+                            0.0,
+                        );
+                        assert!(
+                            v > prev,
+                            "I(r; f) must strictly increase in f at r={r} (n={n}, Re={re})"
+                        );
+                        prev = v;
+                    }
+                }
+            }
+        }
+
+        // (b) enclosed 2-D light fraction within r0 = 0.5·Re.
+        let re = 0.30_f64;
+        let r0 = 0.5 * re;
+        for &n in &[2.0_f64, 4.0, 6.0] {
+            let fs = [0.0_f64, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30];
+            let mut prev_frac = f64::NAN;
+            for &f in &fs {
+                let (num, den) = enclosed_light(
+                    |r| apply_central_structure(sersic_body_profile(r, re, n), r, re, n, f, 0.0),
+                    r0,
+                    8.0 * re,
+                );
+                let frac = num / den;
+                if prev_frac.is_finite() {
+                    assert!(
+                        frac < prev_frac,
+                        "enclosed(0.5Re) must strictly decrease in f (n={n}, f={f}): {frac} >= {prev_frac}"
+                    );
+                }
+                prev_frac = frac;
+            }
+        }
+    }
+
+    /// The central-excess kernel contract, pinned exactly:
+    ///
+    /// ```text
+    /// K(0)              == 1.0            (exact)
+    /// K(scale)          == exp(−1)        (exact, at x = 1)
+    /// K(scale·√(ln 2))  == 0.5            (to 1 ulp)
+    /// FWHM              == 2·scale·√(ln 2) ≈ 0.33302·Re
+    /// half-max radius   == scale·√(ln 2)  ≈ 0.16651·Re
+    /// ```
+    ///
+    /// `scale = CENTRAL_EXCESS_SCALE_FRACTION·Re` is the e-folding scale
+    /// of `K(r) = exp(−(r/scale)²)` — not a statistical Gaussian sigma
+    /// (the 0.471·Re half-width belongs to the different convention
+    /// `exp(−r²/(2σ²))` and must not be encoded here).
+    #[test]
+    fn test_b32_excess_kernel_contract() {
+        let re = 0.25_f64;
+        let scale = CENTRAL_EXCESS_SCALE_FRACTION * re;
+
+        // K(0) == 1 exactly (peak at the centre).
+        assert_eq!(central_excess_kernel(0.0), 1.0);
+
+        // K(scale): x = scale/scale = 1.0 exactly → exp(−1) exactly.
+        let x_at_scale = scale / scale;
+        assert_eq!(x_at_scale, 1.0);
+        assert_eq!(central_excess_kernel(x_at_scale), (-1.0_f64).exp());
+
+        // Half maximum: K(scale·√(ln 2)) == 0.5 (to 1 ulp).
+        let sqrt_ln2 = std::f64::consts::LN_2.sqrt();
+        assert!((central_excess_kernel(sqrt_ln2) - 0.5).abs() <= 1e-15);
+
+        // Half-maximum radius and full half-maximum width in physical
+        // radius units.
+        let r_half = scale * sqrt_ln2;
+        assert!(
+            (r_half / re - 0.16651).abs() < 1.0e-4,
+            "r_half/Re = {}",
+            r_half / re
+        );
+        let fwhm = 2.0 * r_half;
+        assert!(
+            (fwhm / re - 0.33302).abs() < 1.0e-4,
+            "FWHM/Re = {}",
+            fwhm / re
+        );
+        // And the same half-maximum radius through the kernel itself.
+        assert!((central_excess_kernel(r_half / scale) - 0.5).abs() <= 1e-15);
+
+        // Strictly positive and monotone non-increasing on a dense grid.
+        const STEPS: usize = 2000;
+        let mut prev = f64::INFINITY;
+        for i in 0..=STEPS {
+            let x = 3.0 * (i as f64 / STEPS as f64);
+            let k = central_excess_kernel(x);
+            assert!(k.is_finite() && k > 0.0, "x={x}");
+            assert!(k <= prev + 1e-15, "x={x}");
+            prev = k;
+        }
+    }
+
+    /// Excess composite contract, e ∈ (0, 0.20] (the CompactDisky
+    /// maximum): the centre stays exactly 1, and across the full family
+    /// support the profile is finite, in (0, 1], and radially
+    /// non-increasing — no ring, no detached maximum.
+    #[test]
+    fn test_b32_excess_composite_bounded_monotone() {
+        const STEPS: usize = 4000;
+        let r_max_mul = 1.75_f64; // CompactDisky support
+        for &e in &[0.05_f64, 0.10, 0.15, 0.20] {
+            for &n in &[2.0_f64, 3.5, 6.0] {
+                for &re in &[0.20_f64, 0.30] {
+                    let mut prev = f64::INFINITY;
+                    for i in 0..=STEPS {
+                        let r = r_max_mul * re * (i as f64 / STEPS as f64);
+                        let v = apply_central_structure(
+                            sersic_body_profile(r, re, n),
+                            r,
+                            re,
+                            n,
+                            0.0,
+                            e,
+                        );
+                        assert!(v.is_finite(), "e={e}, n={n}, Re={re}, r={r}");
+                        assert!(v > 0.0, "e={e}, n={n}, Re={re}, r={r}");
+                        assert!(v <= 1.0, "e={e}, n={n}, Re={re}, r={r}");
+                        if i == 0 {
+                            assert_eq!(v, 1.0, "centre exactly 1 (e={e}, n={n}, Re={re})");
+                        } else {
+                            assert!(
+                                v <= prev * (1.0 + 1e-12),
+                                "ring / increase at r={r} (e={e}, n={n}, Re={re}): {v} > {prev}"
+                            );
+                        }
+                        prev = v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Excess strength. The naive pointwise claim
+    /// "I(r; e2) <= I(r; e1) for every r" is FALSE for the additive
+    /// kernel: stronger `e` raises the inner profile (toward the centre
+    /// value) while the peak normalization (1 + e) pulls the outer
+    /// profile down. The intended behavior is pinned instead:
+    ///
+    /// (a) the centre value stays exactly 1.0 for every e;
+    ///
+    /// (b) central enclosed concentration: the 2-D light fraction
+    ///     inside the documented fixed radius r0 = 0.1·Re strictly
+    ///     INCREASES with e. At r0 the kernel encloses a larger light
+    ///     fraction than the body does for all n ∈ [2, 6] (kernel:
+    ///     1 − e^−0.25 ≈ 0.221; body: ≤ ≈ 0.172 at n = 6), and r0 sits
+    ///     strictly inside the kernel/body intensity crossing (≈
+    ///     0.278·Re at n = 2, ≈ 0.660·Re at n = 6), the region where
+    ///     ∂I/∂e > 0 — adding the kernel therefore raises the inner
+    ///     fraction;
+    ///
+    /// (c) beyond the crossing, at the documented outer radius
+    ///     r_out = 0.9·Re (the kernel is negligible there, K ≤
+    ///     exp(−20.25) ≈ 1.5e−9), I(r_out; e) strictly DECREASES with
+    ///     e — centre-to-outer contrast 1/I(r_out) increases.
+    #[test]
+    fn test_b32_excess_strength_central_concentration() {
+        let es = [0.0_f64, 0.05, 0.10, 0.15, 0.20];
+        let re = 0.25_f64;
+
+        // (a) centre exactly 1 for every e.
+        for &e in &es {
+            assert_eq!(
+                apply_central_structure(sersic_body_profile(0.0, re, 3.0), 0.0, re, 3.0, 0.0, e),
+                1.0,
+                "centre must be exactly 1 (e={e})"
+            );
+        }
+
+        // (b) enclosed 2-D light fraction within r0 = 0.1·Re.
+        for &n in &[2.0_f64, 6.0] {
+            let mut prev_frac = f64::NAN;
+            for &e in &es {
+                let (num, den) = enclosed_light(
+                    |r| apply_central_structure(sersic_body_profile(r, re, n), r, re, n, 0.0, e),
+                    0.1 * re,
+                    8.0 * re,
+                );
+                let frac = num / den;
+                if prev_frac.is_finite() {
+                    assert!(
+                        frac > prev_frac,
+                        "enclosed(0.1Re) must strictly increase in e (n={n}, e={e}): {frac} <= {prev_frac}"
+                    );
+                }
+                prev_frac = frac;
+            }
+        }
+
+        // (c) outer profile at r_out = 0.9·Re.
+        for &n in &[2.0_f64, 6.0] {
+            let r_out = 0.9 * re;
+            let mut prev = f64::NAN;
+            for &e in &es {
+                let v = apply_central_structure(
+                    sersic_body_profile(r_out, re, n),
+                    r_out,
+                    re,
+                    n,
+                    0.0,
+                    e,
+                );
+                if prev.is_finite() {
+                    assert!(
+                        v < prev,
+                        "I(0.9Re; e) must strictly decrease in e (n={n}, e={e}): {v} >= {prev}"
+                    );
+                }
+                prev = v;
+            }
+        }
+    }
+
+    /// Combined Classical case: representative simultaneous nonzero core
+    /// and excess values (including the ~50/50 split 0.05/0.05) keep a
+    /// monotone, ring-free, bounded profile with centre exactly 1.
+    #[test]
+    fn test_b32_combined_classical_monotone_bounded() {
+        const STEPS: usize = 4000;
+        let r_max_mul = 1.40_f64; // Classical support
+        for &(f, e) in &[(0.05_f64, 0.05_f64), (0.02, 0.08), (0.08, 0.02)] {
+            for &n in &[2.5_f64, 4.5] {
+                for &re in &[0.24_f64, 0.36] {
+                    let mut prev = f64::INFINITY;
+                    for i in 0..=STEPS {
+                        let r = r_max_mul * re * (i as f64 / STEPS as f64);
+                        let v =
+                            apply_central_structure(sersic_body_profile(r, re, n), r, re, n, f, e);
+                        assert!(
+                            v.is_finite() && v > 0.0 && v <= 1.0,
+                            "f={f}, e={e}, n={n}, Re={re}, r={r}"
+                        );
+                        if i == 0 {
+                            assert_eq!(v, 1.0, "centre exactly 1 (f={f}, e={e})");
+                        } else {
+                            assert!(
+                                v <= prev * (1.0 + 1e-12),
+                                "ring / increase at r={r} (f={f}, e={e}, n={n}, Re={re})"
+                            );
+                        }
+                        prev = v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Support independence: for identical morphology with the central
+    /// fields zeroed vs actual, `inside_support` is bit-identical and
+    /// the positive-iff-supported invariant holds everywhere.
+    #[test]
+    fn test_b32_support_independent_of_central_structure() {
+        let (width, render_height) = (60usize, 60usize);
+        let mut configs: Vec<EllipticalGalaxyConfig> = (0..32u64)
+            .map(|offset| EllipticalGalaxyConfig::for_scene_seed(2000 + offset))
+            .collect();
+        for seed in [207u64, 1976, 3215, 2714, 2205, 2302] {
+            configs.push(EllipticalGalaxyConfig::for_scene_seed(seed));
+        }
+        configs.push(EllipticalGalaxyConfig {
+            family: EllipticalFamily::Classical,
+            axis_ratio: 0.75,
+            position_angle: 0.9,
+            effective_radius: 0.30,
+            profile_index: 3.5,
+            core_softening_fraction: 0.05,
+            central_excess: 0.05,
+            outer_halo_strength: 0.0,
+            outer_halo_scale: 1.0,
+            isophote_shape: -0.02,
+        });
+
+        for config in &configs {
+            let zeroed = EllipticalGalaxyConfig {
+                core_softening_fraction: 0.0,
+                central_excess: 0.0,
+                ..*config
+            };
+            for y in 0..render_height {
+                for x in 0..width {
+                    let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                    let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                    let cell = elliptical_cell(dx, dy, *config);
+                    let zero_cell = elliptical_cell(dx, dy, zeroed);
+                    assert_eq!(
+                        cell.inside_support, zero_cell.inside_support,
+                        "support must not depend on the central fields at ({x},{y})"
+                    );
+                    assert_eq!(
+                        cell.intensity > 0.0,
+                        cell.inside_support,
+                        "positive iff supported at ({x},{y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Same shaped radius (B3.1 shared-radius test extended to B3.2):
+    /// support still uses `r_shape`, and the central structure consumes
+    /// that SAME `r_shape` — a supported cell's intensity is exactly
+    /// `apply_central_structure(sersic_body_profile(r_shape, Re, n),
+    /// r_shape, Re, n, f, e)` with nonzero core and excess.
+    #[test]
+    fn test_b32_central_structure_consumes_same_shaped_radius() {
+        const GRID: usize = 149;
+        let config = EllipticalGalaxyConfig {
+            family: EllipticalFamily::Classical,
+            axis_ratio: 0.72,
+            position_angle: 1.2,
+            effective_radius: 0.30,
+            profile_index: 3.4,
+            core_softening_fraction: 0.05,
+            central_excess: 0.05,
+            outer_halo_strength: 0.0,
+            outer_halo_scale: 1.0,
+            isophote_shape: 0.03,
+        };
+        let k = config.family.support_re_multiplier();
+        let limit = k * config.effective_radius;
+        for gy in 0..=GRID {
+            for gx in 0..=GRID {
+                let dx = -0.5 + gx as f64 * (1.0 / GRID as f64);
+                let dy = -0.5 + gy as f64 * (1.0 / GRID as f64);
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                let cell = elliptical_cell(dx, dy, config);
+                assert_eq!(
+                    cell.inside_support,
+                    r_shape <= limit,
+                    "support must be r_shape <= k·Re at ({dx},{dy})"
+                );
+                let expected = if cell.inside_support {
+                    apply_central_structure(
+                        sersic_body_profile(r_shape, config.effective_radius, config.profile_index),
+                        r_shape,
+                        config.effective_radius,
+                        config.profile_index,
+                        config.core_softening_fraction,
+                        config.central_excess,
+                    )
+                } else {
+                    0.0
+                };
+                assert_eq!(cell.intensity, expected, "intensity at ({dx},{dy})");
+            }
+        }
+    }
+
+    /// Grain protocol on B3.2 scenes with nonzero central structure:
+    /// one draw per supported cell, zero outside, row-major,
+    /// deterministic; the grain never creates or destroys support and
+    /// the output stays finite in [0, 1].
+    #[test]
+    fn test_b32_grain_protocol_unchanged_with_central_structure() {
+        let (width, render_height) = (40usize, 40usize);
+        for seed in [207u64, 1976, 2205] {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let raw = elliptical_density_profile(width, render_height, config);
+
+            let make = || {
+                let context = GenerationContext::new(seed);
+                let mut rng = StdRng::seed_from_u64(777_777);
+                generate_elliptical_density(width, render_height, context, &mut rng)
+            };
+            let first = make();
+            let second = make();
+            assert_eq!(
+                first.data, second.data,
+                "generation must be deterministic (seed {seed})"
+            );
+
+            for y in 0..render_height {
+                for x in 0..width {
+                    let pre = raw.get(x, y);
+                    let post = first.get(x, y);
+                    assert!(
+                        post.is_finite() && (0.0..=1.0).contains(&post),
+                        "post-grain bounds ({x},{y}, seed {seed}): {post}"
+                    );
+                    assert_eq!(
+                        post > 0.0,
+                        pre > 0.0,
+                        "grain must not create/destroy support at ({x},{y}, seed {seed})"
+                    );
+                    if pre > 0.0 {
+                        // factor = 1 + U(−g, +g), g = ELLIPTICAL_GRAIN_FRACTION,
+                        // clamped at 1.0.
+                        let lo = pre * (1.0 - ELLIPTICAL_GRAIN_FRACTION);
+                        let hi = (pre * (1.0 + ELLIPTICAL_GRAIN_FRACTION)).min(1.0);
+                        assert!(
+                            ((lo - 1e-15)..=(hi + 1e-15)).contains(&post),
+                            "grain outside local band ({x},{y}, seed {seed}): pre={pre} post={post}"
+                        );
+                    } else {
+                        assert_eq!(post, 0.0);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 2-D enclosed-light trapezoid for a 1-D radial profile: returns
+    /// (∫₀^{r0} 2πr·I(r) dr, ∫₀^{rmax} 2πr·I(r) dr) — the area element
+    /// 2πr·dr is what makes this an enclosed-light fraction. Test-only
+    /// numerical integration (dense trapezoid) for the enclosed-light
+    /// concentration diagnostics.
+    fn enclosed_light(profile: impl Fn(f64) -> f64, r0: f64, rmax: f64) -> (f64, f64) {
+        // With rmax = 8·Re = 2.0 (Re = 0.25), dr = 2.0 / 32768 = 2⁻¹⁴
+        // is exact in binary.
+        const STEPS: usize = 32768;
+        let dr = rmax / STEPS as f64;
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        // w(r) = 2πr·I(r); at r = 0 the factor r makes w exactly 0.0.
+        let mut prev_w = 0.0_f64;
+        for i in 1..=STEPS {
+            let r = i as f64 * dr;
+            let w = 2.0 * std::f64::consts::PI * r * profile(r);
+            let trapezoid = 0.5 * (prev_w + w) * dr;
+            den += trapezoid;
+            if r <= r0 {
+                num += trapezoid;
+            }
+            prev_w = w;
+        }
+        (num, den)
+    }
+
+    /// B3.2 diagnostic seed panel (not a golden test): per-seed family,
+    /// Re, n, core, excess, c, the raw body bounding box (40×40 canvas
+    /// pixels), the raw post-support positive fraction (pre-render) and
+    /// the post-render visible terminal-cell occupancy at 40×20 — the
+    /// B3.1-vs-B3.2 comparison panel for the milestone diagnostic seeds.
+    #[allow(clippy::print_literal)]
+    #[test]
+    fn test_b32_seed_panel_diagnostic() {
+        let panel: [u64; 6] = [207, 1976, 3215, 2714, 2205, 2302];
+        let (width, terminal_height) = (40usize, 20usize);
+        println!("B3.2 seed panel (diagnostic):");
+        for (tag, w, h) in [
+            ("40x20", width, terminal_height),
+            ("60x30", 60usize, 30usize),
+        ] {
+            let rh = h * 2;
+            println!("  geometry {tag}: canvas {w}x{rh} px");
+            for seed in panel {
+                let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+                let profile = elliptical_density_profile(w, rh, config);
+                let raw_positive = profile
+                    .data
+                    .iter()
+                    .filter(|&&v| v.is_finite() && v > 0.0)
+                    .count() as f64
+                    / (w * rh) as f64;
+                let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0usize, 0usize);
+                for y in 0..rh {
+                    for x in 0..w {
+                        if profile.get(x, y) > 0.0 {
+                            x0 = x0.min(x);
+                            y0 = y0.min(y);
+                            x1 = x1.max(x);
+                            y1 = y1.max(y);
+                        }
+                    }
+                }
+                let scene = ArtModel::Elliptical.generate_scene(w, h, Some(seed));
+                let visible = post_render_visible_occupancy(&scene.density);
+                println!(
+                    "    seed {seed:>5} {:<13} Re={:.3} n={:.2} core={:.3} excess={:.3} c={:+.6} | bbox {:>2}..{:<2} x {:>2}..{:<2} | raw+={:.4} | visible={:.4}",
+                    family_name(config.family),
+                    config.effective_radius,
+                    config.profile_index,
+                    config.core_softening_fraction,
+                    config.central_excess,
+                    config.isophote_shape,
+                    x0,
+                    x1,
+                    y0,
+                    y1,
+                    raw_positive,
+                    visible
+                );
+            }
+        }
+        // Raw radial profile at fixed Re-fractions, before vs after the
+        // central structure (r in Re units, shaped-radius coordinate),
+        // for the two primary stress seeds.
+        for seed in [207u64, 1976] {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            println!(
+                "B3.2 radial profile seed {seed} (core={:.3}, excess={:.3}, n={:.2}, Re={:.3}), r in Re units:",
+                config.core_softening_fraction,
+                config.central_excess,
+                config.profile_index,
+                config.effective_radius
+            );
+            println!("  {:>6} | {:>12} | {:>12}", "r/Re", "before", "after");
+            for &rho in &[0.0_f64, 0.05, 0.10, 0.20, 0.30] {
+                let r = rho * config.effective_radius;
+                let before = sersic_body_profile(r, config.effective_radius, config.profile_index);
+                let after = apply_central_structure(
+                    before,
+                    r,
+                    config.effective_radius,
+                    config.profile_index,
+                    config.core_softening_fraction,
+                    config.central_excess,
+                );
+                println!("  {rho:>6.2} | {before:>12.6e} | {after:>12.6e}");
+            }
         }
     }
 
