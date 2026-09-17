@@ -3,7 +3,7 @@
 This document is a historical development archive covering the original roadmap,
 MVP planning, and the Patch 5 implementation cycle. It is **not** the current
 product specification or active roadmap. The current stable baseline is
-AstroFetch v1.0.1.
+AstroFetch v1.1.0.
 
 For user-facing documentation, see [`../README.md`](../README.md). For the
 current procedural renderer explanation, see

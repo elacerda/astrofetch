@@ -50,7 +50,7 @@ curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh
 Install a specific release tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v1.0.1
+curl -fsSL https://raw.githubusercontent.com/elacerda/astrofetch/main/install.sh | sh -s -- --version v1.1.0
 ```
 
 Check the installed binary:
