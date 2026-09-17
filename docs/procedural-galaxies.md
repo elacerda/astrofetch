@@ -488,6 +488,14 @@ retired in favour of this geometric family support.
   renders exactly one of `▀`/`▄` (never `█`), choosing the qualifying half
   with the larger `C_halo` (exact tie → upper half). ASCII intentionally
   does not receive the overlay in B3.3.
+- **Color contract (final)**: in color mode the overlay glyph receives
+  the faintest (level-0) galaxy foreground — the same low-intensity
+  palette band the faintest visible body cell uses — as an explicit
+  xterm-256 foreground sequence. HALF-BLOCK halo cells use the foreground
+  only and never set a background color (the unoccupied half of the cell
+  keeps the terminal background), so the overlay does not depend on the
+  terminal's default foreground. In no-color mode the same halo glyphs
+  are emitted plainly, without ANSI styling.
 - **Physical meaning**: the displayed one-cell skirt is a bounded visual
   signature of the outer halo, not the physical extent of the exponential
   model, which formally decays over ~4–8 Re and beyond. The raw halo support

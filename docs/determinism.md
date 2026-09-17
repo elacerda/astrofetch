@@ -13,7 +13,7 @@ New optional procedural features must not advance the legacy scene RNG merely be
 
 The derivation is implemented by `derive_feature_seed` in `src/seed.rs`. The algorithm uses fixed byte hashing plus a fixed SplitMix64 avalanche and does not use Rust's `Hash` implementations or randomized hash state.
 
-`GenerationContext` carries the base scene seed separately from the legacy `StdRng`. The engine creates this context from the already-resolved scene seed and passes it to the Spiral generator. The context does not itself consume randomness; the optional barred morphology derives its feature seed from it.
+`GenerationContext` carries the base scene seed separately from the legacy `StdRng`. The engine creates this context from the already-resolved scene seed and passes it to the Spiral and Elliptical generators. The context does not itself consume randomness; the optional barred morphology and the Elliptical morphology configuration each derive their feature seed from it.
 
 Feature namespaces are versioned deliberately. If a future implementation needs a different random stream for the same feature, it should opt into a new namespace such as `spiral/bar/v2` rather than silently changing unrelated feature streams.
 
@@ -24,6 +24,14 @@ Feature namespaces are versioned deliberately. If a future implementation needs 
 Phase 2B consumes this stream in Spiral generation: each scene derives at most one `DustLaneConfig` from it, and the dust parameters drive a deterministic multiplicative extinction of the luminous disk (disk plus gated arms times clumpiness). The feature RNG contract is unchanged: the dust stream still never advances the legacy scene RNG or the `spiral/bar/v1` stream, and no new legacy RNG draw was added. The extinction itself is a bounded procedural approximation (`tau = strength * profile * radial_gate`, `extinction = exp(-tau)`, with `tau <= 0.55` under the v1 calibration ranges), not a radiative-transfer simulation.
 
 The derivation is anchored for seeds 0, 4, 16, and 42 in `src/seed.rs`, and a test proves that `spiral/dust/v1` and `spiral/bar/v1` derive distinct feature seeds for the same base seed.
+
+## Elliptical morphology feature stream
+
+`elliptical/morphology/v2` is an independent versioned feature stream for the deterministic Elliptical morphology configuration (`EllipticalGalaxyConfig` in `src/elliptical.rs`). It derives from the same `derive_feature_seed` algorithm as the Spiral feature streams and is isolated from them and from the legacy scene RNG.
+
+The morphology configuration derives from a private deterministic feature RNG: a `StdRng` seeded from the `elliptical/morphology/v2` feature seed, created once per scene. Exactly seven unit draws are consumed from it, in a fixed order (family membership; sky-plane position angle; roundness to axis ratio; size/concentration to effective radius and profile index; envelope to halo strength and halo scale; isophote shape; central-structure latent). There is no rejection sampling and no data-dependent draw count, so every scene consumes exactly those seven draws, and the derivation never advances the legacy scene RNG.
+
+The legacy scene RNG is used by Elliptical generation for the grain stream only, according to the supported-cell contract: exactly one grain draw per total-supported cell, consumed in row-major order, with no draw for cells outside total support. The terminal halo overlay is a presentation-only mask: it consumes no RNG and does not participate in `star_field_seed`, which is derived from the prepared P2+G2 canvas alone. The same seed and geometry therefore remain deterministic.
 
 ## Legacy Spiral checkpoint
 

@@ -211,7 +211,7 @@ Available models:
 
 - `random`: randomly selects one of the available models.
 - `spiral`: a procedural spiral galaxy renderer.
-- `elliptical`: a smooth radial galaxy model.
+- `elliptical`: Sersic-based elliptical galaxies in several morphology families, with boxy or disky isophotes, central structure, and faint extended halos.
 - `cluster`: a sparse stellar cluster-style model.
 - `starfield`: a point-like star field using `.`, `*`, and `+`.
 

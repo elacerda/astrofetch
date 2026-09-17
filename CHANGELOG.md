@@ -13,6 +13,10 @@ Changelog tracking starts with v0.5.0.
   micro-motion, and subtle coherent Spiral phase sway. Pipes/redirections fall
   back to static output; Ctrl+C and terminal resize are handled safely, and
   ordinary non-animated output remains unchanged.
+- Elliptical galaxy morphology v2: a deterministic Sersic-based elliptical
+  model with four procedural families (CompactDisky, Classical, GiantBoxy,
+  CdLike), boxy or disky isophotes, per-scene central structure, and a
+  faint extended outer-halo presentation.
 
 ## [1.0.1] - 2026-09-14
 
