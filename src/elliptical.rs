@@ -11,12 +11,19 @@
 //! ([`generate_elliptical_density`]).
 //!
 //! [`elliptical_cell`] is the single per-cell seam that establishes the
-//! elliptical radius, the geometric support decision and the
-//! central-structure-applied Sersic intensity from one radius evaluation
-//! (body → [`apply_central_structure`] → grain);
+//! elliptical radius, the body + halo support decisions and the B3.3
+//! composed pre-grain intensity from one radius evaluation (body →
+//! [`apply_central_structure`] → outer-halo composition);
 //! [`elliptical_density_profile`] maps it to the post-support,
-//! pre-render-normalization body, and [`generate_elliptical_density`]
-//! applies the multiplicative local grain on supported cells only. The
+//! pre-render-normalization composed map, [`generate_elliptical_density`]
+//! applies the body-weighted multiplicative grain on total-supported
+//! cells, and [`prepare_elliptical_density`] runs the frozen P2
+//! normalization (Robust(0.02, 0.98) pinned from the positive final
+//! grained values restricted to body support) with the unchanged
+//! Gamma(0.7) stretch and TargetOccupancy(0.23) threshold. The
+//! terminal halo skirt (bounded one-cell overlay, T = 0.05, D = 1) is a
+//! presentation-only mask built by [`build_elliptical_halo_overlay`]
+//! from the actually rendered body silhouette. The
 //! legacy fixed double-Gaussian body and the legacy `0.018` brightness
 //! cutoff are both retired; the config is derived exactly once per scene
 //! from the versioned feature namespace and is never drawn from the
@@ -45,14 +52,16 @@
 //! * Support multipliers are family-specific presentation-contract
 //!   constants expressed as multiples of `Re` (CompactDisky 1.75,
 //!   Classical 1.40, GiantBoxy 1.00, CdLike 1.30).
-//! * Inside support: Sersic intensity evaluated at the same shaped
-//!   radius, passed through the central structure — the softened core
-//!   (`core_softening_fraction`) and the central excess
-//!   (`central_excess`), intensity only and never support — and then
-//!   perturbed by the multiplicative local grain
-//!   (`factor = 1 + U(−g, +g)`, clamped to [0, 1]; one row-major unit
-//!   draw per supported cell from the legacy scene RNG). Outside support:
-//!   density is exactly 0.0 and no grain draw is consumed.
+//! * Inside total support (body ∪ halo): the B3.2 body intensity
+//!   (Sersic at the same shaped radius, passed through the central
+//!   structure — the softened core and the central excess, intensity
+//!   only and never support — composed with the outer halo per the
+//!   frozen equation) is perturbed by the multiplicative body-weighted
+//!   local grain (`factor = 1 + U(−g_eff, +g_eff)`, clamped to [0, 1],
+//!   `g_eff = 0.05 · body_component / I_total`, division first; one
+//!   row-major unit draw per total-supported cell from the legacy scene
+//!   RNG). Outside total support: density is exactly 0.0 and no grain
+//!   draw is consumed.
 //! * Shaped support can add or remove cells relative to the pure B2
 //!   ellipse, so the row-major grain stream resynchronizes after the first
 //!   changed support cell (accepted consequence, not a bug): the contract
@@ -102,9 +111,17 @@
 //!   density) of an additive radial bump with the fixed e-folding scale
 //!   `0.20·Re` and exact kernel `exp(−(r / (0.20·Re))²)`, applied before
 //!   peak normalization; 0.0 means none.
-//! * `outer_halo_strength` is the halo amplitude relative to the body's
-//!   characteristic surface brightness; `outer_halo_scale` is the halo radial
-//!   scale as a multiple of Re.
+//! * `outer_halo_strength` = `h` is the halo peak amplitude relative to
+//!   the body peak *before* the total peak normalization; it is NOT an
+//!   integrated light fraction. `outer_halo_scale` = `s` is the halo
+//!   radial scale as a multiple of Re: the frozen kernel is
+//!   `K(r_shape) = exp(−r_shape / (s·Re))`, an exponential e-folding
+//!   component with e-folding radius `s·Re` (`K(0) = 1`,
+//!   `K(s·Re) = exp(−1)`). The raw halo contribution is
+//!   `C_halo = h·K(r_shape) / (1 + h)`; the raw halo support floor is
+//!   `C_halo >= 0.01` (body support is unchanged). `Re` remains the body
+//!   morphology scale / approximate effective-radius parameter — not an
+//!   exact half-light radius of the combined body + halo profile.
 //! * `isophote_shape` is the dimensionless amplitude `c` of the
 //!   fourth-harmonic isophote shape
 //!   `r_shape = r_ell / (1 + c·cos 4θ)`, where `θ = atan2(v, u)` is
@@ -115,6 +132,10 @@
 //!   in `[0.955, 1.045]`.
 
 use crate::density::DensityMap;
+use crate::render::{
+    prepare_density, prepare_galaxy_density_pinned_with_threshold, robust_normalization_bounds,
+    Normalization, PreparedDensity, RenderProfile,
+};
 use crate::seed::{GenerationContext, ELLIPTICAL_MORPHOLOGY_V2};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -787,7 +808,90 @@ pub(crate) fn apply_central_structure(
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Elliptical scene generation (geometric support + grain)
+// Outer halo (B3.3 frozen exponential envelope)
+// ────────────────────────────────────────────────────────────────────
+
+/// Raw halo support floor of the B3.3 composition.
+///
+/// The halo extends the raw support: `S_halo <=> C_halo >=
+/// HALO_SUPPORT_FLOOR`, with `C_halo` from
+/// [`outer_halo_contribution`]. It is a presentation-contract constant
+/// — never an RNG draw and never stored in
+/// [`EllipticalGalaxyConfig`].
+const HALO_SUPPORT_FLOOR: f64 = 0.01;
+
+/// Terminal halo visible threshold of the B3.3 overlay (frozen).
+///
+/// A terminal cell is a halo-overlay candidate iff the halo
+/// contribution of at least one of its two density subcells reaches
+/// this raw level. It is a presentation-contract constant — never an
+/// RNG draw and never stored in [`EllipticalGalaxyConfig`].
+const HALO_VISIBLE_THRESHOLD: f64 = 0.05;
+
+/// Bounded halo overlay depth of the B3.3 terminal skirt (frozen).
+///
+/// `HALO_VISIBLE_DEPTH = 1` means an overlay cell must sit directly
+/// 8-neighbour adjacent (terminal grid, Chebyshev distance) to the
+/// actually rendered body silhouette; the skirt is never propagated a
+/// second layer, no matter how broad the mathematical exponential tail
+/// is.
+const HALO_VISIBLE_DEPTH: usize = 1;
+
+/// Outer halo kernel: the frozen exponential e-folding form.
+///
+/// ```text
+/// K(r_shape) = exp( −r_shape / (s · Re) )
+/// ```
+///
+/// with `s = outer_halo_scale` and `Re = effective_radius`. `s·Re` is
+/// the exponential e-folding radius: `K(0) == 1.0` exactly and
+/// `K(s·Re) == exp(−1)` exactly. The kernel is finite, strictly
+/// positive and strictly decreasing in `r_shape` for `r_shape > 0` —
+/// a pure radial envelope with no isophote shaping, no core, and no
+/// support decision of its own.
+///
+/// # Units and conventions
+/// `r_shape` and `Re` in the same units (legacy canvas-fraction units
+/// when composed with [`elliptical_shaped_radius`], whose half-extent is
+/// 0.5); `s` dimensionless (family ranges 1.5–8.0). Scalar in, scalar
+/// out; no RNG, no I/O, no mutation, no support decision.
+pub(crate) fn outer_halo_kernel(r_shape: f64, halo_scale: f64, effective_radius: f64) -> f64 {
+    debug_assert!(
+        r_shape >= 0.0 && halo_scale > 0.0 && effective_radius > 0.0,
+        "outer_halo_kernel preconditions"
+    );
+
+    (-r_shape / (halo_scale * effective_radius)).exp()
+}
+
+/// Raw halo contribution `C_halo` at a shaped radius (frozen B3.3).
+///
+/// ```text
+/// C_halo(r_shape) = h · K(r_shape) / (1 + h)
+/// ```
+///
+/// with `h = outer_halo_strength` and `K` from [`outer_halo_kernel`].
+/// `h` is the halo peak amplitude relative to the body peak *before*
+/// the total peak normalization (at `r_shape = 0`, `K = 1`, so the
+/// composed peak stays exactly 1.0); it is NOT an integrated light
+/// fraction. `h == 0.0` yields exactly 0.0 everywhere — no halo, no
+/// support extension. The result is finite and in `[0, h/(1+h)]`.
+///
+/// # Units and conventions
+/// `r_shape` in legacy canvas-fraction units; `h` dimensionless
+/// (family ranges 0.0–0.45); `s` dimensionless; `Re` > 0. Scalar in,
+/// scalar out; no RNG, no I/O, no mutation, no support decision.
+pub(crate) fn outer_halo_contribution(
+    r_shape: f64,
+    halo_strength: f64,
+    halo_scale: f64,
+    effective_radius: f64,
+) -> f64 {
+    halo_strength * outer_halo_kernel(r_shape, halo_scale, effective_radius) / (1.0 + halo_strength)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Elliptical scene generation (geometric support + halo + grain)
 // ────────────────────────────────────────────────────────────────────
 
 /// Multiplicative local grain fraction of the Elliptical v2 grain
@@ -842,56 +946,77 @@ pub(crate) fn apply_multiplicative_grain(value: f64, unit_draw: f64, fraction: f
 /// computed from inconsistent radii.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct EllipticalCell {
-    /// `true` iff the cell is inside the family's geometric support:
+    /// `true` iff the cell is inside the family's geometric body support:
     /// `r_shape <= support_re_multiplier(family) · Re` (boundary
     /// inclusive), with `r_shape` from [`elliptical_shaped_radius`].
-    /// Independent of the central-structure fields.
+    /// Independent of the central-structure and halo fields.
     pub(crate) inside_support: bool,
-    /// Central-structure-applied Sersic body intensity in `(0, 1]` when
-    /// `inside_support` (exactly 1.0 at the canvas centre), exactly 0.0
-    /// otherwise.
+    /// `true` iff the cell is inside the B3.3 halo support:
+    /// `C_halo >= HALO_SUPPORT_FLOOR`, with `C_halo` from
+    /// [`outer_halo_contribution`] at the SAME `r_shape`.
+    pub(crate) inside_halo_support: bool,
+    /// B3.3 composed total intensity `I_total` in `[0, 1]` when
+    /// `inside_support || inside_halo_support` (exactly 1.0 at the
+    /// canvas centre inside body support), exactly 0.0 otherwise.
     pub(crate) intensity: f64,
+    /// The body part of `intensity`: `I_body / (1 + h)` inside body ∩
+    /// halo support, `I_body` in body support only, and exactly 0.0 in
+    /// halo support only (and outside total support).
+    pub(crate) body_component: f64,
 }
 
-/// Per-cell seam: shaped elliptical radius → geometric support
-/// decision → Sersic body intensity → central structure, all from a
-/// single shaped-radius evaluation.
+/// Per-cell seam: shaped elliptical radius → body + halo support
+/// decisions → Sersic body intensity → central structure → B3.3 outer
+/// halo composition, all from a single shaped-radius evaluation.
 ///
-/// The support is **geometric** and independent of the Sersic amplitude:
+/// Both supports are **geometric** and independent of amplitudes:
 ///
 /// ```text
-/// r_shape        =  elliptical_shaped_radius(dx, dy, q, pa, c)
-/// inside_support  iff  r_shape <= k(family) · Re
-/// intensity       =  apply_central_structure(              (inside support)
-///                        sersic_body_profile(r_shape, Re, n),
-///                        r_shape, Re, n, f, e)
-///                   0.0                                     (outside support)
+/// r_shape         =  elliptical_shaped_radius(dx, dy, q, pa, c)
+/// inside_support   iff  r_shape <= k(family) · Re            (body, unchanged)
+/// c_halo          =  h · exp(−r_shape / (s·Re)) / (1 + h)
+/// inside_halo_    iff  c_halo >= HALO_SUPPORT_FLOOR          (halo, B3.3)
+/// support
+///
+/// (inside body support)  i_body = apply_central_structure(
+///                                      sersic_body_profile(r_shape, Re, n),
+///                                      r_shape, Re, n, f, e)
+/// (inside body ∩ halo)   I_total        =  (i_body + h·K) / (1 + h)
+///                          body_component =  i_body / (1 + h)
+/// (inside body only)     I_total = i_body,  body_component = i_body
+/// (inside halo only)     I_total = c_halo,  body_component = 0.0
+/// (neither)              I_total = 0.0,     body_component = 0.0
 /// ```
 ///
-/// with `k(family) = [`EllipticalFamily::support_re_multiplier`]` and the
-/// boundary inclusive (`<=`) per the geometric support contract. The
-/// shaped radius is computed exactly once and feeds **both** the support
-/// decision and the Sersic intensity (and, through
-/// [`apply_central_structure`], the central structure), so the three can
-/// never be evaluated from inconsistent radii. The central structure
-/// changes intensity only — the support decision is made from `r_shape`
-/// alone and is independent of `f` and `e`. Because the Sersic body is
-/// strictly positive for every finite radius, the softened core keeps
-/// `I_core` in `(0, 1]` (ratio of positives), the excess kernel is
-/// strictly positive, and `I_final = (I_core + e·K)/(1 + e)` stays in
-/// `(0, 1]` — so the map built from this seam satisfies the invariant
+/// with `k(family) = [`EllipticalFamily::support_re_multiplier`]`,
+/// `K = outer_halo_kernel(r_shape, s, Re)`, and the body boundary
+/// inclusive (`<=`) per the geometric support contract. The shaped
+/// radius is computed exactly once and feeds **all** of the body
+/// support decision, the halo support decision, the Sersic intensity,
+/// the central structure and the halo kernel — no second radius
+/// evaluation exists, so the four can never be computed from
+/// inconsistent radii. The central structure and the halo both change
+/// intensity only; the body support decision is made from `r_shape`
+/// alone and is independent of `f`, `e`, `h` and `s`.
+///
+/// Composed invariants: at `r_shape = 0` inside body support the
+/// centre stays exactly 1.0 (both body and halo terms peak at 1.0, so
+/// `(1 + h·1)/(1 + h) == 1.0` exactly); the composed total is in
+/// `[0, 1]` everywhere; and because every term is strictly positive
+/// inside its support, the map built from this seam satisfies
 ///
 /// ```text
-/// cell intensity > 0.0  iff  inside_support
+/// cell intensity > 0.0  iff  inside_support || inside_halo_support
 /// ```
 ///
 /// which [`generate_elliptical_density`] relies on to spend exactly one
-/// grain draw, in row-major order, per supported cell.
+/// grain draw, in row-major order, per total-supported cell.
 ///
 /// # Units and conventions
 /// `dx`/`dy` in legacy canvas-fraction units (canvas half-extent = 0.5);
-/// `Re` in the same units; `k` dimensionless. Scalar in, scalar out; no
-/// RNG, no I/O, no mutation.
+/// `Re` in the same units; `k`, `s` dimensionless; `h` the halo peak
+/// amplitude relative to the body peak before the total peak
+/// normalization. Scalar in, scalar out; no RNG, no I/O, no mutation.
 pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) -> EllipticalCell {
     let r_shape = elliptical_shaped_radius(
         dx,
@@ -901,33 +1026,102 @@ pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) 
         config.isophote_shape,
     );
     let support_limit = config.family.support_re_multiplier() * config.effective_radius;
+    let inside_support = r_shape <= support_limit;
 
-    if r_shape <= support_limit {
-        let body_intensity =
-            sersic_body_profile(r_shape, config.effective_radius, config.profile_index);
-        let intensity = apply_central_structure(
-            body_intensity,
-            r_shape,
-            config.effective_radius,
-            config.profile_index,
-            config.core_softening_fraction,
-            config.central_excess,
-        );
+    // B3.3: the SAME r_shape feeds the halo support decision and the
+    // halo kernel — no second radius evaluation.
+    let halo_strength = config.outer_halo_strength;
+    let c_halo = outer_halo_contribution(
+        r_shape,
+        halo_strength,
+        config.outer_halo_scale,
+        config.effective_radius,
+    );
+    let inside_halo_support = c_halo >= HALO_SUPPORT_FLOOR;
+
+    if !inside_support && !inside_halo_support {
+        return EllipticalCell {
+            inside_support,
+            inside_halo_support,
+            intensity: 0.0,
+            body_component: 0.0,
+        };
+    }
+
+    if !inside_support {
+        // Halo only: raw halo contribution, no body component.
+        return EllipticalCell {
+            inside_support,
+            inside_halo_support,
+            intensity: c_halo,
+            body_component: 0.0,
+        };
+    }
+
+    let body_intensity =
+        sersic_body_profile(r_shape, config.effective_radius, config.profile_index);
+    let i_body = apply_central_structure(
+        body_intensity,
+        r_shape,
+        config.effective_radius,
+        config.profile_index,
+        config.core_softening_fraction,
+        config.central_excess,
+    );
+
+    if !inside_halo_support {
+        // Body only: accepted B3.2 intensity, unchanged.
         EllipticalCell {
-            inside_support: true,
-            intensity,
+            inside_support,
+            inside_halo_support,
+            intensity: i_body,
+            body_component: i_body,
         }
     } else {
+        // Body ∩ halo: frozen composition
+        // I_total = (I_body + h·K) / (1 + h), body part I_body / (1 + h).
+        let k = outer_halo_kernel(r_shape, config.outer_halo_scale, config.effective_radius);
         EllipticalCell {
-            inside_support: false,
-            intensity: 0.0,
+            inside_support,
+            inside_halo_support,
+            intensity: (i_body + halo_strength * k) / (1.0 + halo_strength),
+            body_component: i_body / (1.0 + halo_strength),
         }
     }
 }
 
-/// Pure per-scene Sersic body map after geometric support: the per-cell
-/// seam [`elliptical_cell`] evaluated at every cell of a `width` ×
-/// `height` canvas.
+/// Per-cell composed (B3.3) pre-grain fields: the total composed
+/// intensity map and the body-component map, both from the single
+/// per-cell seam [`elliptical_cell`] at every cell of a `width` ×
+/// `height` canvas. Coordinate convention as in
+/// [`elliptical_density_profile`].
+///
+/// # Side effects
+/// None (pure allocation of the returned maps).
+fn elliptical_composed_profile(
+    width: usize,
+    height: usize,
+    config: EllipticalGalaxyConfig,
+) -> (DensityMap, DensityMap) {
+    let mut total = DensityMap::new(width, height);
+    let mut body_component = DensityMap::new(width, height);
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+            let dy = (y as f64 - height as f64 / 2.0) / height as f64;
+            let cell = elliptical_cell(dx, dy, config);
+            total.set(x, y, cell.intensity);
+            body_component.set(x, y, cell.body_component);
+        }
+    }
+
+    (total, body_component)
+}
+
+/// Pure per-scene B3.3 composed body map: the per-cell seam
+/// [`elliptical_cell`] (geometric body support + halo composition)
+/// evaluated at every cell of a `width` × `height` canvas.
 ///
 /// Coordinate convention (identical to the legacy v1 generator):
 ///
@@ -944,11 +1138,12 @@ pub(crate) fn elliptical_cell(dx: f64, dy: f64, config: EllipticalGalaxyConfig) 
 /// `config` is consumed by value: the caller derives it exactly once per
 /// scene (see [`EllipticalGalaxyConfig::from_context`]) and this function
 /// performs no re-derivation and touches no RNG. This is the
-/// **post-geometric-support, pre-render-normalization** body: cells inside
-/// family support carry the central-structure-applied Sersic intensity in
-/// `(0, 1]` (exactly 1.0 at the canvas centre), cells outside support
-/// carry exactly 0.0 — the raw-positive-support diagnostic is the
-/// positive-cell fraction of this map.
+/// **post-total-support, pre-grain, pre-render-normalization** composed
+/// map: cells inside body ∪ halo support carry the B3.3 composed total
+/// intensity in `(0, 1]` (exactly 1.0 at the canvas centre), cells
+/// outside total support carry exactly 0.0. With
+/// `outer_halo_strength == 0.0` this is the accepted B3.2 body map
+/// bit-for-bit.
 ///
 /// # Side effects
 /// None (pure allocation of the returned [`DensityMap`]).
@@ -957,17 +1152,13 @@ pub(crate) fn elliptical_density_profile(
     height: usize,
     config: EllipticalGalaxyConfig,
 ) -> DensityMap {
-    DensityMap::from_fn(width, height, |x, y| {
-        let dx = (x as f64 - width as f64 / 2.0) / width as f64;
-        let dy = (y as f64 - height as f64 / 2.0) / height as f64;
-        elliptical_cell(dx, dy, config).intensity
-    })
+    elliptical_composed_profile(width, height, config).0
 }
 
-/// Generates the Elliptical v2 density map for one scene.
+/// Generates the Elliptical v2 (B3.3) density map for one scene.
 ///
-/// The Sersic body with geometric family support replaces the legacy
-/// fixed double-Gaussian body:
+/// The Sersic body with geometric family support plus the frozen outer
+/// halo replaces the legacy fixed double-Gaussian body:
 ///
 /// * **Morphology**: [`EllipticalGalaxyConfig::from_context`] is called
 ///   exactly once per scene, from the versioned
@@ -977,32 +1168,36 @@ pub(crate) fn elliptical_density_profile(
 ///   [`elliptical_shaped_radius`], which also sets the geometric support);
 ///   `core_softening_fraction` and `central_excess` are applied by the
 ///   per-cell seam through [`apply_central_structure`] (intensity only,
-///   never support); the halo fields (`outer_halo_*`) stay frozen and are
-///   deliberately unused here.
-/// * **Per-pixel math**: [`elliptical_density_profile`] (the per-cell
+///   never support); `outer_halo_strength` and `outer_halo_scale`
+///   compose the halo through the per-cell seam
+///   ([`outer_halo_contribution`], frozen equation).
+/// * **Per-pixel math**: [`elliptical_composed_profile`] (the per-cell
 ///   seam [`elliptical_cell`] with the legacy canvas-fraction convention);
 ///   `height` is the render height (2× terminal height in the half-block
 ///   path).
-/// * **Post-profile**: the multiplicative local grain
-///   ([`apply_multiplicative_grain`] at the fixed 5% local-modulation
-///   fraction [`ELLIPTICAL_GRAIN_FRACTION`], one unit draw in row-major
-///   order per supported cell) replaces the legacy absolute additive
-///   ±0.012 grain;
-///   the legacy `0.018` brightness cutoff is retired and replaced by the
-///   geometric family support (`r_shape <= k(family) · Re`, see
-///   [`elliptical_cell`]). The result stays bounded in `[0, 1]` because
-///   the central-value-normalized body profile is in `(0, 1]` and the
-///   helper clamps to `[0, 1]`.
+/// * **Post-profile (G2)**: the body-weighted multiplicative local grain
+///   ([`apply_multiplicative_grain`] with
+///   `g_eff = ELLIPTICAL_GRAIN_FRACTION · body_component / I_total`,
+///   division first, one unit draw in row-major order per total-supported
+///   cell) replaces the legacy absolute additive ±0.012 grain; the
+///   legacy `0.018` brightness cutoff is retired and replaced by the
+///   geometric total support (`S_body ∪ S_halo`, see [`elliptical_cell`]).
+///   The result stays bounded in `[0, 1]` because the composed intensity
+///   is in `(0, 1]` on total support and the helper clamps to `[0, 1]`.
 ///
 /// # RNG contract
 /// The morphology config is **never** drawn from the legacy scene RNG:
 /// it comes from `context.feature_seed(ELLIPTICAL_MORPHOLOGY_V2)`. The
 /// only consumer of `rng` (the legacy scene RNG created in
-/// `ArtModel::generate_density`) is the per-supported-cell grain unit
-/// draw (`rng.random::<f64>()`), in row-major order. Grain draws occur
-/// **only** for cells inside geometric support; outside support the
-/// density is exactly 0.0 and no draw is consumed — no dummy or
-/// discarded draws are inserted.
+/// `ArtModel::generate_density`) is the per-total-supported-cell grain
+/// unit draw (`rng.random::<f64>()`), in row-major order. Grain draws
+/// occur **only** for cells inside total support (`S_body ∪ S_halo`);
+/// outside total support the density is exactly 0.0 and no draw is
+/// consumed — no dummy or discarded draws are inserted. On body-only
+/// cells `g_eff` is exactly [`ELLIPTICAL_GRAIN_FRACTION`] and the draw
+/// stream is the accepted B3.2 one; on halo-only cells `g_eff` is
+/// exactly 0.0, so the halo stays smooth while the draw is still
+/// consumed to keep the one-draw-per-total-supported-cell stream.
 ///
 /// # Side effects
 /// Returns the filled [`DensityMap`]; mutates only `rng`'s internal state
@@ -1014,18 +1209,24 @@ pub(crate) fn generate_elliptical_density(
     rng: &mut StdRng,
 ) -> DensityMap {
     let config = EllipticalGalaxyConfig::from_context(context);
-    let mut map = elliptical_density_profile(width, height, config);
+    let (mut map, body_component) = elliptical_composed_profile(width, height, config);
 
     for y in 0..height {
         for x in 0..width {
             let value = map.get(x, y);
 
-            // Positive iff inside geometric support (invariant of
-            // `elliptical_cell`): supported cells draw one grain in
-            // row-major order; unsupported cells stay exactly 0.0 and
-            // consume no RNG.
+            // Positive iff inside total support (invariant of
+            // `elliptical_cell`): total-supported cells draw one grain
+            // in row-major order; unsupported cells stay exactly 0.0
+            // and consume no RNG.
             let value = if value > 0.0 {
-                apply_multiplicative_grain(value, rng.random::<f64>(), ELLIPTICAL_GRAIN_FRACTION)
+                // Division first (accepted audit form): body_fraction
+                // is exactly 1.0 on body-only cells (bit-identical
+                // B3.2 grain) and exactly 0.0 on halo-only cells
+                // (smooth halo, draw still consumed).
+                let body_fraction = body_component.get(x, y) / value;
+                let g_eff = ELLIPTICAL_GRAIN_FRACTION * body_fraction;
+                apply_multiplicative_grain(value, rng.random::<f64>(), g_eff)
             } else {
                 0.0
             };
@@ -1035,6 +1236,343 @@ pub(crate) fn generate_elliptical_density(
     }
 
     map
+}
+
+// ────────────────────────────────────────────────────────────────────
+// B3.3 P2 preparation (pinned S_body bounds + unchanged presentation)
+// ────────────────────────────────────────────────────────────────────
+
+/// B3.3 P2: robust percentile bounds of the positive **final grained**
+/// values restricted to the body support `S_body`.
+///
+/// The estimation runs the frozen robust pipeline of
+/// [`robust_normalization_bounds`] on a copy of the composed density
+/// with every non-`S_body` cell zeroed, so the percentile population is
+/// exactly the positive body cells of the FINAL GRAINED composed map —
+/// never halo-only values, and never the body-only (pre-composition)
+/// intensities (the rejected P2B design, which starved the stars).
+/// `S_body` is the unchanged geometric body support
+/// (`r_shape <= k(family) · Re`), re-derived from `config` with the same
+/// [`elliptical_shaped_radius`] the generation used.
+///
+/// Returns `None` when the positive body population is empty or its
+/// percentile range is degenerate, in which case callers must fall back
+/// to the legacy preparation.
+///
+/// # Side effects
+/// None (pure, aside from the temporary masked map allocation).
+pub(crate) fn elliptical_body_restricted_robust_bounds(
+    density: &DensityMap,
+    normalization: Normalization,
+    config: EllipticalGalaxyConfig,
+) -> Option<(f64, f64)> {
+    let support_limit = config.family.support_re_multiplier() * config.effective_radius;
+    let masked = DensityMap {
+        width: density.width,
+        height: density.height,
+        data: density
+            .data
+            .iter()
+            .enumerate()
+            .map(|(index, &value)| {
+                let x = index % density.width;
+                let y = index / density.width;
+                let dx = (x as f64 - density.width as f64 / 2.0) / density.width as f64;
+                let dy = (y as f64 - density.height as f64 / 2.0) / density.height as f64;
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                if value > 0.0 && r_shape <= support_limit {
+                    value
+                } else {
+                    0.0
+                }
+            })
+            .collect(),
+    };
+
+    robust_normalization_bounds(&masked, normalization)
+}
+
+/// B3.3 Elliptical preparation: P2 pinned bounds + unchanged Gamma(0.7)
+/// stretch + TargetOccupancy(0.23) threshold.
+///
+/// * `outer_halo_strength == 0.0`: the legacy preparation path
+///   ([`prepare_density`]), bit-for-bit the accepted B3.2 pipeline.
+/// * Halo enabled: the Robust(0.02, 0.98) bounds are pinned from the
+///   positive FINAL GRAINED values restricted to `S_body`
+///   ([`elliptical_body_restricted_robust_bounds`]) and applied to the
+///   **entire** composed map through the shared pinned-bounds seam
+///   ([`prepare_galaxy_density_pinned_with_threshold`]), then the
+///   unchanged Gamma(0.7) stretch and the unchanged TargetOccupancy(0.23)
+///   threshold — no adaptive occupancy, no body-only low anchor.
+///   Whenever the halo support is empty on this canvas the S_body
+///   positive population equals the full positive population, so the
+///   pinned preparation reduces bit-for-bit to the legacy path as well.
+///
+/// Model/body-mask semantics live here (the Elliptical morphology
+/// module); the generic [`RenderProfile`] stays untouched.
+///
+/// # Side effects
+/// None (pure, aside from the returned prepared maps).
+pub(crate) fn prepare_elliptical_density(
+    density: DensityMap,
+    profile: RenderProfile,
+    config: EllipticalGalaxyConfig,
+) -> PreparedDensity {
+    if config.outer_halo_strength == 0.0 {
+        return prepare_density(density, profile);
+    }
+
+    match elliptical_body_restricted_robust_bounds(&density, profile.normalization, config) {
+        Some(bounds) => {
+            let (stretched, threshold) =
+                prepare_galaxy_density_pinned_with_threshold(&density, profile, bounds);
+            PreparedDensity::Galaxy {
+                density: stretched,
+                threshold,
+            }
+        }
+        None => prepare_density(density, profile),
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Terminal halo overlay (B3.3 bounded presentation skirt, D = 1)
+// ────────────────────────────────────────────────────────────────────
+
+/// Terminal halo overlay occupancy of one terminal cell.
+///
+/// The overlay is a pure terminal presentation layer (the accepted
+/// "Seam A"): it never mutates the prepared density, never participates
+/// in the star-field seed, and is consumed by the SHADE and HALF-BLOCK
+/// renderers only. One value per terminal cell, renderer-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HaloOverlayCell {
+    /// No overlay glyph in this terminal cell.
+    Empty,
+    /// Only the top density subcell reaches [`HALO_VISIBLE_THRESHOLD`].
+    TopOnly,
+    /// Only the bottom density subcell reaches [`HALO_VISIBLE_THRESHOLD`].
+    BottomOnly,
+    /// Both density subcells qualify; `upper` records the half selected
+    /// by the larger-`C_halo` rule (an exact tie selects the upper half).
+    Both { upper: bool },
+}
+
+impl HaloOverlayCell {
+    /// SHADE renderer glyph: the overlay is always `░` (never
+    /// `▒`/`▓`/`█`); `None` when the cell has no overlay.
+    pub(crate) fn shade_glyph(self) -> Option<char> {
+        (self != Self::Empty).then_some('░')
+    }
+
+    /// HALF-BLOCK renderer glyph: `▀` for the upper half, `▄` for the
+    /// lower half (never `█`); `None` when the cell has no overlay.
+    pub(crate) fn half_block_glyph(self) -> Option<char> {
+        match self {
+            Self::Empty => None,
+            Self::TopOnly | Self::Both { upper: true } => Some('▀'),
+            Self::BottomOnly | Self::Both { upper: false } => Some('▄'),
+        }
+    }
+}
+
+/// Elliptical-only terminal halo overlay mask (B3.3, D = 1 skirt).
+///
+/// One [`HaloOverlayCell`] per terminal cell, row-major. Built from the
+/// **actually rendered** body silhouette (the normal P2+G2 prepared
+/// canvas at the normal threshold) and the raw halo contribution
+/// [`outer_halo_contribution`] at the two density subcells —
+/// deliberately NOT from the raw geometric `S_body` boundary. The
+/// overlay is a terminal presentation abstraction, not the physical
+/// outer cutoff of the exponential model, and ASCII intentionally does
+/// not receive it in B3.3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EllipticalHaloOverlay {
+    width: usize,
+    height: usize,
+    cells: Vec<HaloOverlayCell>,
+}
+
+impl EllipticalHaloOverlay {
+    /// Overlay cell at terminal coordinates `(x, y)`; out-of-bounds
+    /// reads are [`HaloOverlayCell::Empty`].
+    pub(crate) fn cell(&self, x: usize, y: usize) -> HaloOverlayCell {
+        self.cells
+            .get(y * self.width + x)
+            .copied()
+            .unwrap_or(HaloOverlayCell::Empty)
+    }
+
+    /// Number of terminal cells carrying an overlay glyph.
+    pub(crate) fn count(&self) -> usize {
+        self.cells
+            .iter()
+            .filter(|cell| **cell != HaloOverlayCell::Empty)
+            .count()
+    }
+
+    /// `true` when no terminal cell carries an overlay glyph.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.count() == 0
+    }
+}
+
+/// 8-connected (Chebyshev) neighbours of `(x, y)` on the `width × height`
+/// terminal grid, within `depth` steps, excluding the cell itself. For
+/// the frozen [`HALO_VISIBLE_DEPTH`] = 1 this is exactly the 8-neighbour
+/// ring.
+fn terminal_neighbours_within(
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    depth: usize,
+) -> Vec<(usize, usize)> {
+    let x_lo = x.saturating_sub(depth);
+    let x_hi = (x + depth).min(width.saturating_sub(1));
+    let y_lo = y.saturating_sub(depth);
+    let y_hi = (y + depth).min(height.saturating_sub(1));
+
+    let mut neighbours = Vec::new();
+    for ny in y_lo..=y_hi {
+        for nx in x_lo..=x_hi {
+            if ny != y || nx != x {
+                neighbours.push((nx, ny));
+            }
+        }
+    }
+    neighbours
+}
+
+/// Builds the B3.3 terminal halo overlay mask for one prepared
+/// Elliptical scene.
+///
+/// ## Frozen rules
+/// * `body_visible(x, y)` — the normal renderer would draw the
+///   Elliptical galaxy glyph in that terminal cell: the prepared
+///   vertical-pair maximum is finite, positive and `>= threshold`. The
+///   anchor is the actually rendered silhouette, deliberately NOT the
+///   raw geometric `S_body` boundary (a terminal cell inside `S_body`
+///   may still be an overlay cell as long as the normal glyph does not
+///   occupy it).
+/// * A terminal cell is a **candidate** iff `!body_visible` and
+///   `max(C_halo(top subcell), C_halo(bottom subcell)) >=
+///   HALO_VISIBLE_THRESHOLD`, with `C_halo` =
+///   [`outer_halo_contribution`] evaluated at the subcell coordinates
+///   through the same [`elliptical_shaped_radius`] the body uses.
+/// * **D = 1**: a candidate becomes an overlay cell only when it is
+///   directly 8-neighbour adjacent (terminal grid, Chebyshev distance
+///   [`HALO_VISIBLE_DEPTH`]) to a `body_visible` cell. The skirt is
+///   never propagated a second layer, no matter how broad the
+///   mathematical exponential tail is.
+/// * Half selection: the halves with `C_halo >= HALO_VISIBLE_THRESHOLD`
+///   are eligible; when both are eligible the larger `C_halo` wins and
+///   an exact tie selects the upper half.
+///
+/// `prepared_canvas` is the normal P2+G2 prepared density rows (2×
+/// `terminal_height` rows for the HALF_BLOCK shape). Presentation-only:
+/// this function reads the prepared canvas, never mutates density, the
+/// threshold, or any RNG state.
+///
+/// # Side effects
+/// None (pure allocation of the returned mask).
+pub(crate) fn build_elliptical_halo_overlay(
+    config: EllipticalGalaxyConfig,
+    terminal_width: usize,
+    terminal_height: usize,
+    prepared_canvas: &[Vec<f64>],
+    threshold: f64,
+) -> EllipticalHaloOverlay {
+    let width = terminal_width;
+    let height = terminal_height;
+    let cell_count = width * height;
+
+    // 1. The actually rendered body silhouette.
+    let mut body_visible = vec![false; cell_count];
+    for ty in 0..height {
+        for tx in 0..width {
+            let top = prepared_canvas
+                .get(2 * ty)
+                .and_then(|row| row.get(tx))
+                .copied()
+                .unwrap_or(0.0);
+            let bottom = prepared_canvas
+                .get(2 * ty + 1)
+                .and_then(|row| row.get(tx))
+                .copied()
+                .unwrap_or(0.0);
+            let pair_max = top.max(bottom);
+            body_visible[ty * width + tx] =
+                pair_max.is_finite() && pair_max > 0.0 && pair_max >= threshold;
+        }
+    }
+
+    // 2. Raw halo contribution at the two density subcells.
+    let density_height = prepared_canvas.len();
+    let halo_at = |x: usize, y: usize| -> f64 {
+        let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+        let dy = (y as f64 - density_height as f64 / 2.0) / density_height as f64;
+        let r_shape = elliptical_shaped_radius(
+            dx,
+            dy,
+            config.axis_ratio,
+            config.position_angle,
+            config.isophote_shape,
+        );
+        outer_halo_contribution(
+            r_shape,
+            config.outer_halo_strength,
+            config.outer_halo_scale,
+            config.effective_radius,
+        )
+    };
+
+    // 3. Candidates bounded to the one-cell skirt (D = 1).
+    let mut cells = vec![HaloOverlayCell::Empty; cell_count];
+    for ty in 0..height {
+        for tx in 0..width {
+            let index = ty * width + tx;
+            if body_visible[index] {
+                continue;
+            }
+
+            let c_top = halo_at(tx, 2 * ty);
+            let c_bottom = halo_at(tx, 2 * ty + 1);
+            let top_ok = c_top >= HALO_VISIBLE_THRESHOLD;
+            let bottom_ok = c_bottom >= HALO_VISIBLE_THRESHOLD;
+            if !top_ok && !bottom_ok {
+                continue;
+            }
+
+            let anchored = terminal_neighbours_within(tx, ty, width, height, HALO_VISIBLE_DEPTH)
+                .iter()
+                .any(|&(nx, ny)| body_visible[ny * width + nx]);
+            if !anchored {
+                continue;
+            }
+
+            cells[index] = match (top_ok, bottom_ok) {
+                (true, false) => HaloOverlayCell::TopOnly,
+                (false, true) => HaloOverlayCell::BottomOnly,
+                (true, true) => HaloOverlayCell::Both {
+                    upper: c_top >= c_bottom,
+                },
+                (false, false) => unreachable!("candidate requires a qualifying subcell"),
+            };
+        }
+    }
+
+    EllipticalHaloOverlay {
+        width,
+        height,
+        cells,
+    }
 }
 
 #[cfg(test)]
@@ -1706,18 +2244,51 @@ mod tests {
         }
     }
 
-    /// The body has positive (but not full) support and the
-    /// central-value-normalized kernel keeps the canvas centre as the
-    /// strictly brightest cell.
+    /// The geometric body support has positive (but not full) coverage and
+    /// the central-value-normalized composed kernel keeps the canvas centre
+    /// as the strictly brightest cell. (B3.3: the total support
+    /// `S_body ∪ S_halo` may now cover the whole canvas, so the
+    /// strict-subset assertion applies to the body support alone, which
+    /// the grain must never fill beyond its geometric boundary.)
     #[test]
     fn test_b22_body_positive_support_and_central_structure() {
         for seed in [0_u64, 1, 7, 42, 137, 2026] {
             let scene = ArtModel::Elliptical.generate_scene(40, 20, Some(seed));
             let map = &scene.density;
             let total = map.width * map.height;
-            let visible = map.data.iter().filter(|&&v| v > 0.0).count();
-            assert!(visible > 0, "seed {seed}: body collapsed to empty");
-            assert!(visible < total, "seed {seed}: canvas fully filled");
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let limit = config.family.support_re_multiplier() * config.effective_radius;
+
+            let mut body_positive = 0usize;
+            let mut total_positive = 0usize;
+            for y in 0..map.height {
+                for x in 0..map.width {
+                    let dx = (x as f64 - map.width as f64 / 2.0) / map.width as f64;
+                    let dy = (y as f64 - map.height as f64 / 2.0) / map.height as f64;
+                    let r_shape = elliptical_shaped_radius(
+                        dx,
+                        dy,
+                        config.axis_ratio,
+                        config.position_angle,
+                        config.isophote_shape,
+                    );
+                    if map.get(x, y) > 0.0 {
+                        total_positive += 1;
+                        if r_shape <= limit {
+                            body_positive += 1;
+                        }
+                    }
+                }
+            }
+            assert!(body_positive > 0, "seed {seed}: body collapsed to empty");
+            assert!(
+                body_positive < total,
+                "seed {seed}: body support fills the canvas"
+            );
+            assert!(
+                total_positive >= body_positive,
+                "seed {seed}: a body-supported cell is not positive"
+            );
 
             // Centre pixel: dx = dy = 0 → profile exactly 1.0 (≥ 1 − g
             // after the multiplicative grain at the fixed grain
@@ -1869,10 +2440,10 @@ mod tests {
         }
     }
 
-    /// Grain can never zero out a supported cell (all supported cells
-    /// stay strictly positive) and the geometric (shaped) support is
-    /// unchanged by the grain (scene support == config shaped support,
-    /// unsupported cells exactly 0.0).
+    /// Grain can never zero out a total-supported cell (all total
+    /// supported cells stay strictly positive) and the total support
+    /// `S_body ∪ S_halo` is unchanged by the grain (scene positivity ==
+    /// total support, unsupported cells exactly 0.0).
     #[test]
     fn test_b22h_supported_cells_stay_positive_and_support_unchanged() {
         for seed in [0_u64, 1, 2, 5, 7, 13, 42, 64, 99, 137, 2026] {
@@ -1893,12 +2464,18 @@ mod tests {
                         config.position_angle,
                         config.isophote_shape,
                     );
+                    let c_halo = outer_halo_contribution(
+                        r_shape,
+                        config.outer_halo_strength,
+                        config.outer_halo_scale,
+                        config.effective_radius,
+                    );
                     let v = scene.density.get(x, y);
-                    if r_shape <= k * config.effective_radius {
+                    if r_shape <= k * config.effective_radius || c_halo >= HALO_SUPPORT_FLOOR {
                         inside += 1;
                         assert!(
                             v > 0.0,
-                            "seed {seed} ({x},{y}): supported cell zeroed by grain"
+                            "seed {seed} ({x},{y}): total-supported cell zeroed by grain"
                         );
                     } else {
                         assert_eq!(
@@ -1913,24 +2490,28 @@ mod tests {
     }
 
     /// Same seed stays deterministic; exactly ONE unit draw is consumed
-    /// from the legacy scene RNG per supported cell, in row-major order;
-    /// unsupported cells consume no draw; the config never draws from
-    /// the scene RNG.
+    /// from the legacy scene RNG per total-supported cell (B3.3:
+    /// `S_body ∪ S_halo`), in row-major order; unsupported cells consume
+    /// no draw; the config never draws from the scene RNG. The grain
+    /// fraction is the body-weighted `g_eff = 0.05 · body_component /
+    /// I_total`, division first (the accepted audit form).
     ///
-    /// Proof strategy: rebuild the scene from the pure profile plus a
-    /// fresh `StdRng::seed_from_u64(seed)` — the exact legacy scene-RNG
+    /// Proof strategy: rebuild the scene from the pure composed profile
+    /// (`I_total` + `body_component`) plus a fresh
+    /// `StdRng::seed_from_u64(seed)` — the exact legacy scene-RNG
     /// construction of `ArtModel::generate_density` — drawing one unit
-    /// sample per supported cell in row-major order; every scene cell
-    /// must then be bit-equal. Any extra (dummy) draw, skipped draw, or
-    /// config draw on the scene RNG would desynchronize the draw sequence
-    /// and break the bit-equality.
+    /// sample per total-supported cell in row-major order; every scene
+    /// cell must then be bit-equal. Any extra (dummy) draw, skipped draw,
+    /// or config draw on the scene RNG would desynchronize the draw
+    /// sequence and break the bit-equality.
     #[test]
     fn test_b22h_exactly_one_draw_per_supported_cell_row_major() {
         for seed in [0_u64, 1, 2, 5, 13, 42, 64, 99, 137, 2026] {
             let (width, terminal_height) = (40usize, 20usize);
             let render_height = terminal_height * 2;
             let config = EllipticalGalaxyConfig::for_scene_seed(seed);
-            let profile = elliptical_density_profile(width, render_height, config);
+            let (profile, body_component) =
+                elliptical_composed_profile(width, render_height, config);
             let scene = ArtModel::Elliptical
                 .generate_scene(width, terminal_height, Some(seed))
                 .density;
@@ -1943,11 +2524,9 @@ mod tests {
                     let v = scene.get(x, y);
                     if p > 0.0 {
                         draws += 1;
-                        let expected = apply_multiplicative_grain(
-                            p,
-                            rng.random::<f64>(),
-                            ELLIPTICAL_GRAIN_FRACTION,
-                        );
+                        let body_fraction = body_component.get(x, y) / p;
+                        let g_eff = ELLIPTICAL_GRAIN_FRACTION * body_fraction;
+                        let expected = apply_multiplicative_grain(p, rng.random::<f64>(), g_eff);
                         assert_eq!(
                             v, expected,
                             "seed {seed} ({x},{y}): grain draw stream desynchronized (got {v}, expected {expected})"
@@ -2068,10 +2647,12 @@ mod tests {
         }
     }
 
-    /// Every cell outside the shaped support `k(family) · Re` is
-    /// exactly 0.0 in both the pure profile map and the generated scene.
-    /// (B3.1: the support boundary is the *shaped* radius, so the
-    /// outside test must use `r_shape`, not the pure `r_ell`.)
+    /// Every cell outside the total support `S_body ∪ S_halo` is exactly
+    /// 0.0 in both the pure profile map and the generated scene, and every
+    /// total-supported cell is strictly positive. (B3.1: the body boundary
+    /// is the *shaped* radius; B3.3: the halo extends the support to
+    /// `C_halo >= HALO_SUPPORT_FLOOR`, so zero-outside applies to the union,
+    /// never to `S_body` alone.)
     #[test]
     fn test_b22f_cells_outside_geometric_support_are_exactly_zero() {
         for seed in [0_u64, 7, 42, 137, 2026, 4095] {
@@ -2082,7 +2663,7 @@ mod tests {
             let scene = ArtModel::Elliptical
                 .generate_scene(width, render_height / 2, Some(seed))
                 .density;
-            let mut outside = 0usize;
+            let mut outside_body = 0usize;
             for y in 0..render_height {
                 for x in 0..width {
                     let dx = (x as f64 - width as f64 / 2.0) / width as f64;
@@ -2094,25 +2675,49 @@ mod tests {
                         config.position_angle,
                         config.isophote_shape,
                     );
-                    if r_shape > k * config.effective_radius {
-                        outside += 1;
+                    let c_halo = outer_halo_contribution(
+                        r_shape,
+                        config.outer_halo_strength,
+                        config.outer_halo_scale,
+                        config.effective_radius,
+                    );
+                    let in_body = r_shape <= k * config.effective_radius;
+                    let in_halo = c_halo >= HALO_SUPPORT_FLOOR;
+                    if !in_body {
+                        outside_body += 1;
+                    }
+                    if in_body || in_halo {
+                        assert!(
+                            profile.get(x, y) > 0.0,
+                            "seed {seed} ({x},{y}): total-supported profile cell is 0"
+                        );
+                        assert!(
+                            scene.get(x, y) > 0.0,
+                            "seed {seed} ({x},{y}): total-supported scene cell is 0"
+                        );
+                    } else {
                         assert_eq!(
                             profile.get(x, y),
                             0.0,
-                            "seed {seed} ({x},{y}): profile outside support must be 0"
+                            "seed {seed} ({x},{y}): profile outside total support must be 0"
                         );
                         assert_eq!(
                             scene.get(x, y),
                             0.0,
-                            "seed {seed} ({x},{y}): scene outside support must be 0"
+                            "seed {seed} ({x},{y}): scene outside total support must be 0"
                         );
                     }
                 }
             }
             // The 40×40 canvas corners sit at canvas distance ≥
             // 0.475·√2, so r_shape(corner) ≥ 0.475·√2/1.045 ≈ 0.64
-            // while k·Re < 0.525: at least the corners are always outside.
-            assert!(outside > 0, "seed {seed}: expected outside-support cells");
+            // while k·Re < 0.525: at least the corners are always outside
+            // the BODY support (the halo may, for strong-halo families,
+            // extend the total support over the full canvas).
+            assert!(
+                outside_body > 0,
+                "seed {seed}: expected outside-body-support cells"
+            );
         }
     }
 
@@ -3271,7 +3876,8 @@ mod tests {
 
     /// Support independence: for identical morphology with the central
     /// fields zeroed vs actual, `inside_support` is bit-identical and
-    /// the positive-iff-supported invariant holds everywhere.
+    /// the positive-iff-total-supported (B3.3: body ∪ halo) invariant
+    /// holds everywhere.
     #[test]
     fn test_b32_support_independent_of_central_structure() {
         let (width, render_height) = (60usize, 60usize);
@@ -3312,8 +3918,8 @@ mod tests {
                     );
                     assert_eq!(
                         cell.intensity > 0.0,
-                        cell.inside_support,
-                        "positive iff supported at ({x},{y})"
+                        cell.inside_support || cell.inside_halo_support,
+                        "positive iff total-supported at ({x},{y})"
                     );
                 }
             }
@@ -3539,6 +4145,1059 @@ mod tests {
                 println!("  {rho:>6.2} | {before:>12.6e} | {after:>12.6e}");
             }
         }
+    }
+
+    // ── B3.3 outer halo (frozen contract) ─────────────────────────
+
+    use crate::render::{
+        render_half_blocks_with_overlay, render_shades_with_overlay, robust_normalization_bounds,
+        ColorPalette,
+    };
+
+    /// B3.3 test helper: the prepared 40×20 Elliptical scene (P2+G2
+    /// canvas + threshold) and the terminal overlay mask, exactly as
+    /// the app pipeline composes them.
+    fn b33_prepared_overlay(
+        seed: u64,
+    ) -> (
+        EllipticalGalaxyConfig,
+        Vec<Vec<f64>>,
+        f64,
+        EllipticalHaloOverlay,
+    ) {
+        const WIDTH: usize = 40;
+        const TERMINAL_HEIGHT: usize = 20;
+        let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+        let scene = ArtModel::Elliptical.generate_scene(WIDTH, TERMINAL_HEIGHT, Some(seed));
+        let profile = RenderProfile::for_model(ArtModel::Elliptical);
+        let prepared = prepare_elliptical_density(scene.density, profile, config);
+        let (canvas, threshold) = match prepared {
+            PreparedDensity::Galaxy { density, threshold } => (density.into_rows(), threshold),
+            PreparedDensity::Starfield { .. } => unreachable!("Elliptical prepares as Galaxy"),
+        };
+        let overlay =
+            build_elliptical_halo_overlay(config, WIDTH, TERMINAL_HEIGHT, &canvas, threshold);
+        (config, canvas, threshold, overlay)
+    }
+
+    /// Raw halo contribution at a density-subcell coordinate — the same
+    /// computation the overlay builder runs (test-side re-derivation for
+    /// the invariant assertions).
+    fn b33_halo_at(
+        config: &EllipticalGalaxyConfig,
+        x: usize,
+        y: usize,
+        width: usize,
+        density_height: usize,
+    ) -> f64 {
+        let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+        let dy = (y as f64 - density_height as f64 / 2.0) / density_height as f64;
+        let r_shape = elliptical_shaped_radius(
+            dx,
+            dy,
+            config.axis_ratio,
+            config.position_angle,
+            config.isophote_shape,
+        );
+        outer_halo_contribution(
+            r_shape,
+            config.outer_halo_strength,
+            config.outer_halo_scale,
+            config.effective_radius,
+        )
+    }
+
+    /// Halo kernel contract: `K(0) == 1` exactly, `K(s·Re) == exp(−1)`
+    /// exactly, finite / positive / strictly decreasing; `C_halo` peaks
+    /// at `h/(1+h)` and is exactly 0.0 everywhere when `h == 0`.
+    #[test]
+    fn test_b33_halo_kernel_contract() {
+        for (halo_scale, re) in [(1.5_f64, 0.20), (4.0, 0.30), (8.0, 0.44)] {
+            let efold = halo_scale * re;
+            assert_eq!(
+                outer_halo_kernel(0.0, halo_scale, re),
+                1.0,
+                "K(0) must be exactly 1"
+            );
+            assert_eq!(
+                outer_halo_kernel(efold, halo_scale, re),
+                (-1.0_f64).exp(),
+                "K(s·Re) must be exactly exp(−1)"
+            );
+
+            let mut prev = f64::INFINITY;
+            for i in 0..=1000usize {
+                let r = i as f64 * (4.0 * efold / 1000.0);
+                let k = outer_halo_kernel(r, halo_scale, re);
+                assert!(k.is_finite() && k > 0.0, "kernel at r={r}");
+                if i > 0 {
+                    assert!(k < prev, "kernel must be strictly decreasing at r={r}");
+                }
+                prev = k;
+            }
+        }
+
+        for h in [0.0_f64, 0.01, 0.08, 0.45] {
+            let c0 = outer_halo_contribution(0.0, h, 3.0, 0.3);
+            assert_eq!(c0, h / (1.0 + h), "C_halo(0) must be h/(1+h)");
+            assert!(c0.is_finite() && (0.0..=1.0).contains(&c0));
+        }
+        // h == 0: the contribution is exactly 0.0 everywhere.
+        for r in [0.0_f64, 0.1, 0.5, 1.0, 2.0] {
+            assert_eq!(outer_halo_contribution(r, 0.0, 2.0, 0.3), 0.0);
+        }
+    }
+
+    /// Support contract: `S_body` is unchanged (`r_shape <= k·Re`),
+    /// `S_halo` iff `C_halo >= HALO_SUPPORT_FLOOR` at the same
+    /// `r_shape`, total support is the union, positivity iff
+    /// total-supported, and the body component is positive iff body
+    /// supported.
+    #[test]
+    fn test_b33_support_union_and_positive_iff() {
+        let configs: [EllipticalGalaxyConfig; 5] = [
+            EllipticalGalaxyConfig::for_scene_seed(0),
+            EllipticalGalaxyConfig::for_scene_seed(1),
+            EllipticalGalaxyConfig::for_scene_seed(3903),
+            EllipticalGalaxyConfig::for_scene_seed(1743),
+            EllipticalGalaxyConfig {
+                family: EllipticalFamily::GiantBoxy,
+                axis_ratio: 0.85,
+                position_angle: 1.0,
+                effective_radius: 0.44,
+                profile_index: 5.0,
+                core_softening_fraction: 0.2,
+                central_excess: 0.0,
+                outer_halo_strength: 0.18,
+                outer_halo_scale: 4.0,
+                isophote_shape: -0.02,
+            },
+        ];
+
+        for config in &configs {
+            let limit = config.family.support_re_multiplier() * config.effective_radius;
+            let mut total_supported = 0usize;
+            for gy in 0..=40usize {
+                for gx in 0..=40usize {
+                    let dx = -0.5 + gx as f64 * 0.025;
+                    let dy = -0.5 + gy as f64 * 0.025;
+                    let r_shape = elliptical_shaped_radius(
+                        dx,
+                        dy,
+                        config.axis_ratio,
+                        config.position_angle,
+                        config.isophote_shape,
+                    );
+                    let cell = elliptical_cell(dx, dy, *config);
+                    // S_body is unchanged by the halo fields.
+                    assert_eq!(
+                        cell.inside_support,
+                        r_shape <= limit,
+                        "S_body at ({dx},{dy})"
+                    );
+                    // S_halo iff C_halo >= floor, from the SAME r_shape.
+                    let c_halo = outer_halo_contribution(
+                        r_shape,
+                        config.outer_halo_strength,
+                        config.outer_halo_scale,
+                        config.effective_radius,
+                    );
+                    assert_eq!(
+                        cell.inside_halo_support,
+                        c_halo >= HALO_SUPPORT_FLOOR,
+                        "S_halo at ({dx},{dy})"
+                    );
+
+                    let total = cell.inside_support || cell.inside_halo_support;
+                    assert_eq!(
+                        cell.intensity > 0.0,
+                        total,
+                        "positive iff total-supported at ({dx},{dy})"
+                    );
+                    assert_eq!(
+                        cell.body_component > 0.0,
+                        cell.inside_support,
+                        "body component positive iff body-supported at ({dx},{dy})"
+                    );
+                    if total {
+                        total_supported += 1;
+                        assert!(
+                            (0.0..=1.0).contains(&cell.intensity)
+                                && (0.0..=1.0).contains(&cell.body_component)
+                        );
+                    } else {
+                        assert_eq!(cell.intensity, 0.0);
+                        assert_eq!(cell.body_component, 0.0);
+                    }
+                }
+            }
+            assert!(total_supported > 0, "total support collapsed to empty");
+        }
+    }
+
+    /// Frozen composition equation on a dense grid: body ∩ halo →
+    /// `(I_body + h·K)/(1+h)` with body part `I_body/(1+h)`; body only →
+    /// `I_body`; halo only → `C_halo` with zero body part; neither → 0.
+    /// The canvas centre stays exactly 1.0 (no taper) and everything
+    /// stays in `[0, 1]`.
+    #[test]
+    fn test_b33_composition_equation_and_centre_peak() {
+        let config = EllipticalGalaxyConfig {
+            family: EllipticalFamily::CdLike,
+            axis_ratio: 0.8,
+            position_angle: 0.4,
+            effective_radius: 0.30,
+            profile_index: 3.0,
+            core_softening_fraction: 0.1,
+            central_excess: 0.0,
+            outer_halo_strength: 0.45,
+            outer_halo_scale: 6.0,
+            isophote_shape: 0.0,
+        };
+        let h = config.outer_halo_strength;
+        for gy in 0..=60usize {
+            for gx in 0..=60usize {
+                let dx = -0.5 + gx as f64 * (1.0 / 60.0);
+                let dy = -0.5 + gy as f64 * (1.0 / 60.0);
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                let cell = elliptical_cell(dx, dy, config);
+                let i_body = if cell.inside_support {
+                    apply_central_structure(
+                        sersic_body_profile(r_shape, config.effective_radius, config.profile_index),
+                        r_shape,
+                        config.effective_radius,
+                        config.profile_index,
+                        config.core_softening_fraction,
+                        config.central_excess,
+                    )
+                } else {
+                    0.0
+                };
+                let k =
+                    outer_halo_kernel(r_shape, config.outer_halo_scale, config.effective_radius);
+                let (expected_total, expected_body) =
+                    if cell.inside_support && cell.inside_halo_support {
+                        ((i_body + h * k) / (1.0 + h), i_body / (1.0 + h))
+                    } else if cell.inside_support {
+                        (i_body, i_body)
+                    } else if cell.inside_halo_support {
+                        (h * k / (1.0 + h), 0.0)
+                    } else {
+                        (0.0, 0.0)
+                    };
+                assert_eq!(cell.intensity, expected_total, "I_total at ({dx},{dy})");
+                assert_eq!(
+                    cell.body_component, expected_body,
+                    "body part at ({dx},{dy})"
+                );
+            }
+        }
+
+        // r = 0 inside body support: the composed peak is exactly 1.0.
+        let center = elliptical_cell(0.0, 0.0, config);
+        assert_eq!(
+            center.intensity, 1.0,
+            "centre must stay exactly 1.0 (no taper)"
+        );
+        assert!((0.0..=1.0).contains(&center.body_component));
+    }
+
+    /// Zero-halo compatibility: with `h == 0` the composed profile is
+    /// the accepted B3.2 body profile bit-for-bit, the grain reduces to
+    /// the exact 5% B3.2 fraction (body fraction exactly 1.0), and the
+    /// P2 preparation equals the legacy preparation bit-for-bit. A
+    /// representative near-zero scene (seed 137, `h ≈ 0.00136`,
+    /// `S_halo` empty) reduces the full pipeline bit-for-bit to B3.2.
+    #[test]
+    fn test_b33_zero_halo_reduces_to_b32() {
+        const WIDTH: usize = 40;
+        const RENDER_HEIGHT: usize = 40;
+        let profile = RenderProfile::for_model(ArtModel::Elliptical);
+
+        // 1. Synthetic h == 0: profile stage bit-for-bit B3.2, grain
+        //    fraction exactly 0.05, P2 preparation identical to legacy.
+        let base = EllipticalGalaxyConfig::for_scene_seed(0);
+        let config = EllipticalGalaxyConfig {
+            outer_halo_strength: 0.0,
+            ..base
+        };
+        let (total, body_component) = elliptical_composed_profile(WIDTH, RENDER_HEIGHT, config);
+        let limit = config.family.support_re_multiplier() * config.effective_radius;
+        for y in 0..RENDER_HEIGHT {
+            for x in 0..WIDTH {
+                let dx = (x as f64 - WIDTH as f64 / 2.0) / WIDTH as f64;
+                let dy = (y as f64 - RENDER_HEIGHT as f64 / 2.0) / RENDER_HEIGHT as f64;
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                let expected = if r_shape <= limit {
+                    apply_central_structure(
+                        sersic_body_profile(r_shape, config.effective_radius, config.profile_index),
+                        r_shape,
+                        config.effective_radius,
+                        config.profile_index,
+                        config.core_softening_fraction,
+                        config.central_excess,
+                    )
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    total.get(x, y),
+                    expected,
+                    "h=0 profile at ({x},{y}) must be bit-for-bit B3.2"
+                );
+                assert_eq!(
+                    body_component.get(x, y),
+                    expected,
+                    "h=0 body part at ({x},{y})"
+                );
+                if expected > 0.0 {
+                    assert_eq!(
+                        body_component.get(x, y) / expected,
+                        1.0,
+                        "h=0 body fraction must be exactly 1.0"
+                    );
+                }
+            }
+        }
+
+        // B3.2 grain over that profile (one 0.05-fraction draw per
+        // positive cell) and the legacy P2 preparation.
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut map = DensityMap::new(WIDTH, RENDER_HEIGHT);
+        for y in 0..RENDER_HEIGHT {
+            for x in 0..WIDTH {
+                let p = total.get(x, y);
+                let v = if p > 0.0 {
+                    apply_multiplicative_grain(p, rng.random::<f64>(), ELLIPTICAL_GRAIN_FRACTION)
+                } else {
+                    0.0
+                };
+                map.set(x, y, v);
+            }
+        }
+        let prepared = prepare_elliptical_density(map.clone(), profile, config);
+        let legacy = prepare_density(map, profile);
+        let (p_d, p_t) = match &prepared {
+            PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+            PreparedDensity::Starfield { .. } => unreachable!(),
+        };
+        let (l_d, l_t) = match &legacy {
+            PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+            PreparedDensity::Starfield { .. } => unreachable!(),
+        };
+        assert_eq!(p_d.data, l_d.data, "h=0 prepared canvas must equal legacy");
+        assert_eq!(*p_t, *l_t, "h=0 threshold must equal legacy");
+
+        // 2. Representative near-zero scene: seed 137 has
+        //    h ≈ 0.00136 → max C_halo = h/(1+h) < 0.01, so S_halo is
+        //    empty and the FULL pipeline (profile + grain + P2) reduces
+        //    bit-for-bit to the accepted B3.2 path.
+        let seed = 137_u64;
+        let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+        assert!(
+            config.outer_halo_strength / (1.0 + config.outer_halo_strength) < HALO_SUPPORT_FLOOR,
+            "seed 137 must have an empty halo support"
+        );
+        let (width, terminal_height) = (40usize, 20usize);
+        let render_height = terminal_height * 2;
+        let scene = ArtModel::Elliptical
+            .generate_scene(width, terminal_height, Some(seed))
+            .density;
+        let (b32, _) = elliptical_composed_profile(width, render_height, config);
+        let limit = config.family.support_re_multiplier() * config.effective_radius;
+        for y in 0..render_height {
+            for x in 0..width {
+                let dx = (x as f64 - width as f64 / 2.0) / width as f64;
+                let dy = (y as f64 - render_height as f64 / 2.0) / render_height as f64;
+                let r_shape = elliptical_shaped_radius(
+                    dx,
+                    dy,
+                    config.axis_ratio,
+                    config.position_angle,
+                    config.isophote_shape,
+                );
+                // S_halo empty on the whole canvas.
+                assert!(
+                    !elliptical_cell(dx, dy, config).inside_halo_support,
+                    "seed 137 halo support must be empty at ({x},{y})"
+                );
+                if r_shape > limit {
+                    assert_eq!(b32.get(x, y), 0.0);
+                }
+            }
+        }
+
+        // B3.2 grain reconstruction: one 0.05 draw per positive cell.
+        let mut rng = StdRng::seed_from_u64(seed);
+        for y in 0..render_height {
+            for x in 0..width {
+                let p = b32.get(x, y);
+                let v = scene.get(x, y);
+                let expected = if p > 0.0 {
+                    apply_multiplicative_grain(p, rng.random::<f64>(), ELLIPTICAL_GRAIN_FRACTION)
+                } else {
+                    0.0
+                };
+                assert_eq!(
+                    v, expected,
+                    "seed 137 ({x},{y}): near-zero halo must be bit-for-bit B3.2 grain"
+                );
+            }
+        }
+
+        // P2: S_body positive population == full positive population →
+        // pinned preparation equals the legacy preparation bit-for-bit.
+        let prepared = prepare_elliptical_density(scene.clone(), profile, config);
+        let legacy = prepare_density(scene, profile);
+        let (p_d, p_t) = match &prepared {
+            PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+            PreparedDensity::Starfield { .. } => unreachable!(),
+        };
+        let (l_d, l_t) = match &legacy {
+            PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+            PreparedDensity::Starfield { .. } => unreachable!(),
+        };
+        assert_eq!(
+            p_d.data, l_d.data,
+            "seed 137 prepared canvas must equal legacy"
+        );
+        assert_eq!(*p_t, *l_t, "seed 137 threshold must equal legacy");
+    }
+
+    /// G2 grain protocol on halo scenes: exactly one legacy scene-RNG
+    /// draw per total-supported cell (row-major), zero outside; on
+    /// body-only cells the fraction is exactly 0.05 (bit-for-bit B3.2
+    /// grain), on halo-only cells it is exactly 0.0 (the halo stays
+    /// smooth while the draw is still consumed), and the scene is
+    /// bit-deterministic per seed.
+    #[test]
+    fn test_b33_grain_g2_protocol() {
+        const WIDTH: usize = 40;
+        const TERMINAL_HEIGHT: usize = 20;
+        const RENDER_HEIGHT: usize = TERMINAL_HEIGHT * 2;
+        for seed in [3903_u64, 3218, 1209, 2761] {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            assert!(config.outer_halo_strength > 0.01);
+            let (profile, body_component) =
+                elliptical_composed_profile(WIDTH, RENDER_HEIGHT, config);
+            let scene = ArtModel::Elliptical
+                .generate_scene(WIDTH, TERMINAL_HEIGHT, Some(seed))
+                .density;
+            let limit = config.family.support_re_multiplier() * config.effective_radius;
+
+            let mut rng = StdRng::seed_from_u64(seed);
+            let (mut body_only, mut halo_only, mut overlap) = (0usize, 0usize, 0usize);
+            for y in 0..RENDER_HEIGHT {
+                for x in 0..WIDTH {
+                    let dx = (x as f64 - WIDTH as f64 / 2.0) / WIDTH as f64;
+                    let dy = (y as f64 - RENDER_HEIGHT as f64 / 2.0) / RENDER_HEIGHT as f64;
+                    let r_shape = elliptical_shaped_radius(
+                        dx,
+                        dy,
+                        config.axis_ratio,
+                        config.position_angle,
+                        config.isophote_shape,
+                    );
+                    let in_body = r_shape <= limit;
+                    let in_halo = outer_halo_contribution(
+                        r_shape,
+                        config.outer_halo_strength,
+                        config.outer_halo_scale,
+                        config.effective_radius,
+                    ) >= HALO_SUPPORT_FLOOR;
+                    let p = profile.get(x, y);
+                    let v = scene.get(x, y);
+                    if p == 0.0 {
+                        assert_eq!(v, 0.0, "seed {seed} ({x},{y}): outside S_total must be 0");
+                        continue;
+                    }
+                    let body_fraction = body_component.get(x, y) / p;
+                    let g_eff = ELLIPTICAL_GRAIN_FRACTION * body_fraction;
+                    let expected = apply_multiplicative_grain(p, rng.random::<f64>(), g_eff);
+                    assert_eq!(
+                        v, expected,
+                        "seed {seed} ({x},{y}): one draw per S_total cell, division-first g_eff"
+                    );
+                    match (in_body, in_halo) {
+                        (true, true) => {
+                            overlap += 1;
+                            assert!(
+                                (0.0..1.0).contains(&body_fraction),
+                                "seed {seed} ({x},{y}): overlap body fraction"
+                            );
+                        }
+                        (true, false) => {
+                            body_only += 1;
+                            assert_eq!(
+                                body_fraction, 1.0,
+                                "seed {seed} ({x},{y}): body-only fraction must be exactly 1.0"
+                            );
+                            assert_eq!(
+                                g_eff, ELLIPTICAL_GRAIN_FRACTION,
+                                "seed {seed} ({x},{y}): body-only g_eff must be exactly 0.05"
+                            );
+                        }
+                        (false, true) => {
+                            halo_only += 1;
+                            assert_eq!(body_component.get(x, y), 0.0);
+                            assert_eq!(g_eff, 0.0, "halo-only g_eff must be exactly 0");
+                            assert_eq!(v, p, "halo-only cell must stay smooth (pre-grain)");
+                        }
+                        (false, false) => unreachable!("positive cell outside total support"),
+                    }
+                }
+            }
+            // The halo floor always covers the body support for real
+            // families (C_halo at the body boundary stays above 0.01),
+            // so body-only cells exist only when S_halo is empty — that
+            // exact-0.05 case is pinned in
+            // test_b33_zero_halo_reduces_to_b32. Here: overlap and
+            // halo-only regions must both be present.
+            assert!(
+                overlap > 0 && halo_only > 0,
+                "seed {seed}: missing overlap or halo-only region (body_only {body_only})"
+            );
+
+            // Same-seed determinism (bit-for-bit).
+            let scene_again = ArtModel::Elliptical
+                .generate_scene(WIDTH, TERMINAL_HEIGHT, Some(seed))
+                .density;
+            assert_eq!(scene, scene_again, "seed {seed} must be deterministic");
+        }
+    }
+
+    /// P2 contract: the pinned Robust(0.02, 0.98) bounds are the
+    /// percentiles of the positive FINAL GRAINED values restricted to
+    /// `S_body` (bit-for-bit), they exclude halo-only values, they are
+    /// NOT the rejected P2B body-only-intensity anchor, and the
+    /// prepared canvas/threshold are exactly the pinned-bounds output.
+    #[test]
+    fn test_b33_p2_pinned_s_body_bounds() {
+        const WIDTH: usize = 40;
+        const TERMINAL_HEIGHT: usize = 20;
+        const RENDER_HEIGHT: usize = TERMINAL_HEIGHT * 2;
+        for seed in [3903_u64, 1209, 2761] {
+            let config = EllipticalGalaxyConfig::for_scene_seed(seed);
+            let scene = ArtModel::Elliptical
+                .generate_scene(WIDTH, TERMINAL_HEIGHT, Some(seed))
+                .density;
+            let profile = RenderProfile::for_model(ArtModel::Elliptical);
+            let limit = config.family.support_re_multiplier() * config.effective_radius;
+
+            // 1. Bit-for-bit: the S_body-restricted bounds equal the
+            //    robust bounds of the masked final-grained map.
+            let bounds =
+                elliptical_body_restricted_robust_bounds(&scene, profile.normalization, config)
+                    .expect("halo seed must have usable S_body bounds");
+            let masked = DensityMap {
+                width: scene.width,
+                height: scene.height,
+                data: scene
+                    .data
+                    .iter()
+                    .enumerate()
+                    .map(|(index, &value)| {
+                        let x = index % scene.width;
+                        let y = index / scene.width;
+                        let dx = (x as f64 - scene.width as f64 / 2.0) / scene.width as f64;
+                        let dy = (y as f64 - scene.height as f64 / 2.0) / scene.height as f64;
+                        let r_shape = elliptical_shaped_radius(
+                            dx,
+                            dy,
+                            config.axis_ratio,
+                            config.position_angle,
+                            config.isophote_shape,
+                        );
+                        if value > 0.0 && r_shape <= limit {
+                            value
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            };
+            let manual = robust_normalization_bounds(&masked, profile.normalization)
+                .expect("masked S_body population must be usable");
+            assert_eq!(
+                bounds, manual,
+                "seed {seed}: bounds must be S_body-restricted"
+            );
+
+            // 2. Halo-only final-grained values are excluded: for a
+            //    halo seed the full-map bounds differ.
+            let full = robust_normalization_bounds(&scene, profile.normalization)
+                .expect("full population must be usable");
+            assert_ne!(
+                bounds, full,
+                "seed {seed}: halo-only values must not enter the P2 bounds"
+            );
+
+            // 3. Not P2B: the bounds are not the robust bounds of the
+            //    pre-composition (body-only, pre-grain) intensity.
+            let (composed, body_component) =
+                elliptical_composed_profile(WIDTH, RENDER_HEIGHT, config);
+            let h = config.outer_halo_strength;
+            let p2b = DensityMap {
+                width: scene.width,
+                height: scene.height,
+                data: (0..scene.width * scene.height)
+                    .map(|index| {
+                        let x = index % scene.width;
+                        let y = index / scene.width;
+                        let dx = (x as f64 - scene.width as f64 / 2.0) / scene.width as f64;
+                        let dy = (y as f64 - scene.height as f64 / 2.0) / scene.height as f64;
+                        let cell = elliptical_cell(dx, dy, config);
+                        if !cell.inside_support {
+                            0.0
+                        } else if cell.inside_halo_support {
+                            body_component.get(x, y) * (1.0 + h)
+                        } else {
+                            composed.get(x, y)
+                        }
+                    })
+                    .collect(),
+            };
+            let p2b_bounds = robust_normalization_bounds(&p2b, profile.normalization)
+                .expect("P2B population must be usable");
+            assert_ne!(
+                bounds, p2b_bounds,
+                "seed {seed}: P2 must not anchor on body-only intensity (P2B)"
+            );
+
+            // 4. The prepared canvas/threshold are exactly the
+            //    pinned-bounds preparation output (TargetOccupancy 0.23
+            //    is frozen on the profile — see
+            //    test_b22_elliptical_render_profile_frozen).
+            let raw = scene.clone();
+            let prepared = prepare_elliptical_density(scene, profile, config);
+            let (p_d, p_t) = match &prepared {
+                PreparedDensity::Galaxy { density, threshold } => (density, threshold),
+                PreparedDensity::Starfield { .. } => unreachable!(),
+            };
+            let (pinned, threshold) =
+                prepare_galaxy_density_pinned_with_threshold(&raw, profile, bounds);
+            assert_eq!(p_d.data, pinned.data, "seed {seed}: pinned canvas");
+            assert_eq!(*p_t, threshold, "seed {seed}: pinned threshold");
+        }
+    }
+
+    /// Overlay body invariant: every normal galaxy glyph renders
+    /// identically with and without the overlay, in both SHADE and
+    /// HALF-BLOCK.
+    #[test]
+    fn test_b33_overlay_body_glyph_invariant() {
+        for seed in [3903_u64, 3218, 1209, 2761, 207] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(!overlay.is_empty(), "seed {seed} must have an overlay");
+            let palette = ColorPalette::Nebula;
+
+            let body_visible = |tx: usize, ty: usize| {
+                let top = canvas
+                    .get(2 * ty)
+                    .and_then(|r| r.get(tx))
+                    .copied()
+                    .unwrap_or(0.0);
+                let bottom = canvas
+                    .get(2 * ty + 1)
+                    .and_then(|r| r.get(tx))
+                    .copied()
+                    .unwrap_or(0.0);
+                let pair_max = top.max(bottom);
+                pair_max.is_finite() && pair_max > 0.0 && pair_max >= threshold
+            };
+            let shade_base = render_shades_with_overlay(&canvas, threshold, false, palette, None);
+            let shade_with =
+                render_shades_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            assert_eq!(shade_base.len(), shade_with.len());
+            for (ty, (base, with)) in shade_base.iter().zip(shade_with.iter()).enumerate() {
+                let b: Vec<char> = base.chars().collect();
+                let w: Vec<char> = with.chars().collect();
+                assert_eq!(b.len(), w.len(), "seed {seed} row {ty}");
+                for tx in 0..40 {
+                    let (bc, wc) = (b[tx], w[tx]);
+                    if body_visible(tx, ty) {
+                        assert_eq!(
+                            bc, wc,
+                            "seed {seed} ({tx},{ty}): overlay must never alter a galaxy glyph"
+                        );
+                    } else if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                        assert_eq!(
+                            bc, wc,
+                            "seed {seed} ({tx},{ty}): non-overlay cell must be unchanged"
+                        );
+                    }
+                }
+            }
+
+            let block_base =
+                render_half_blocks_with_overlay(&canvas, threshold, false, palette, None);
+            let block_with =
+                render_half_blocks_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            assert_eq!(block_base.len(), block_with.len());
+            for (ty, (base, with)) in block_base.iter().zip(block_with.iter()).enumerate() {
+                let b: Vec<char> = base.chars().collect();
+                let w: Vec<char> = with.chars().collect();
+                assert_eq!(b.len(), w.len(), "seed {seed} row {ty}");
+                for tx in 0..40 {
+                    let (bc, wc) = (b[tx], w[tx]);
+                    if body_visible(tx, ty) {
+                        assert_eq!(
+                            bc, wc,
+                            "seed {seed} ({tx},{ty}): overlay must never alter a half-block glyph"
+                        );
+                    } else if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                        assert_eq!(
+                            bc, wc,
+                            "seed {seed} ({tx},{ty}): non-overlay cell must be unchanged"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Overlay threshold and D=1 boundedness: every overlay cell has at
+    /// least one density subcell with `C_halo >= HALO_VISIBLE_THRESHOLD`,
+    /// sits directly 8-neighbour adjacent to the actually rendered body
+    /// silhouette, and never belongs to the silhouette itself.
+    #[test]
+    fn test_b33_overlay_threshold_and_depth_one() {
+        for seed in [3903_u64, 3218, 2940, 1209, 2761, 207] {
+            let (config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            if overlay.is_empty() {
+                continue;
+            }
+            let (width, height) = (40usize, 20usize);
+            let density_height = canvas.len();
+
+            // The actually rendered body silhouette.
+            let body_visible = |tx: usize, ty: usize| {
+                let top = canvas
+                    .get(2 * ty)
+                    .and_then(|r| r.get(tx))
+                    .copied()
+                    .unwrap_or(0.0);
+                let bottom = canvas
+                    .get(2 * ty + 1)
+                    .and_then(|r| r.get(tx))
+                    .copied()
+                    .unwrap_or(0.0);
+                let pair_max = top.max(bottom);
+                pair_max.is_finite() && pair_max > 0.0 && pair_max >= threshold
+            };
+
+            for ty in 0..height {
+                for tx in 0..width {
+                    let cell = overlay.cell(tx, ty);
+                    if cell == HaloOverlayCell::Empty {
+                        continue;
+                    }
+                    // Threshold: a qualifying subcell exists.
+                    let c_top = b33_halo_at(&config, tx, 2 * ty, width, density_height);
+                    let c_bottom = b33_halo_at(&config, tx, 2 * ty + 1, width, density_height);
+                    assert!(
+                        c_top.max(c_bottom) >= HALO_VISIBLE_THRESHOLD,
+                        "seed {seed} ({tx},{ty}): no subcell reaches T=0.05"
+                    );
+                    // Anchor: not part of the rendered silhouette.
+                    assert!(
+                        !body_visible(tx, ty),
+                        "seed {seed} ({tx},{ty}): overlay over a visible body cell"
+                    );
+                    // D = 1: directly 8-neighbour adjacent to the
+                    // silhouette; no second-layer propagation.
+                    let adjacent = (0..height).any(|ny| {
+                        (ny as i32 - ty as i32).abs() <= 1
+                            && (0..width).any(|nx| {
+                                (nx as i32 - tx as i32).abs() <= 1
+                                    && !(nx == tx && ny == ty)
+                                    && body_visible(nx, ny)
+                            })
+                    });
+                    assert!(
+                        adjacent,
+                        "seed {seed} ({tx},{ty}): overlay cell is not 8-neighbour to the silhouette"
+                    );
+                }
+            }
+        }
+    }
+
+    /// SHADE semantics: the overlay glyph is exactly `░` — never
+    /// `▒`, `▓`, or `█` — both on the mask and in the rendered output.
+    #[test]
+    fn test_b33_shade_overlay_glyph_is_light_shade() {
+        for seed in [3903_u64, 3218, 1209, 2761, 207, 1743] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            for ty in 0..20 {
+                for tx in 0..40 {
+                    assert_eq!(
+                        overlay.cell(tx, ty).shade_glyph(),
+                        (overlay.cell(tx, ty) != HaloOverlayCell::Empty).then_some('░'),
+                        "seed {seed} ({tx},{ty})"
+                    );
+                }
+            }
+            if overlay.is_empty() {
+                continue;
+            }
+            let rendered = render_shades_with_overlay(
+                &canvas,
+                threshold,
+                false,
+                ColorPalette::Nebula,
+                Some(&overlay),
+            );
+            for (ty, line) in rendered.iter().enumerate() {
+                for (tx, ch) in line.chars().enumerate() {
+                    if overlay.cell(tx, ty) != HaloOverlayCell::Empty {
+                        assert_eq!(
+                            ch, '░',
+                            "seed {seed} ({tx},{ty}): SHADE overlay glyph must be ░"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// HALF-BLOCK semantics: the overlay glyph is exactly one of
+    /// `▀`/`▄`, never `█`; the qualifying half is the larger-`C_halo`
+    /// one (exact tie → upper), and a single qualifying half is used
+    /// directly.
+    #[test]
+    fn test_b33_halfblock_overlay_glyph_and_half_selection() {
+        for seed in [3903_u64, 3218, 1209, 1976, 207] {
+            let (config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            if overlay.is_empty() {
+                continue;
+            }
+            let width = 40usize;
+            let density_height = canvas.len();
+            let rendered = render_half_blocks_with_overlay(
+                &canvas,
+                threshold,
+                false,
+                ColorPalette::Nebula,
+                Some(&overlay),
+            );
+            for (ty, line) in rendered.iter().enumerate() {
+                for (tx, ch) in line.chars().enumerate() {
+                    let cell = overlay.cell(tx, ty);
+                    if cell == HaloOverlayCell::Empty {
+                        continue;
+                    }
+                    let glyph = cell.half_block_glyph().expect("non-empty mask cell");
+                    assert!(
+                        matches!(glyph, '▀' | '▄'),
+                        "seed {seed} ({tx},{ty}): half-block overlay glyph must be ▀ or ▄"
+                    );
+                    let c_top = b33_halo_at(&config, tx, 2 * ty, width, density_height);
+                    let c_bottom = b33_halo_at(&config, tx, 2 * ty + 1, width, density_height);
+                    let top_ok = c_top >= HALO_VISIBLE_THRESHOLD;
+                    let bottom_ok = c_bottom >= HALO_VISIBLE_THRESHOLD;
+                    assert!(top_ok || bottom_ok);
+                    let expected = if top_ok && bottom_ok {
+                        // Larger C_halo wins; exact tie → upper half.
+                        if c_top >= c_bottom {
+                            '▀'
+                        } else {
+                            '▄'
+                        }
+                    } else if top_ok {
+                        '▀'
+                    } else {
+                        '▄'
+                    };
+                    assert_eq!(
+                        glyph, expected,
+                        "seed {seed} ({tx},{ty}): half selection must follow C_halo (tie → upper)"
+                    );
+                    assert_eq!(
+                        ch, glyph,
+                        "seed {seed} ({tx},{ty}): rendered half-block overlay glyph"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Empty-overlay identity: a zero-overlay render is byte-identical
+    /// to the normal P2+G2 render (SHADE and HALF-BLOCK, stars
+    /// included).
+    #[test]
+    fn test_b33_empty_overlay_identity() {
+        for seed in [1743_u64, 1976] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(overlay.is_empty(), "seed {seed} must have an empty overlay");
+            let palette = ColorPalette::Nebula;
+            let base = render_shades_with_overlay(&canvas, threshold, false, palette, None);
+            let with =
+                render_shades_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            assert_eq!(
+                base, with,
+                "seed {seed}: empty SHADE overlay must be byte-identical"
+            );
+            let base = render_half_blocks_with_overlay(&canvas, threshold, false, palette, None);
+            let with =
+                render_half_blocks_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            assert_eq!(
+                base, with,
+                "seed {seed}: empty HALF-BLOCK overlay must be byte-identical"
+            );
+        }
+    }
+
+    /// Star behavior: the overlay never feeds the star-field seed; the
+    /// only cells that may change between the base and the overlay
+    /// render are the overlay cells themselves (stars disappear only
+    /// where a visible halo glyph is drawn, and no star appears outside
+    /// the overlay).
+    #[test]
+    fn test_b33_stars_displaced_only_under_overlay() {
+        for seed in [3903_u64, 3218, 1209, 2761, 207] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            let palette = ColorPalette::Nebula;
+
+            // The star seed is derived from the prepared canvas alone —
+            // the overlay is not part of that hash — so both renders
+            // below share the exact same star field.
+            let shade_base = render_shades_with_overlay(&canvas, threshold, false, palette, None);
+            let shade_with =
+                render_shades_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            for (ty, (base, with)) in shade_base.iter().zip(shade_with.iter()).enumerate() {
+                let b: Vec<char> = base.chars().collect();
+                let w: Vec<char> = with.chars().collect();
+                for tx in 0..40 {
+                    if b[tx] != w[tx] {
+                        assert!(
+                            overlay.cell(tx, ty) != HaloOverlayCell::Empty,
+                            "seed {seed} ({tx},{ty}): star changed outside the overlay"
+                        );
+                        assert_eq!(
+                            w[tx], '░',
+                            "seed {seed} ({tx},{ty}): only the halo glyph may replace a star"
+                        );
+                    }
+                }
+            }
+
+            let block_base =
+                render_half_blocks_with_overlay(&canvas, threshold, false, palette, None);
+            let block_with =
+                render_half_blocks_with_overlay(&canvas, threshold, false, palette, Some(&overlay));
+            for (ty, (base, with)) in block_base.iter().zip(block_with.iter()).enumerate() {
+                let b: Vec<char> = base.chars().collect();
+                let w: Vec<char> = with.chars().collect();
+                for tx in 0..40 {
+                    if b[tx] != w[tx] {
+                        assert!(
+                            overlay.cell(tx, ty) != HaloOverlayCell::Empty,
+                            "seed {seed} ({tx},{ty}): star changed outside the overlay"
+                        );
+                        assert!(
+                            matches!(w[tx], '▀' | '▄'),
+                            "seed {seed} ({tx},{ty}): only the halo glyph may replace a star"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Diagnostic overlay-count anchors at 40×20, D=1, T=0.05: the
+    /// accepted B3.3G prototype panel. The counts are pinned exactly —
+    /// they reproduce the prototype mask bit-for-bit (verified against
+    /// the accepted render panel; the zero counts are the strict
+    /// CompactDisky/GiantBoxy invariants).
+    #[test]
+    fn test_b33_overlay_count_anchors_40x20() {
+        let anchors: [(u64, usize, &str); 9] = [
+            (3903, 70, "CdLike"),
+            (3218, 72, "CdLike"),
+            (2940, 68, "CdLike"),
+            (1209, 72, "GiantBoxy"),
+            (2761, 74, "Classical"),
+            (207, 72, "GiantBoxy"),
+            (1743, 0, "CompactDisky"),
+            (1976, 0, "CompactDisky"),
+            (1110, 0, "GiantBoxy"),
+        ];
+        for (seed, expected, family) in anchors {
+            let (config, _canvas, _threshold, overlay) = b33_prepared_overlay(seed);
+            assert_eq!(
+                family_name(config.family),
+                family,
+                "seed {seed}: anchor family drifted"
+            );
+            assert_eq!(
+                overlay.count(),
+                expected,
+                "seed {seed}: overlay count drifted from the accepted prototype"
+            );
+        }
+    }
+
+    /// Bounded population diagnostic (128 deterministic seeds, not a
+    /// golden test): the overlay frequency per family. Strict
+    /// invariants: CompactDisky never produces an overlay (its max raw
+    /// halo contribution stays below the visible threshold), CdLike
+    /// always does. The prototype ordering (CdLike 100% > GiantBoxy
+    /// ~81% > Classical ~33% > CompactDisky ~0%) is diagnostic only.
+    #[test]
+    fn test_b33_overlay_frequency_bounded_diagnostic() {
+        let mut total: [u32; 4] = [0; 4];
+        let mut nonempty: [u32; 4] = [0; 4];
+        for seed in 0..128u64 {
+            let (config, _canvas, _threshold, overlay) = b33_prepared_overlay(seed);
+            let index = match config.family {
+                EllipticalFamily::CompactDisky => 0,
+                EllipticalFamily::Classical => 1,
+                EllipticalFamily::GiantBoxy => 2,
+                EllipticalFamily::CdLike => 3,
+            };
+            total[index] += 1;
+            if !overlay.is_empty() {
+                nonempty[index] += 1;
+            }
+        }
+        for (index, family_total) in total.iter().enumerate() {
+            assert!(
+                *family_total > 0,
+                "family index {index} missing from 0..128 seeds"
+            );
+        }
+        eprintln!(
+            "B3.3 overlay frequency (128 seeds, 40×20, D=1, T=0.05):              CompactDisky {}/{} Classical {}/{} GiantBoxy {}/{} CdLike {}/{}",
+            nonempty[0],
+            total[0],
+            nonempty[1],
+            total[1],
+            nonempty[2],
+            total[2],
+            nonempty[3],
+            total[3],
+        );
+        assert_eq!(
+            nonempty[0], 0,
+            "CompactDisky max C_halo stays below 0.05: overlay must be impossible"
+        );
+        assert!(
+            nonempty[3] > 0,
+            "CdLike (h ∈ [0.25, 0.45]) must produce overlays"
+        );
     }
 
     /// Post-render visible terminal-cell occupancy: runs the scene

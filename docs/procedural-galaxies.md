@@ -413,10 +413,9 @@ GiantBoxy, CdLike) and applies:
   Positive `c` is disky, negative `c` is boxy, and `c = 0` reproduces the
   pure ellipse; the pattern is defined in the intrinsic frame and rotates
   with the galaxy;
-- a geometric visible support: cells with `r_shape <= k(family) · Re` are
+- a geometric body support: cells with `r_shape <= k(family) · Re` are
   visible, where `k` is a deterministic per-family contract constant (1.75 /
-  1.40 / 1.00 / 1.30); outside support the density is exactly zero and no
-  grain draw is consumed. The *same* `r_shape` also feeds the Sersic
+  1.40 / 1.00 / 1.30). The *same* `r_shape` also feeds the Sersic
   intensity, so support and profile can never disagree;
 - a central structure that modifies intensity only — never the geometric
   support, the isophote geometry, or the grain draw count:
@@ -431,15 +430,73 @@ GiantBoxy, CdLike) and applies:
   `0.20·Re` with the exact kernel `K(r) = exp(−(r / (0.20·Re))²)` (an
   e-folding scale — `K(0.20·Re) = exp(−1)` — not a Gaussian standard
   deviation);
-- multiplicative local grain: every visible cell is scaled by a random
-  factor `1 + U(−g, +g)` and clamped to [0, 1], applied only inside the
-  visible support (one row-major draw per visible cell), with a fixed
-  `g = 0.05` — a 5% local modulation relative to the local Sersic
-  intensity.
+- an **outer halo** (B3.3): an exponential e-folding component
+  `K(r_shape) = exp(−r_shape / (s·Re))` with `s = outer_halo_scale`
+  (family ranges 1.5–8.0). `s·Re` is the e-folding radius: `K(0) = 1`
+  exactly and `K(s·Re) = exp(−1)`. `h = outer_halo_strength` (family
+  ranges 0.00–0.45) is the halo peak amplitude relative to the body peak
+  **before** the total peak normalization — it is *not* an integrated light
+  fraction. The raw halo contribution is
+  `C_halo(r_shape) = h·K(r_shape) / (1 + h)`;
+- an extended total support `S_total = S_body ∪ S_halo`, where
+  `S_halo <=> C_halo >= 0.01` (the frozen raw halo support floor, evaluated
+  at the same `r_shape`). Outside total support the density is exactly zero
+  and no grain draw is consumed;
+- a B3.3 composed intensity on total support: inside body ∩ halo support,
+  `I_total = (I_body + h·K) / (1 + h)` with body part `I_body / (1 + h)`;
+  inside body support only, the accepted B3.2 body intensity `I_body`;
+  inside halo support only, `C_halo` with zero body part. The canvas centre
+  stays exactly 1.0 (no taper) and `I_total` stays in [0, 1];
+- body-weighted multiplicative local grain (G2): every total-supported cell
+  is scaled by a random factor `1 + U(−g_eff, +g_eff)` clamped to [0, 1],
+  with `g_eff = 0.05 · body_component / I_total` (division first), applied
+  only inside total support (one row-major draw per total-supported cell).
+  On body-only cells `g_eff` is exactly 0.05 — the accepted B3.2 grain,
+  bit-for-bit — and on halo-only cells `g_eff` is exactly 0, so the halo
+  stays smooth while the draw is still consumed.
+
+`Re` remains the body morphology scale / approximate effective-radius
+parameter; it is **not** an exact half-light radius of the combined
+body + halo profile.
 
 The profile index `n` changes the concentration of the body without changing
 its support. The v1 generator's legacy faint-outskirts brightness cutoff was
 retired in favour of this geometric family support.
+
+### Outer-halo presentation (P2 pinned bounds + bounded terminal skirt)
+
+- **Normalization (P2)**: for a halo-enabled Elliptical scene the
+  Robust(0.02, 0.98) bounds are pinned from the positive **final grained**
+  values restricted to the body support `S_body`, then applied to the entire
+  composed density map. The unchanged Gamma(0.7) stretch and the unchanged
+  TargetOccupancy(0.23) body threshold follow. The low bound is deliberately
+  *not* derived from the pre-composition body-only intensity (the rejected
+  P2B design starved the background stars), and no adaptive occupancy is
+  used. With an empty halo support (or `h = 0`) the preparation reduces
+  bit-for-bit to the legacy path.
+- **Terminal halo skirt (overlay)**: the visible halo is a separate terminal
+  presentation layer — it is *not* produced by lowering the Robust bounds
+  or changing the target occupancy. Anchored to the *actually rendered* body
+  silhouette (the normal P2+G2 prepared canvas at the body threshold, not
+  the raw geometric body-support boundary), a terminal cell receives a faint
+  overlay glyph iff it is not part of that silhouette, at least one of its
+  two density subcells reaches `C_halo >= 0.05`
+  (`HALO_VISIBLE_THRESHOLD`), and it is directly 8-neighbour adjacent to
+  the silhouette (`HALO_VISIBLE_DEPTH = 1` — the skirt is never propagated
+  a second layer, no matter how broad the mathematical exponential tail is).
+  SHADE renders every overlay cell as `░` (never `▒`/`▓`/`█`); HALF-BLOCK
+  renders exactly one of `▀`/`▄` (never `█`), choosing the qualifying half
+  with the larger `C_halo` (exact tie → upper half). ASCII intentionally
+  does not receive the overlay in B3.3.
+- **Physical meaning**: the displayed one-cell skirt is a bounded visual
+  signature of the outer halo, not the physical extent of the exponential
+  model, which formally decays over ~4–8 Re and beyond. The raw halo support
+  floor (0.01) and the visible threshold (0.05) are presentation-contract
+  constants, not physical cutoffs.
+- **Stars**: the star-field seed is derived from the normal prepared P2+G2
+  canvas alone; the overlay mask never enters that hash. Stars are displaced
+  only in terminal cells physically occupied by a visible overlay glyph, and
+  a zero-overlay render is byte-identical to the normal P2+G2 render.
 
 This creates a diffuse, centrally concentrated object with smoother morphology than the spiral model.
 

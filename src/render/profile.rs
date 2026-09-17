@@ -286,6 +286,25 @@ pub(crate) fn prepare_galaxy_density_pinned(
     apply_stretch_to_density(&normalized, profile.stretch)
 }
 
+/// Pinned-bounds galaxy preparation including the visibility threshold.
+///
+/// Normalizes `density` with the fixed robust `bounds` and applies the
+/// profile stretch (the exact [`prepare_galaxy_density_pinned`] mapping),
+/// then computes the HALF_BLOCK vertical-pair target-occupancy threshold
+/// from the stretched map. This is the B3.3 Elliptical P2 seam: the
+/// caller (the Elliptical morphology module) supplies bounds derived from
+/// a model-specific cell subset, while all mapping/threshold semantics
+/// stay the legacy production implementations.
+pub(crate) fn prepare_galaxy_density_pinned_with_threshold(
+    density: &DensityMap,
+    profile: RenderProfile,
+    bounds: (f64, f64),
+) -> (DensityMap, f64) {
+    let stretched = prepare_galaxy_density_pinned(density, profile, bounds);
+    let threshold = compute_target_occupancy_threshold(&stretched, profile.threshold);
+    (stretched, threshold)
+}
+
 /// Applies the fixed robust bounds `(low_val, high_val)` to a density map
 /// using the exact legacy per-value mapping: non-finite, negative, and zero
 /// values become 0.0, everything else is `(v - low_val) / range` clamped to

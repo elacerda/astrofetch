@@ -3,6 +3,7 @@ use super::color::{galaxy_foreground_ansi, ColorPalette};
 use super::{
     scale_visible, star_field_seed, star_glyph_for_cell, twinkle_star_glyph, StarTwinkleFrame,
 };
+use crate::elliptical::{EllipticalHaloOverlay, HaloOverlayCell};
 
 /// Shade glyphs ordered from lowest to highest intensity.
 const SHADE_GLYPHS: &[char] = &['░', '▒', '▓', '█'];
@@ -23,10 +24,42 @@ pub fn render_shades(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
-    render_shades_with_twinkle(canvas, threshold, colors_enabled, palette, None, None)
+    render_shades_with_twinkle(canvas, threshold, colors_enabled, palette, None, None, None)
+}
+
+/// Renders shade art with an optional Elliptical B3.3 terminal halo
+/// overlay (no twinkle frame).
+///
+/// `overlay` is the optional Elliptical-only terminal halo overlay mask
+/// (see [`crate::elliptical::EllipticalHaloOverlay`]): on terminal cells
+/// where the normal galaxy glyph is absent it takes priority over the
+/// background star and renders exactly `░` (never `▒`/`▓`/`█`).
+/// Non-Elliptical renderers pass `None` and keep the legacy output
+/// byte-for-byte.
+pub(crate) fn render_shades_with_overlay(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    overlay: Option<&EllipticalHaloOverlay>,
+) -> Vec<String> {
+    render_shades_with_twinkle(
+        canvas,
+        threshold,
+        colors_enabled,
+        palette,
+        None,
+        None,
+        overlay,
+    )
 }
 
 /// Renders shade art with an optional deterministic star-twinkle frame.
+///
+/// `overlay` optionally adds the Elliptical B3.3 terminal halo overlay
+/// on terminal cells where the normal galaxy glyph is absent (see
+/// [`render_shades_with_overlay`]); `None` keeps the legacy behavior.
+/// The overlay never participates in the star-field seed.
 pub(crate) fn render_shades_with_twinkle(
     canvas: &[Vec<f64>],
     threshold: f64,
@@ -34,6 +67,7 @@ pub(crate) fn render_shades_with_twinkle(
     palette: ColorPalette,
     frame: Option<StarTwinkleFrame>,
     star_canvas: Option<&[Vec<f64>]>,
+    overlay: Option<&EllipticalHaloOverlay>,
 ) -> Vec<String> {
     // The background-star decision is pinned to the reference star canvas
     // when one is supplied (A5), so the star field never re-rolls between
@@ -73,37 +107,46 @@ pub(crate) fn render_shades_with_twinkle(
                     line.push_plain(ch);
                 }
             } else {
-                // Nenhuma galáxia visível - usa estrela de fundo ou espaço
-                // The star decision reads the (pinned) star canvas, not the
-                // per-frame structure canvas.
-                let star_top = star_source
-                    .get(y)
-                    .and_then(|row| row.get(x))
-                    .copied()
-                    .unwrap_or(0.0);
-                let star_bottom = star_source
-                    .get(y + 1)
-                    .and_then(|row| row.get(x))
-                    .copied()
-                    .unwrap_or(0.0);
-                if let Some(star_ch) =
-                    star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed)
-                        .and_then(|base| {
-                            frame.map_or(Some(base), |frame| {
-                                twinkle_star_glyph(
-                                    Some(base),
-                                    frame.scene_seed,
-                                    x,
-                                    y / 2,
-                                    frame.frame_index,
-                                    frame.frame_count,
-                                )
-                            })
-                        })
+                // Nenhuma galáxia visível: halo overlay (B3.3), estrela
+                // de fundo ou espaço. The star decision reads the
+                // (pinned) star canvas, not the per-frame structure
+                // canvas; the overlay never participates in the
+                // star-field seed.
+                if let Some(overlay_ch) = overlay
+                    .map(|o| o.cell(x, y / 2))
+                    .and_then(HaloOverlayCell::shade_glyph)
                 {
-                    line.push_plain(star_ch);
+                    line.push_plain(overlay_ch);
                 } else {
-                    line.push_plain(' ');
+                    let star_top = star_source
+                        .get(y)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let star_bottom = star_source
+                        .get(y + 1)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    if let Some(star_ch) =
+                        star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed)
+                            .and_then(|base| {
+                                frame.map_or(Some(base), |frame| {
+                                    twinkle_star_glyph(
+                                        Some(base),
+                                        frame.scene_seed,
+                                        x,
+                                        y / 2,
+                                        frame.frame_index,
+                                        frame.frame_count,
+                                    )
+                                })
+                            })
+                    {
+                        line.push_plain(star_ch);
+                    } else {
+                        line.push_plain(' ');
+                    }
                 }
             }
         }

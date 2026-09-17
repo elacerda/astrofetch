@@ -1,5 +1,9 @@
 use crate::cli::{Args, ArtModel, Command, RendererChoice};
 use crate::display_plan::{DisplayPlanner, OutputMode, PlannerRequest};
+use crate::elliptical::{
+    build_elliptical_halo_overlay, prepare_elliptical_density, EllipticalGalaxyConfig,
+    EllipticalHaloOverlay,
+};
 use crate::engine::ArtModel as EngineModel;
 use crate::error::AppError;
 use crate::galaxy::{spiral_animation_phase_rad, PreparedSpiralScene};
@@ -7,8 +11,9 @@ use crate::layout::compose_layout;
 use crate::render::topology::CellSamplingShape;
 use crate::render::{
     prepare_density, prepare_density_with_shape, prepare_galaxy_density_pinned, render_ascii,
-    render_ascii_with_twinkle, render_half_blocks, render_half_blocks_with_twinkle,
-    render_quadrant_with_stars, render_quadrant_with_stars_at_frame, render_shades,
+    render_ascii_with_twinkle, render_half_blocks, render_half_blocks_with_overlay,
+    render_half_blocks_with_twinkle, render_quadrant_with_stars,
+    render_quadrant_with_stars_at_frame, render_shades, render_shades_with_overlay,
     render_shades_with_twinkle, render_starfield, render_starfield_with_twinkle,
     robust_normalization_bounds, sampling_shape_for, ColorPalette, EffectiveRenderer,
     PreparedDensity, RenderProfile, StarTwinkleFrame,
@@ -77,6 +82,13 @@ struct PreparedArt {
     palette: ColorPalette,
     /// A5: frozen Spiral scene for intermediate animation frames.
     spiral_animation: Option<SpiralAnimationPrep>,
+    /// B3.3: optional Elliptical-only terminal halo overlay mask (Seam A).
+    ///
+    /// Present only for Elliptical scenes rendered with the SHADE or
+    /// HALF-BLOCK renderer. It is a pure presentation layer: the prepared
+    /// density, the body threshold, and the star-field seed are all
+    /// computed without it.
+    halo_overlay: Option<EllipticalHaloOverlay>,
 }
 
 /// A5 Spiral intermediate-frame state (Spiral scenes only).
@@ -445,10 +457,20 @@ impl App {
                 bounds,
             }
         });
-        // HALF_BLOCK keeps the legacy preparation call bit-for-bit; only
-        // QUADRANT goes through the shape-aware preparation.
+        // B3.3: Elliptical morphology is frozen once per scene (the same
+        // concrete seed the static generation used) and drives both the
+        // halo-aware P2 preparation and the terminal overlay mask.
+        let elliptical_config = (resolved_model == EngineModel::Elliptical)
+            .then(|| EllipticalGalaxyConfig::for_scene_seed(scene_seed));
+        // HALF_BLOCK keeps the legacy preparation call bit-for-bit for
+        // every non-Elliptical model; only QUADRANT goes through the
+        // shape-aware preparation. Elliptical with a halo uses the frozen
+        // B3.3 P2 preparation (pinned S_body bounds, unchanged Gamma(0.7)
+        // and TargetOccupancy(0.23)).
         let prepared = if shape == CellSamplingShape::QUADRANT {
             prepare_density_with_shape(density, profile, shape)
+        } else if let Some(config) = elliptical_config {
+            prepare_elliptical_density(density, profile, config)
         } else {
             prepare_density(density, profile)
         };
@@ -464,6 +486,24 @@ impl App {
             },
         };
 
+        // B3.3 (Seam A): the terminal halo overlay is an Elliptical-only,
+        // SHADE/HALF-BLOCK-only presentation mask built from the normal
+        // P2+G2 prepared canvas and threshold. The prepared density and
+        // threshold above are untouched by it.
+        let halo_overlay = match &prepared_density {
+            PreparedArtDensity::Galaxy { canvas, threshold }
+                if matches!(
+                    effective_renderer,
+                    EffectiveRenderer::HalfBlock | EffectiveRenderer::Shade
+                ) =>
+            {
+                elliptical_config.map(|config| {
+                    build_elliptical_halo_overlay(config, art_width, art_height, canvas, *threshold)
+                })
+            }
+            _ => None,
+        };
+
         Ok(PreparedArt {
             resolved_model,
             scene_seed,
@@ -475,6 +515,7 @@ impl App {
             colors_enabled,
             palette: effective_palette,
             spiral_animation,
+            halo_overlay,
         })
     }
 
@@ -536,10 +577,15 @@ impl App {
                         prepared.palette,
                         Some(frame),
                         star_canvas,
+                        prepared.halo_overlay.as_ref(),
                     ),
-                    None => {
-                        render_half_blocks(canvas, *threshold, effective_colors, prepared.palette)
-                    }
+                    None => render_half_blocks_with_overlay(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        prepared.halo_overlay.as_ref(),
+                    ),
                 })
             }
             (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::Shade) => {
@@ -551,8 +597,15 @@ impl App {
                         prepared.palette,
                         Some(frame),
                         star_canvas,
+                        prepared.halo_overlay.as_ref(),
                     ),
-                    None => render_shades(canvas, *threshold, effective_colors, prepared.palette),
+                    None => render_shades_with_overlay(
+                        canvas,
+                        *threshold,
+                        effective_colors,
+                        prepared.palette,
+                        prepared.halo_overlay.as_ref(),
+                    ),
                 })
             }
             (PreparedArtDensity::Galaxy { canvas, threshold }, EffectiveRenderer::Ascii) => {

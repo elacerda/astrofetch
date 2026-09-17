@@ -15,13 +15,17 @@ pub use ascii::render_ascii;
 pub(crate) use ascii::render_ascii_with_twinkle;
 pub use color::ColorPalette;
 pub use profile::{prepare_density, prepare_density_with_shape, PreparedDensity, RenderProfile};
-pub(crate) use profile::{prepare_galaxy_density_pinned, robust_normalization_bounds};
+pub(crate) use profile::{
+    prepare_galaxy_density_pinned, prepare_galaxy_density_pinned_with_threshold,
+    robust_normalization_bounds, Normalization,
+};
 pub(crate) use quadrant::{render_quadrant_with_stars, render_quadrant_with_stars_at_frame};
 pub use shade::render_shades;
-pub(crate) use shade::render_shades_with_twinkle;
+pub(crate) use shade::{render_shades_with_overlay, render_shades_with_twinkle};
 pub use starfield::render_starfield;
 pub(crate) use starfield::render_starfield_with_twinkle;
 
+use crate::elliptical::{EllipticalHaloOverlay, HaloOverlayCell};
 use crate::engine::ArtModel;
 use crate::render::ansi::AnsiHalfBlockLine;
 use crate::render::topology::CellSamplingShape;
@@ -188,16 +192,49 @@ pub fn render_half_blocks(
     colors_enabled: bool,
     palette: ColorPalette,
 ) -> Vec<String> {
-    render_half_blocks_with_twinkle(canvas, threshold, colors_enabled, palette, None, None)
+    render_half_blocks_with_twinkle(canvas, threshold, colors_enabled, palette, None, None, None)
 }
 
-/// Renders half-block art with an optional deterministic star-twinkle frame.
+/// Renders half-block art with an optional Elliptical B3.3 terminal halo
+/// overlay (no twinkle frame).
 ///
-/// `star_canvas` optionally pins the background-star decision (star seed and
-/// per-cell local density) to a reference canvas, so that a frame sequence
-/// whose structure canvas varies per frame still shows the exact same
-/// background stars. When `None`, the star decision uses `canvas` itself
-/// (the legacy behavior).
+/// `overlay` is the optional Elliptical-only terminal halo overlay mask
+/// (see [`crate::elliptical::EllipticalHaloOverlay`]): on terminal cells
+/// where the normal galaxy glyph is absent it takes priority over the
+/// background star and renders exactly one of `▀`/`▄` (never `█`).
+/// Non-Elliptical renderers pass `None` and keep the legacy output
+/// byte-for-byte.
+pub(crate) fn render_half_blocks_with_overlay(
+    canvas: &[Vec<f64>],
+    threshold: f64,
+    colors_enabled: bool,
+    palette: ColorPalette,
+    overlay: Option<&EllipticalHaloOverlay>,
+) -> Vec<String> {
+    render_half_blocks_with_twinkle(
+        canvas,
+        threshold,
+        colors_enabled,
+        palette,
+        None,
+        None,
+        overlay,
+    )
+}
+
+/// Renders half-block art with an optional deterministic star-twinkle
+/// frame.
+///
+/// `star_canvas` optionally pins the background-star decision (star seed
+/// and per-cell local density) to a reference canvas, so that a frame
+/// sequence whose structure canvas varies per frame still shows the
+/// exact same background stars. When `None`, the star decision uses
+/// `canvas` itself (the legacy behavior).
+///
+/// `overlay` optionally adds the Elliptical B3.3 terminal halo overlay
+/// on terminal cells where the normal galaxy glyph is absent (see
+/// [`render_half_blocks_with_overlay`]); `None` keeps the legacy
+/// behavior. The overlay never participates in the star-field seed.
 pub(crate) fn render_half_blocks_with_twinkle(
     canvas: &[Vec<f64>],
     threshold: f64,
@@ -205,6 +242,7 @@ pub(crate) fn render_half_blocks_with_twinkle(
     palette: ColorPalette,
     frame: Option<StarTwinkleFrame>,
     star_canvas: Option<&[Vec<f64>]>,
+    overlay: Option<&EllipticalHaloOverlay>,
 ) -> Vec<String> {
     let star_source = star_canvas.unwrap_or(canvas);
     let star_seed = star_field_seed(star_source);
@@ -231,6 +269,15 @@ pub(crate) fn render_half_blocks_with_twinkle(
             if !colors_enabled {
                 let galaxy_ch = glyph_for_half_block(top_visible, bottom_visible);
                 if galaxy_ch == ' ' {
+                    // B3.3: the halo overlay takes priority over the
+                    // background star, but never over a galaxy glyph.
+                    if let Some(overlay_ch) = overlay
+                        .map(|o| o.cell(x, y / 2))
+                        .and_then(HaloOverlayCell::half_block_glyph)
+                    {
+                        line.push_cell(overlay_ch, None, None);
+                        continue;
+                    }
                     // Only inject background star if neither half is visible.
                     // The star decision reads the (pinned) star canvas, not
                     // the per-frame structure canvas.
@@ -279,27 +326,36 @@ pub(crate) fn render_half_blocks_with_twinkle(
                 let fg = galaxy_foreground_ansi(palette, bottom);
                 line.push_cell('▄', Some(fg), None);
             } else {
-                // Neither visible: plain space or background star
-                // Always emit a cell to preserve terminal width. The star
-                // decision reads the (pinned) star canvas.
-                let star_top = star_source
-                    .get(y)
-                    .and_then(|row| row.get(x))
-                    .copied()
-                    .unwrap_or(0.0);
-                let star_bottom = star_source
-                    .get(y + 1)
-                    .and_then(|row| row.get(x))
-                    .copied()
-                    .unwrap_or(0.0);
-                let ch = maybe_twinkle_star(
-                    star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
-                    x,
-                    y / 2,
-                    frame,
-                )
-                .unwrap_or(' ');
-                line.push_cell(ch, None, None);
+                // Neither visible: halo overlay (B3.3), plain space, or
+                // background star. Always emit a cell to preserve
+                // terminal width. The star decision reads the (pinned)
+                // star canvas; the overlay never participates in the
+                // star-field seed.
+                if let Some(overlay_ch) = overlay
+                    .map(|o| o.cell(x, y / 2))
+                    .and_then(HaloOverlayCell::half_block_glyph)
+                {
+                    line.push_cell(overlay_ch, None, None);
+                } else {
+                    let star_top = star_source
+                        .get(y)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let star_bottom = star_source
+                        .get(y + 1)
+                        .and_then(|row| row.get(x))
+                        .copied()
+                        .unwrap_or(0.0);
+                    let ch = maybe_twinkle_star(
+                        star_glyph_for_cell(x, y / 2, star_top, star_bottom, threshold, star_seed),
+                        x,
+                        y / 2,
+                        frame,
+                    )
+                    .unwrap_or(' ');
+                    line.push_cell(ch, None, None);
+                }
             }
         }
 
@@ -950,6 +1006,7 @@ mod tests {
                     DEFAULT_PALETTE,
                     frame,
                     None,
+                    None,
                 ),
             ),
             (
@@ -960,6 +1017,7 @@ mod tests {
                     false,
                     DEFAULT_PALETTE,
                     frame,
+                    None,
                     None,
                 ),
             ),
