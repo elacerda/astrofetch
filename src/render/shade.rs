@@ -1,5 +1,5 @@
 use super::ansi::AnsiForegroundLine;
-use super::color::{galaxy_foreground_ansi, ColorPalette};
+use super::color::{galaxy_foreground_ansi, halo_foreground_ansi, ColorPalette};
 use super::{
     scale_visible, star_field_seed, star_glyph_for_cell, twinkle_star_glyph, StarTwinkleFrame,
 };
@@ -33,9 +33,11 @@ pub fn render_shades(
 /// `overlay` is the optional Elliptical-only terminal halo overlay mask
 /// (see [`crate::elliptical::EllipticalHaloOverlay`]): on terminal cells
 /// where the normal galaxy glyph is absent it takes priority over the
-/// background star and renders exactly `░` (never `▒`/`▓`/`█`).
-/// Non-Elliptical renderers pass `None` and keep the legacy output
-/// byte-for-byte.
+/// background star and renders exactly `░` (never `▒`/`▓`/`█`). In color
+/// mode the glyph receives the faint (level-0) galaxy foreground via
+/// [`halo_foreground_ansi`]; in no-color mode it stays plain and the
+/// output is byte-for-byte the pre-coloring behavior. Non-Elliptical
+/// renderers pass `None` and keep the legacy output byte-for-byte.
 pub(crate) fn render_shades_with_overlay(
     canvas: &[Vec<f64>],
     threshold: f64,
@@ -116,7 +118,16 @@ pub(crate) fn render_shades_with_twinkle(
                     .map(|o| o.cell(x, y / 2))
                     .and_then(HaloOverlayCell::shade_glyph)
                 {
-                    line.push_plain(overlay_ch);
+                    // B3.3: the halo skirt is not a star and must not
+                    // inherit the terminal default foreground; in color
+                    // mode it uses the faint (level-0) galaxy foreground
+                    // from the existing palette machinery. No-color mode
+                    // keeps the plain glyph (byte-identical behavior).
+                    if colors_enabled {
+                        line.push_styled(overlay_ch, halo_foreground_ansi(palette));
+                    } else {
+                        line.push_plain(overlay_ch);
+                    }
                 } else {
                     let star_top = star_source
                         .get(y)

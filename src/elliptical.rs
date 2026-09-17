@@ -4150,8 +4150,8 @@ mod tests {
     // ── B3.3 outer halo (frozen contract) ─────────────────────────
 
     use crate::render::{
-        render_half_blocks_with_overlay, render_shades_with_overlay, robust_normalization_bounds,
-        ColorPalette,
+        halo_foreground_ansi, render_half_blocks_with_overlay, render_shades_with_overlay,
+        robust_normalization_bounds, ColorPalette,
     };
 
     /// B3.3 test helper: the prepared 40×20 Elliptical scene (P2+G2
@@ -5114,6 +5114,356 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// Decodes one rendered line into `(glyph, fg, bg)` cells, where
+    /// `fg`/`bg` are the raw SGR payloads (e.g. `"2;38;5;17"`) active on
+    /// that cell, or `None` for the terminal default. Used to verify the
+    /// B3.3 halo overlay color contract ANSI sequence by ANSI sequence.
+    /// Panics on malformed ANSI or a cell-count mismatch.
+    fn decode_line_cells(line: &str, width: usize) -> Vec<(char, Option<&str>, Option<&str>)> {
+        let mut cells: Vec<(char, Option<&str>, Option<&str>)> = Vec::new();
+        let mut fg: Option<&str> = None;
+        let mut bg: Option<&str> = None;
+        let mut rest = line;
+        while let Some(i) = rest.find('\x1b') {
+            for ch in rest[..i].chars() {
+                cells.push((ch, fg, bg));
+            }
+            let seq = &rest[i..];
+            let end = seq
+                .find('m')
+                .expect("ANSI sequence must terminate with 'm'");
+            let payload = &seq[2..end];
+            if payload == "0" {
+                fg = None;
+                bg = None;
+            } else if payload.starts_with("48;5;") {
+                bg = Some(payload);
+            } else if payload.starts_with("38;5;") || payload.starts_with("2;38;5;") {
+                fg = Some(payload);
+            } else {
+                panic!("unexpected SGR payload {payload:?} in {line:?}");
+            }
+            rest = &seq[end + 1..];
+        }
+        for ch in rest.chars() {
+            cells.push((ch, fg, bg));
+        }
+        assert_eq!(
+            cells.len(),
+            width,
+            "line must decode to exactly {width} cells: {line:?}"
+        );
+        cells
+    }
+
+    /// Raw SGR payload of one SGR sequence (`"\x1b[...m"`).
+    fn sgr_payload(seq: &str) -> &str {
+        seq.strip_prefix("\x1b[")
+            .and_then(|s| s.strip_suffix('m'))
+            .expect("SGR sequence")
+    }
+
+    /// Frozen no-color SHADE art (40x20, seed 3903) exactly as emitted by
+    /// commit 21ce337 — the byte-identity anchor of the B3.3 halo overlay
+    /// no-color contract.
+    const E3903_SHADE_NO_COLOR_21CE337: [&str; 20] = [
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                           .            ",
+        "                 ░░░░░░░░░              ",
+        "            ░░░░░░░░░░░░░░░░░░          ",
+        "          ░░░░░░░░░░░░░░░░░░░░░░        ",
+        "         ░░░░░░░▒▒▒▒▒▒▒▒▒▒░░░░░░░       ",
+        "        ░░░░░░▒▒▒▒▓▓▓▓▓▓▒▒▒▒░░░░░       ",
+        "        ░░░░░▒▒▒▓▓█████▓▓▒▒▒▒░░░░       ",
+        "        ░░░░▒▒▒▒▓▓█████▓▓▒▒▒▒░░░░       ",
+        "        ░░░░░▒▒▒▓▓▓▓█▓▓▓▒▒▒▒░░░░░       ",
+        "        ░░░░░░▒▒▒▒▒▒▒▒▒▒▒▒░░░░░░░       ",
+        "         ░░░░░░░░▒▒▒▒▒▒░░░░░░░░░        ",
+        "          ░░░░░░░░░░░░░░░░░░░░          ",
+        "             ░░░░░░░░░░░░░░             ",
+        "                                        ",
+        "                                        ",
+        "             .                          ",
+        "                                        ",
+    ];
+
+    /// Frozen no-color SHADE art (40x20, seed 1209) exactly as emitted by
+    /// commit 21ce337.
+    const E1209_SHADE_NO_COLOR_21CE337: [&str; 20] = [
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                ░░░         .           ",
+        "            ░░░░░░░░░░░░░               ",
+        "           ░░░░░░░░░░░░░░░░             ",
+        "         ░░░░░░░░░░░░░░░░░░░░           ",
+        "         ░░░░░░░░░▒▒▒░░░░░░░░░░         ",
+        "         ░░░░░░░▒▒▒▒▓▒▒▒░░░░░░░░        ",
+        "         ░░░░░░▒▒▓▓███▓▒▒░░░░░░░        ",
+        "         ░░░░░░▒▒▓▓███▓▓▒▒░░░░░░░       ",
+        "         ░░░░░░░▒▒▒▓▓▓▓▒▒▒░░░░░░░ *     ",
+        "          ░░░░░░░░▒▒▒▒▒▒░░░░░░░░░       ",
+        "           ░░░░░░░░░░░░░░░░░░░░░        ",
+        "             ░░░░░░░░░░░░░░░░░░░        ",
+        "              ░░░░░░░░░░░░░░░░          ",
+        "                  ░░░░░░░░░░            ",
+        "                               .        ",
+        "                                     .  ",
+        "                                 *      ",
+    ];
+
+    /// Frozen no-color HALF-BLOCK art (40x20, seed 3903) exactly as
+    /// emitted by commit 21ce337.
+    const E3903_HALF_BLOCK_NO_COLOR_21CE337: [&str; 20] = [
+        "                                        ",
+        "                                        ",
+        "                                        ",
+        "                           .            ",
+        "                 ▄▄▄▄▄▄▄▄▄              ",
+        "            ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄          ",
+        "          ▄▄▄▄▄████████████▄▄▄▄▄        ",
+        "         ▄▄▄██████████████████▄▄▄       ",
+        "        ▄▄█████████████████████▄▄       ",
+        "        ▄███████████████████████▄       ",
+        "        ▄███████████████████████▀       ",
+        "        ▀██████████████████████▀▀       ",
+        "        ▀▀████████████████████▀▀▀       ",
+        "         ▀▀▀████████████████▀▀▀▀        ",
+        "          ▀▀▀▀▀▀▀██████▀▀▀▀▀▀▀          ",
+        "             ▀▀▀▀▀▀▀▀▀▀▀▀▀▀             ",
+        "                                        ",
+        "                                        ",
+        "             .                          ",
+        "                                        ",
+    ];
+
+    /// No-color SHADE byte identity: the overlay render must be
+    /// byte-identical to the accepted commit 21ce337 output for seeds
+    /// 3903 and 1209, contain no ANSI at all, and keep the overlay glyph
+    /// plain (terminal default foreground).
+    #[test]
+    fn test_b33_shade_no_color_byte_identical_to_21ce337() {
+        let cases: [(u64, &[&str; 20]); 2] = [
+            (3903, &E3903_SHADE_NO_COLOR_21CE337),
+            (1209, &E1209_SHADE_NO_COLOR_21CE337),
+        ];
+        for (seed, expected) in cases {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(!overlay.is_empty(), "seed {seed} must have an overlay");
+            let rendered = render_shades_with_overlay(
+                &canvas,
+                threshold,
+                false,
+                ColorPalette::Nebula,
+                Some(&overlay),
+            );
+            let actual: Vec<&str> = rendered.iter().map(String::as_str).collect();
+            assert_eq!(
+                actual,
+                expected.to_vec(),
+                "seed {seed}: no-color SHADE overlay render drifted from 21ce337"
+            );
+            for line in &rendered {
+                assert!(!line.contains('\x1b'), "no-color render must have no ANSI");
+            }
+        }
+    }
+
+    /// No-color HALF-BLOCK byte identity (seed 3903, same 21ce337 anchor).
+    #[test]
+    fn test_b33_halfblock_no_color_byte_identical_to_21ce337() {
+        let (_config, canvas, threshold, overlay) = b33_prepared_overlay(3903);
+        assert!(!overlay.is_empty());
+        let rendered = render_half_blocks_with_overlay(
+            &canvas,
+            threshold,
+            false,
+            ColorPalette::Nebula,
+            Some(&overlay),
+        );
+        let actual: Vec<&str> = rendered.iter().map(String::as_str).collect();
+        assert_eq!(
+            actual,
+            E3903_HALF_BLOCK_NO_COLOR_21CE337.to_vec(),
+            "no-color HALF-BLOCK overlay render drifted from 21ce337"
+        );
+        for line in &rendered {
+            assert!(!line.contains('\x1b'), "no-color render must have no ANSI");
+        }
+    }
+
+    /// Color SHADE halo: every overlay cell is exactly `░` carrying an
+    /// explicit (theme independent) faint level-0 galaxy foreground from
+    /// the existing palette machinery — never the terminal default.
+    #[test]
+    fn test_b33_shade_color_halo_uses_faint_galaxy_foreground() {
+        let faint = sgr_payload(halo_foreground_ansi(ColorPalette::Nebula));
+        for seed in [3903_u64, 1209] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(!overlay.is_empty(), "seed {seed} must have an overlay");
+            let rendered = render_shades_with_overlay(
+                &canvas,
+                threshold,
+                true,
+                ColorPalette::Nebula,
+                Some(&overlay),
+            );
+            let mut saw_overlay = false;
+            for (ty, line) in rendered.iter().enumerate() {
+                let mut line_has_overlay = false;
+                let cells = decode_line_cells(line, 40);
+                for (tx, (ch, fg, bg)) in cells.iter().enumerate() {
+                    assert!(
+                        bg.is_none(),
+                        "seed {seed} ({tx},{ty}): SHADE never sets a background"
+                    );
+                    if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                        continue;
+                    }
+                    saw_overlay = true;
+                    line_has_overlay = true;
+                    assert_eq!(*ch, '░', "seed {seed} ({tx},{ty})");
+                    assert_eq!(
+                        *fg,
+                        Some(faint),
+                        "seed {seed} ({tx},{ty}): halo must carry the explicit faint galaxy foreground"
+                    );
+                }
+                if line_has_overlay {
+                    assert!(
+                        line.contains('\x1b'),
+                        "seed {seed} row {ty}: halo line must carry an explicit ANSI foreground"
+                    );
+                }
+            }
+            assert!(saw_overlay, "seed {seed}: no overlay cells rendered");
+        }
+    }
+
+    /// Color HALF-BLOCK halo: every overlay cell is exactly `▀`/`▄`
+    /// (never `█`) carrying the explicit faint level-0 galaxy
+    /// foreground, with NO background color — the unoccupied half must
+    /// keep the terminal background.
+    #[test]
+    fn test_b33_halfblock_color_halo_faint_foreground_no_background() {
+        let faint = sgr_payload(halo_foreground_ansi(ColorPalette::Nebula));
+        let (_config, canvas, threshold, overlay) = b33_prepared_overlay(3903);
+        assert!(!overlay.is_empty());
+        let rendered = render_half_blocks_with_overlay(
+            &canvas,
+            threshold,
+            true,
+            ColorPalette::Nebula,
+            Some(&overlay),
+        );
+        let mut saw_top = false;
+        let mut saw_bottom = false;
+        for (ty, line) in rendered.iter().enumerate() {
+            let cells = decode_line_cells(line, 40);
+            for (tx, (ch, fg, bg)) in cells.iter().enumerate() {
+                if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                    continue;
+                }
+                assert!(
+                    matches!(*ch, '▀' | '▄'),
+                    "seed 3903 ({tx},{ty}): half-block halo glyph must be ▀ or ▄, never █"
+                );
+                if *ch == '▀' {
+                    saw_top = true;
+                } else {
+                    saw_bottom = true;
+                }
+                assert_eq!(
+                    *fg,
+                    Some(faint),
+                    "seed 3903 ({tx},{ty}): halo must carry the explicit faint galaxy foreground"
+                );
+                assert!(
+                    bg.is_none(),
+                    "seed 3903 ({tx},{ty}): no background color on the unoccupied half"
+                );
+            }
+        }
+        assert!(
+            saw_top && saw_bottom,
+            "seed 3903 must exercise both overlay halves"
+        );
+    }
+
+    /// Color-mode star/body invariance: the base (no overlay) render and
+    /// the overlay render are identical outside the overlay cells — every
+    /// cell keeps its exact glyph AND its exact color (stars stay plain,
+    /// body keeps its density-mapped foreground).
+    #[test]
+    fn test_b33_color_stars_and_body_unchanged_outside_overlay() {
+        for seed in [3903_u64, 1209, 207] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(!overlay.is_empty(), "seed {seed} must have an overlay");
+            let palette = ColorPalette::Nebula;
+
+            let base = render_shades_with_overlay(&canvas, threshold, true, palette, None);
+            let with =
+                render_shades_with_overlay(&canvas, threshold, true, palette, Some(&overlay));
+            for (ty, (b, w)) in base.iter().zip(with.iter()).enumerate() {
+                let bc = decode_line_cells(b, 40);
+                let wc = decode_line_cells(w, 40);
+                for tx in 0..40 {
+                    if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                        assert_eq!(
+                            bc[tx], wc[tx],
+                            "seed {seed} ({tx},{ty}): SHADE color render changed outside the overlay"
+                        );
+                    }
+                }
+            }
+
+            let base = render_half_blocks_with_overlay(&canvas, threshold, true, palette, None);
+            let with =
+                render_half_blocks_with_overlay(&canvas, threshold, true, palette, Some(&overlay));
+            for (ty, (b, w)) in base.iter().zip(with.iter()).enumerate() {
+                let bc = decode_line_cells(b, 40);
+                let wc = decode_line_cells(w, 40);
+                for tx in 0..40 {
+                    if overlay.cell(tx, ty) == HaloOverlayCell::Empty {
+                        assert_eq!(
+                            bc[tx], wc[tx],
+                            "seed {seed} ({tx},{ty}): HALF-BLOCK color render changed outside the overlay"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Color-mode empty-overlay identity (non-Elliptical path): a
+    /// zero-overlay render is byte-identical to the base render, so
+    /// renderers that never receive an overlay keep their legacy color
+    /// output.
+    #[test]
+    fn test_b33_empty_overlay_color_identity() {
+        for seed in [1743_u64, 1976] {
+            let (_config, canvas, threshold, overlay) = b33_prepared_overlay(seed);
+            assert!(overlay.is_empty(), "seed {seed} must have an empty overlay");
+            let palette = ColorPalette::Nebula;
+            let base = render_shades_with_overlay(&canvas, threshold, true, palette, None);
+            let with =
+                render_shades_with_overlay(&canvas, threshold, true, palette, Some(&overlay));
+            assert_eq!(
+                base, with,
+                "seed {seed}: empty SHADE overlay (color) must be byte-identical"
+            );
+            let base = render_half_blocks_with_overlay(&canvas, threshold, true, palette, None);
+            let with =
+                render_half_blocks_with_overlay(&canvas, threshold, true, palette, Some(&overlay));
+            assert_eq!(
+                base, with,
+                "seed {seed}: empty HALF-BLOCK overlay (color) must be byte-identical"
+            );
         }
     }
 

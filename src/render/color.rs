@@ -59,6 +59,27 @@ pub(super) fn galaxy_foreground_ansi(palette: ColorPalette, value: f64) -> &'sta
     }
 }
 
+/// Faint foreground color of the Elliptical B3.3 terminal halo overlay.
+///
+/// The halo skirt is a presentation-only layer outside the rendered
+/// body silhouette, so it reuses the existing galaxy ramp instead of a
+/// standalone halo palette: it is exactly the level-0 band
+/// (`value < 0.16`) of [`galaxy_foreground_ansi`], the same
+/// faint/outer low-intensity color semantics the faintest visible
+/// Elliptical body cell receives.
+///
+/// The returned sequence always sets an explicit xterm-256 foreground
+/// (theme independent: the appearance never depends on the terminal's
+/// default foreground being light or dark) and never sets a
+/// background.
+///
+/// # Side effects
+/// None (pure lookup).
+pub(crate) fn halo_foreground_ansi(palette: ColorPalette) -> &'static str {
+    // Any value inside the level-0 band (< 0.16) maps to level 0.
+    galaxy_foreground_ansi(palette, 0.0)
+}
+
 /// Galaxies use background color based on density value.
 ///
 /// For `ColorPalette::Nebula`, uses the same indices as foreground but with
@@ -421,6 +442,42 @@ mod tests {
                 value, expected, actual
             );
         }
+    }
+
+    // ===== Halo overlay foreground (B3.3) =====
+
+    /// The halo overlay reuses the level-0 (faintest visible body)
+    /// galaxy foreground for every palette; no standalone halo palette.
+    #[test]
+    fn test_halo_foreground_ansi_reuses_level_zero_galaxy_foreground() {
+        for palette in [
+            ColorPalette::Nebula,
+            ColorPalette::Cividis,
+            ColorPalette::Amber,
+            ColorPalette::Mono,
+        ] {
+            assert_eq!(
+                halo_foreground_ansi(palette),
+                galaxy_foreground_ansi(palette, 0.0),
+                "{palette:?}: halo must be the level-0 galaxy foreground"
+            );
+        }
+        // Any value inside the level-0 band (< 0.16) maps to level 0.
+        assert_eq!(
+            halo_foreground_ansi(ColorPalette::Nebula),
+            galaxy_foreground_ansi(ColorPalette::Nebula, 0.159)
+        );
+        // Frozen level-0 sequences (explicit xterm-256, no background).
+        assert_eq!(
+            halo_foreground_ansi(ColorPalette::Nebula),
+            "\x1b[2;38;5;17m"
+        );
+        assert_eq!(
+            halo_foreground_ansi(ColorPalette::Cividis),
+            "\x1b[2;38;5;17m"
+        );
+        assert_eq!(halo_foreground_ansi(ColorPalette::Amber), "\x1b[2;38;5;52m");
+        assert_eq!(halo_foreground_ansi(ColorPalette::Mono), "\x1b[2;38;5;236m");
     }
 
     // ===== Galaxy background color tests =====

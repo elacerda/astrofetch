@@ -31,6 +31,11 @@ use crate::render::ansi::AnsiHalfBlockLine;
 use crate::render::topology::CellSamplingShape;
 use crate::seed::{derive_feature_seed, ANIMATION_STAR_TWINKLE_V1};
 use color::{galaxy_background_ansi, galaxy_foreground_ansi};
+
+/// Faint (level-0) galaxy foreground for the Elliptical B3.3 halo
+/// overlay; re-exported so the Elliptical test module can reference the
+/// same palette machinery the renderers use.
+pub(crate) use color::halo_foreground_ansi;
 use hash::{hash_cell, hash_to_unit};
 
 /// Returns the appropriate glyph for half-block rendering based on visibility.
@@ -201,7 +206,11 @@ pub fn render_half_blocks(
 /// `overlay` is the optional Elliptical-only terminal halo overlay mask
 /// (see [`crate::elliptical::EllipticalHaloOverlay`]): on terminal cells
 /// where the normal galaxy glyph is absent it takes priority over the
-/// background star and renders exactly one of `▀`/`▄` (never `█`).
+/// background star and renders exactly one of `▀`/`▄` (never `█`). In
+/// color mode the glyph receives the faint (level-0) galaxy foreground
+/// via [`halo_foreground_ansi`]; no background color is set, so the
+/// unoccupied half of the cell keeps the terminal background. No-color
+/// mode keeps the plain glyph and the byte-for-byte legacy behavior.
 /// Non-Elliptical renderers pass `None` and keep the legacy output
 /// byte-for-byte.
 pub(crate) fn render_half_blocks_with_overlay(
@@ -335,7 +344,12 @@ pub(crate) fn render_half_blocks_with_twinkle(
                     .map(|o| o.cell(x, y / 2))
                     .and_then(HaloOverlayCell::half_block_glyph)
                 {
-                    line.push_cell(overlay_ch, None, None);
+                    // B3.3: the halo skirt must not inherit the terminal
+                    // default foreground; in color mode it uses the
+                    // faint (level-0) galaxy foreground. No background is
+                    // set, so the unoccupied half keeps the terminal
+                    // background.
+                    line.push_cell(overlay_ch, Some(halo_foreground_ansi(palette)), None);
                 } else {
                     let star_top = star_source
                         .get(y)
